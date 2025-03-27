@@ -151,6 +151,7 @@ pub struct Replica {
     requests: Vec<message::Request>,
     // only primary maintains. the last proposed block number
     propose_num: BlockNum,
+    ticked_propose_num: BlockNum,
     // every block up to commit_num is committed. blocks above may also commit-able
     // but not checked yet
     commit_num: BlockNum,
@@ -168,6 +169,7 @@ impl Replica {
             commit_votes: Default::default(),
             requests: Default::default(),
             propose_num: 0,
+            ticked_propose_num: 0,
             commit_num: 0,
         }
     }
@@ -212,6 +214,11 @@ impl Replica {
             sig: Default::default(), // TODO
         }
     }
+
+    fn can_propose(&mut self) -> bool {
+        !self.requests.is_empty()
+            && self.propose_num - self.commit_num < self.config.max_num_inflight
+    }
 }
 
 fn block_digest(requests: &[message::Request]) -> Digest {
@@ -230,9 +237,8 @@ pub enum ReplicaAction {
     SendToReplica(ReplicaId, ToReplica),
     SendToAllReplicas(ToReplica), // except loopback
 
-    // same as SendToAllReplicas(ToReplica::PrePrepare(block)) + runtime calls
-    // on_propose() afterward
-    Propose(message::PrePrepare),
+    // same as SendToAllReplicas(ToReplica::PrePrepare(block)) for each block
+    Propose(Vec<message::PrePrepare>),
     // same as SendToAllReplicas(ToReplica::Prepare(vote)) + runtime calls
     // insert_prepare(vote) afterward
     Prepare(message::Vote),
@@ -260,38 +266,37 @@ impl Replica {
             );
         }
         self.requests.push(request);
-        self.propose_block()
+        self.propose_blocks()
     }
 
-    fn propose_block(&mut self) -> ReplicaAction {
+    fn propose_blocks(&mut self) -> ReplicaAction {
         assert!(self.is_primary());
-        if self.requests.is_empty()
-            || self.propose_num - self.commit_num >= self.config.max_num_inflight
-        {
+        if !self.can_propose() {
             ReplicaAction::Nop
         } else {
-            self.propose_num += 1;
-            let requests = self
-                .requests
-                .drain(..self.config.max_batch_size.min(self.requests.len()))
-                .collect::<Vec<_>>(); // TODO
-            let pre_prepare = message::PrePrepare {
-                view_num: self.view_num,
-                block_num: self.propose_num,
-                digest: block_digest(&requests),
-                sig: Default::default(), // TODO
-                requests,
-            };
-            let replaced = self
-                .blocks
-                .insert(pre_prepare.block_num, pre_prepare.clone());
-            assert!(replaced.is_none());
-            ReplicaAction::Propose(pre_prepare)
+            let mut pre_prepares = Vec::new();
+            while {
+                self.propose_num += 1;
+                let requests = self
+                    .requests
+                    .drain(..self.config.max_batch_size.min(self.requests.len()))
+                    .collect::<Vec<_>>(); // TODO
+                let pre_prepare = message::PrePrepare {
+                    view_num: self.view_num,
+                    block_num: self.propose_num,
+                    digest: block_digest(&requests),
+                    sig: Default::default(), // TODO
+                    requests,
+                };
+                let replaced = self
+                    .blocks
+                    .insert(pre_prepare.block_num, pre_prepare.clone());
+                assert!(replaced.is_none());
+                pre_prepares.push(pre_prepare);
+                self.can_propose()
+            } {}
+            ReplicaAction::Propose(pre_prepares)
         }
-    }
-
-    pub fn on_propose(&mut self) -> ReplicaAction {
-        self.propose_block()
     }
 
     fn receive_pre_prepare(&mut self, pre_prepare: message::PrePrepare) -> ReplicaAction {
@@ -411,14 +416,27 @@ impl Replica {
 
     pub fn on_finalize(&mut self) -> ReplicaAction {
         if self.is_primary() {
-            self.propose_block()
+            self.propose_blocks()
         } else {
             ReplicaAction::Nop
         }
     }
 
     pub fn tick(&mut self) -> ReplicaAction {
-        todo!()
+        if self.is_primary() {
+            let action = if self.ticked_propose_num <= self.commit_num {
+                ReplicaAction::Nop
+            } else {
+                let pre_prepares = (self.commit_num + 1..=self.ticked_propose_num)
+                    .map(|block_num| self.blocks[&block_num].clone())
+                    .collect();
+                ReplicaAction::Propose(pre_prepares)
+            };
+            self.ticked_propose_num = self.propose_num;
+            action
+        } else {
+            ReplicaAction::Nop
+        }
     }
 }
 

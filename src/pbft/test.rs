@@ -137,10 +137,11 @@ impl System {
                 self.send_to_all_replica(message, Some(replica_id));
                 StepResult::ServerProgress
             }
-            ReplicaAction::Propose(pre_prepare) => {
-                self.send_to_all_replica(ToReplica::PrePrepare(pre_prepare), Some(replica_id));
-                let action = self.servers[replica_id as usize].0.on_propose();
-                self.handle_replica_action(replica_id, action)
+            ReplicaAction::Propose(pre_prepares) => {
+                for pre_prepare in pre_prepares {
+                    self.send_to_all_replica(ToReplica::PrePrepare(pre_prepare), Some(replica_id))
+                }
+                StepResult::ServerProgress
             }
             ReplicaAction::Prepare(vote) => {
                 self.send_to_all_replica(ToReplica::Prepare(vote.clone()), Some(replica_id));
@@ -182,6 +183,15 @@ impl System {
             }
         }
     }
+
+    fn exhaust(&mut self, max_num_step: u32) {
+        for _ in 0..max_num_step {
+            if self.step().is_none() {
+                return;
+            }
+        }
+        unreachable!()
+    }
 }
 
 #[test]
@@ -201,11 +211,7 @@ fn normal_1() {
             break;
         }
     }
-    let mut i = 0;
-    while system.step().is_some() {
-        assert!(i < 100);
-        i += 1
-    }
+    system.exhaust(100);
     let num_committed = system
         .servers
         .iter()
@@ -233,11 +239,7 @@ fn close_loop() {
             }
         }
     }
-    let mut i = 0;
-    while system.step().is_some() {
-        assert!(i < 100);
-        i += 1
-    }
+    system.exhaust(100);
     let num_committed = system
         .servers
         .iter()
@@ -266,11 +268,7 @@ fn concurrent_clients() {
             }
         }
     }
-    let mut i = 0;
-    while system.step().is_some() {
-        assert!(i < 100);
-        i += 1
-    }
+    system.exhaust(100);
     let num_committed = system
         .servers
         .iter()
@@ -302,11 +300,7 @@ fn batched() {
             }
         }
     }
-    let mut i = 0;
-    while system.step().is_some() {
-        assert!(i < 100);
-        i += 1
-    }
+    system.exhaust(100);
     let batch_proposal = system.servers.iter().all(|(replica, _)| {
         replica
             .blocks
@@ -344,11 +338,7 @@ fn concurrent_proposals(max_num_inflight: BlockNum, max_batch_size: usize) {
             }
         }
     }
-    let mut i = 0;
-    while system.step().is_some() {
-        assert!(i < 100);
-        i += 1
-    }
+    system.exhaust(100);
 }
 
 #[test]
@@ -364,4 +354,70 @@ fn concurrent_proposals_8() {
 #[test]
 fn concurrent_batched_proposals() {
     concurrent_proposals(4, 100)
+}
+
+fn drop_1(skip: impl Fn(&Event) -> bool) -> System {
+    let spec = Spec {
+        num_faulty: 1,
+        num_replica: 4,
+    };
+    let mut system = System::new(spec, 1);
+    let action = system.clients[0].invoke(b"hello".into());
+    system.handle_client_action(0, action);
+    while !system.events.is_empty() {
+        if skip(system.events.get(0).unwrap()) {
+            system.events.pop_front();
+            continue;
+        }
+        system.step();
+    }
+    // maybe tick every receiver twice?
+    let action = system.clients[0].tick();
+    system.handle_client_action(0, action);
+    let action = system.servers[0].0.tick();
+    system.handle_replica_action(0, action);
+    let action = system.clients[0].tick();
+    system.handle_client_action(0, action);
+    let action = system.servers[0].0.tick();
+    system.handle_replica_action(0, action);
+    for i in 0.. {
+        assert!(i < 100);
+        if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+            assert_eq!(client_id, 0);
+            assert_eq!(&result, b"hello");
+            break;
+        }
+    }
+    system
+}
+
+#[test]
+fn drop_request() {
+    drop_1(|event| matches!(event, Event::SendToReplica(_, ToReplica::Request(_))));
+}
+
+#[test]
+fn drop_reply() {
+    let system = drop_1(|event| matches!(event, Event::SendToClient(_, _)));
+    assert!(
+        system
+            .servers
+            .iter()
+            .all(|(replica, _)| replica.blocks.len() <= 1)
+    );
+}
+
+#[test]
+fn drop_pre_prepare() {
+    drop_1(|event| matches!(event, Event::SendToReplica(_, ToReplica::PrePrepare(_))));
+}
+
+#[test]
+fn drop_prepare() {
+    drop_1(|event| matches!(event, Event::SendToReplica(_, ToReplica::Prepare(_))));
+}
+
+#[test]
+fn drop_commit() {
+    drop_1(|event| matches!(event, Event::SendToReplica(_, ToReplica::Commit(_))));
 }
