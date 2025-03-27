@@ -97,7 +97,7 @@ impl Client {
     }
 
     pub fn receive(&mut self, reply: message::Reply) -> ClientAction {
-        if reply.seq != self.seq {
+        if reply.seq != self.seq || self.op.is_none() {
             return ClientAction::Nop;
         }
         // TODO verify signature
@@ -188,7 +188,7 @@ impl Replica {
     // `can_commit`?
     fn is_committed(&self, block_num: BlockNum) -> bool {
         let votes_len = self.commit_votes.get(&block_num).map(|votes| votes.len());
-        tracing::debug!(
+        tracing::trace!(
             self.config.id,
             block_num,
             is_prepared = self.is_prepared(block_num),

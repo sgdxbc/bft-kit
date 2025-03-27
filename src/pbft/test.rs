@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use test_log::test;
+
 use super::*;
 
 struct System {
@@ -199,6 +201,11 @@ fn normal_1() {
             break;
         }
     }
+    let mut i = 0;
+    while system.step().is_some() {
+        assert!(i < 100);
+        i += 1
+    }
     let num_committed = system
         .servers
         .iter()
@@ -208,8 +215,7 @@ fn normal_1() {
 }
 
 #[test]
-fn normal_close_loop() {
-    tracing_subscriber::fmt::init();
+fn close_loop() {
     let spec = Spec {
         num_faulty: 1,
         num_replica: 4,
@@ -227,10 +233,135 @@ fn normal_close_loop() {
             }
         }
     }
+    let mut i = 0;
+    while system.step().is_some() {
+        assert!(i < 100);
+        i += 1
+    }
     let num_committed = system
         .servers
         .iter()
         .filter(|(replica, _)| replica.is_committed(10))
         .count();
     assert!(num_committed >= 3)
+}
+
+#[test]
+fn concurrent_clients() {
+    let spec = Spec {
+        num_faulty: 1,
+        num_replica: 4,
+    };
+    let mut system = System::new(spec, 10);
+    for i in 0..10 {
+        let action = system.clients[i].invoke(format!("hello@{i}").into());
+        system.handle_client_action(i as _, action);
+    }
+    for _ in 0..10 {
+        for i in 0.. {
+            assert!(i < 100);
+            if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+                assert_eq!(&result, format!("hello@{client_id}").as_bytes());
+                break;
+            }
+        }
+    }
+    let mut i = 0;
+    while system.step().is_some() {
+        assert!(i < 100);
+        i += 1
+    }
+    let num_committed = system
+        .servers
+        .iter()
+        .filter(|(replica, _)| replica.is_committed(10))
+        .count();
+    assert!(num_committed >= 3)
+}
+
+#[test]
+fn batched() {
+    let spec = Spec {
+        num_faulty: 1,
+        num_replica: 4,
+    };
+    let mut system = System::new(spec, 10);
+    for (replica, _) in &mut system.servers {
+        replica.config.max_batch_size = 100
+    }
+    for i in 0..10 {
+        let action = system.clients[i].invoke(format!("hello@{i}").into());
+        system.handle_client_action(i as _, action);
+    }
+    for _ in 0..10 {
+        for i in 0.. {
+            assert!(i < 100);
+            if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+                assert_eq!(&result, format!("hello@{client_id}").as_bytes());
+                break;
+            }
+        }
+    }
+    let mut i = 0;
+    while system.step().is_some() {
+        assert!(i < 100);
+        i += 1
+    }
+    let batch_proposal = system.servers.iter().all(|(replica, _)| {
+        replica
+            .blocks
+            .values()
+            .any(|block| block.requests.len() > 1)
+    });
+    assert!(batch_proposal)
+}
+
+fn concurrent_proposals(max_num_inflight: BlockNum, max_batch_size: usize) {
+    let spec = Spec {
+        num_faulty: 1,
+        num_replica: 4,
+    };
+    let mut system = System::new(spec, 10);
+    for (replica, _) in &mut system.servers {
+        replica.config.max_num_inflight = max_num_inflight;
+        replica.config.max_batch_size = max_batch_size
+    }
+    for i in 0..10 {
+        let action = system.clients[i].invoke(format!("hello@{i}").into());
+        system.handle_client_action(i as _, action);
+    }
+    for num_replied in 0..10 {
+        for i in 0.. {
+            let threshold = if num_replied > 1 {
+                100
+            } else {
+                100 * max_num_inflight
+            };
+            assert!(i < threshold);
+            if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+                assert_eq!(&result, format!("hello@{client_id}").as_bytes());
+                break;
+            }
+        }
+    }
+    let mut i = 0;
+    while system.step().is_some() {
+        assert!(i < 100);
+        i += 1
+    }
+}
+
+#[test]
+fn concurrent_proposals_2() {
+    concurrent_proposals(2, 1)
+}
+
+#[test]
+fn concurrent_proposals_8() {
+    concurrent_proposals(8, 1)
+}
+
+#[test]
+fn concurrent_batched_proposals() {
+    concurrent_proposals(4, 100)
 }
