@@ -14,13 +14,13 @@ pub type BlockNum = u32;
 
 #[derive(Debug, Clone)]
 pub struct Spec {
-    pub num_faulty: usize,
-    pub num_replica: usize,
+    pub num_faulty: ReplicaId,
+    pub num_replica: ReplicaId,
 }
 
 impl Spec {
     fn primary(&self, view_num: ViewNum) -> ReplicaId {
-        (view_num as usize % self.num_replica) as _
+        (view_num % self.num_replica as ViewNum) as _
     }
 }
 
@@ -97,18 +97,22 @@ impl Client {
     }
 
     pub fn receive(&mut self, reply: message::Reply) -> ClientAction {
+        if reply.seq != self.seq {
+            return ClientAction::Nop;
+        }
         // TODO verify signature
         self.results.insert(reply.replica_id, reply.result.clone());
         if self
             .results
             .values()
             .filter(|&result| result == &reply.result)
-            .count()
+            .count() as ReplicaId
             == self.config.spec.num_faulty + 1
         {
             // paper does not specify how to keep track of current view, just arbitrarily
             // implement
             self.view_num = reply.view_num;
+            self.op = None;
             self.results.clear();
             ClientAction::Return(reply.result)
         } else {
@@ -121,6 +125,20 @@ impl Client {
 pub struct ReplicaConfig {
     pub spec: Spec,
     pub id: ReplicaId,
+
+    pub max_num_inflight: BlockNum,
+    pub max_batch_size: usize,
+}
+
+impl ReplicaConfig {
+    pub fn new_base(spec: Spec, id: ReplicaId) -> Self {
+        Self {
+            spec,
+            id,
+            max_num_inflight: 1,
+            max_batch_size: 1,
+        }
+    }
 }
 
 pub struct Replica {
@@ -162,16 +180,26 @@ impl Replica {
         self.commit_num >= block_num
             || self.blocks.contains_key(&block_num)
                 && self.prepare_votes.get(&block_num).is_some_and(|votes| {
-                    votes.len() + 1 >= self.config.spec.num_replica - self.config.spec.num_faulty
+                    votes.len() as ReplicaId + 1
+                        >= self.config.spec.num_replica - self.config.spec.num_faulty
                 })
     }
 
     // `can_commit`?
     fn is_committed(&self, block_num: BlockNum) -> bool {
+        let votes_len = self.commit_votes.get(&block_num).map(|votes| votes.len());
+        tracing::debug!(
+            self.config.id,
+            block_num,
+            is_prepared = self.is_prepared(block_num),
+            ?votes_len,
+            "is_committed?"
+        );
         self.commit_num >= block_num
             || self.is_prepared(block_num)
                 && self.commit_votes.get(&block_num).is_some_and(|votes| {
-                    votes.len() >= self.config.spec.num_replica - self.config.spec.num_faulty
+                    votes.len() as ReplicaId
+                        >= self.config.spec.num_replica - self.config.spec.num_faulty
                 })
     }
 
@@ -199,14 +227,18 @@ fn block_digest(requests: &[message::Request]) -> Digest {
 #[derive(Debug)]
 pub enum ReplicaAction {
     Nop,
-    Finalize(Vec<message::Request>),
     SendToReplica(ReplicaId, ToReplica),
     SendToAllReplicas(ToReplica), // except loopback
-    // same as SendToAllReplicas(ToReplica::Prepare(vote)) but insert_prepare(vote)
-    // will be called later
+
+    // same as SendToAllReplicas(ToReplica::PrePrepare(block)) + runtime calls
+    // on_propose() afterward
+    Propose(message::PrePrepare),
+    // same as SendToAllReplicas(ToReplica::Prepare(vote)) + runtime calls
+    // insert_prepare(vote) afterward
     Prepare(message::Vote),
     // similar to above but with insert_commit call
     Commit(message::Vote),
+    Finalize(Vec<message::Request>),
 }
 
 impl Replica {
@@ -228,21 +260,38 @@ impl Replica {
             );
         }
         self.requests.push(request);
-        // TODO adaptive batching
-        self.propose_num += 1;
-        let requests = self.requests.drain(..1).collect::<Vec<_>>(); // TODO
-        let pre_prepare = message::PrePrepare {
-            view_num: self.view_num,
-            block_num: self.propose_num,
-            digest: block_digest(&requests),
-            sig: Default::default(), // TODO
-            requests,
-        };
-        let replaced = self
-            .blocks
-            .insert(pre_prepare.block_num, pre_prepare.clone());
-        assert!(replaced.is_none());
-        ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(pre_prepare))
+        self.propose_block()
+    }
+
+    fn propose_block(&mut self) -> ReplicaAction {
+        assert!(self.is_primary());
+        if self.requests.is_empty()
+            || self.propose_num - self.commit_num >= self.config.max_num_inflight
+        {
+            ReplicaAction::Nop
+        } else {
+            self.propose_num += 1;
+            let requests = self
+                .requests
+                .drain(..self.config.max_batch_size.min(self.requests.len()))
+                .collect::<Vec<_>>(); // TODO
+            let pre_prepare = message::PrePrepare {
+                view_num: self.view_num,
+                block_num: self.propose_num,
+                digest: block_digest(&requests),
+                sig: Default::default(), // TODO
+                requests,
+            };
+            let replaced = self
+                .blocks
+                .insert(pre_prepare.block_num, pre_prepare.clone());
+            assert!(replaced.is_none());
+            ReplicaAction::Propose(pre_prepare)
+        }
+    }
+
+    pub fn on_propose(&mut self) -> ReplicaAction {
+        self.propose_block()
     }
 
     fn receive_pre_prepare(&mut self, pre_prepare: message::PrePrepare) -> ReplicaAction {
@@ -347,15 +396,24 @@ impl Replica {
             .entry(commit.block_num)
             .or_default()
             .insert(commit.replica_id, commit);
-        let mut requests = Vec::new();
-        while self.is_committed(self.commit_num + 1) {
-            self.commit_num += 1;
-            requests.extend(self.blocks[&self.commit_num].requests.clone())
+        if !self.is_committed(self.commit_num + 1) {
+            return ReplicaAction::Nop;
         }
-        if requests.is_empty() {
-            ReplicaAction::Nop
+        let mut requests = Vec::new();
+        while {
+            self.commit_num += 1;
+            tracing::debug!(self.config.id, self.commit_num, "committing");
+            requests.extend(self.blocks[&self.commit_num].requests.clone());
+            self.is_committed(self.commit_num + 1)
+        } {}
+        ReplicaAction::Finalize(requests)
+    }
+
+    pub fn on_finalize(&mut self) -> ReplicaAction {
+        if self.is_primary() {
+            self.propose_block()
         } else {
-            ReplicaAction::Finalize(requests)
+            ReplicaAction::Nop
         }
     }
 
