@@ -14,6 +14,7 @@ use crate::{ClientId, ReplicaId};
 
 use super::{Client, ClientAction, Replica, ReplicaAction, ToReplica, message};
 
+#[derive(Debug, Clone)]
 pub struct TaskConfig {
     pub replica_external_addresses: Vec<SocketAddr>,
     pub replica_internal_addresses: Vec<SocketAddr>,
