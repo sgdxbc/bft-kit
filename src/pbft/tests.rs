@@ -11,8 +11,6 @@ struct System {
 }
 
 struct Service {
-    replica_id: ReplicaId,
-    view_num: ViewNum,
     replies: HashMap<ClientId, message::Reply>,
 }
 
@@ -33,13 +31,13 @@ impl Service {
         }
     }
 
-    fn commit(&mut self, request: message::Request) -> ServiceAction {
+    fn commit(&mut self, request: message::Request, replica: &Replica) -> ServiceAction {
         let result = request.op; // echo back
         let reply = message::Reply {
             seq: request.seq,
-            view_num: self.view_num,
+            view_num: replica.view_num,
             result,
-            replica_id: self.replica_id,
+            replica_id: replica.config.id,
             sig: Default::default(), // maybe TODO
         };
         let replaced = self.replies.insert(request.client_id, reply.clone());
@@ -78,8 +76,6 @@ impl System {
                 (
                     Replica::new(config),
                     Service {
-                        replica_id: i,
-                        view_num: 0,
                         replies: Default::default(),
                     },
                 )
@@ -170,7 +166,7 @@ impl System {
             ReplicaAction::Finalize(requests) => {
                 let (replica, service) = &mut self.servers[replica_id as usize];
                 for request in requests {
-                    match service.commit(request) {
+                    match service.commit(request, replica) {
                         ServiceAction::Nop => {}
                         ServiceAction::SendToClient(client_id, reply) => {
                             self.events.push_back(Event::SendToClient(client_id, reply))

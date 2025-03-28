@@ -8,7 +8,7 @@ use sha2::Digest as _;
 use crate::{ClientId, ReplicaId, crypto::Digest};
 
 pub mod message;
-pub mod tcp;
+pub mod net;
 
 pub type ViewNum = u32;
 pub type BlockNum = u32;
