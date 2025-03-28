@@ -21,4 +21,13 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
     - name: Run example (PBFT)
-      run: cargo run --release --example pbft
+      run: RUST_LOG=info cargo run --verbose --release --example pbft
+    # https://docs.github.com/en/actions/use-cases-and-examples/building-and-testing/building-and-testing-rust#caching-dependencies
+    - name: Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
