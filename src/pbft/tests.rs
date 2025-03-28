@@ -366,7 +366,7 @@ fn concurrent_batched_proposals() {
     concurrent_proposals(4, 100)
 }
 
-fn drop_1(skip: impl Fn(&Event) -> bool) -> System {
+fn drop_1(skip: impl Fn(&Event) -> bool, tick_client: bool, tick_replica0: bool) -> System {
     let spec = Spec {
         num_faulty: 1,
         num_replica: 4,
@@ -381,15 +381,18 @@ fn drop_1(skip: impl Fn(&Event) -> bool) -> System {
         }
         system.step();
     }
-    // maybe tick every receiver twice?
-    let action = system.clients[0].tick();
-    system.handle_client_action(0, action);
-    let action = system.servers[0].0.tick();
-    system.handle_replica_action(0, action);
-    let action = system.clients[0].tick();
-    system.handle_client_action(0, action);
-    let action = system.servers[0].0.tick();
-    system.handle_replica_action(0, action);
+    if tick_client {
+        let action = system.clients[0].tick();
+        system.handle_client_action(0, action);
+        let action = system.clients[0].tick();
+        system.handle_client_action(0, action);
+    }
+    if tick_replica0 {
+        let action = system.servers[0].0.tick();
+        system.handle_replica_action(0, action);
+        let action = system.servers[0].0.tick();
+        system.handle_replica_action(0, action);
+    }
     for i in 0.. {
         assert!(i < 100);
         if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
@@ -403,12 +406,20 @@ fn drop_1(skip: impl Fn(&Event) -> bool) -> System {
 
 #[test]
 fn drop_request() {
-    drop_1(|event| matches!(event, Event::SendToReplica(_, ToReplica::Request(_))));
+    drop_1(
+        |event| matches!(event, Event::SendToReplica(_, ToReplica::Request(_))),
+        true,
+        false,
+    );
 }
 
 #[test]
 fn drop_reply() {
-    let system = drop_1(|event| matches!(event, Event::SendToClient(_, _)));
+    let system = drop_1(
+        |event| matches!(event, Event::SendToClient(_, _)),
+        true,
+        false,
+    );
     assert!(
         system
             .servers
@@ -419,15 +430,50 @@ fn drop_reply() {
 
 #[test]
 fn drop_pre_prepare() {
-    drop_1(|event| matches!(event, Event::SendToReplica(_, ToReplica::PrePrepare(_))));
+    drop_1(
+        |event| matches!(event, Event::SendToReplica(_, ToReplica::PrePrepare(_))),
+        false,
+        true,
+    );
 }
 
 #[test]
 fn drop_prepare() {
-    drop_1(|event| matches!(event, Event::SendToReplica(_, ToReplica::Prepare(_))));
+    drop_1(
+        |event| matches!(event, Event::SendToReplica(_, ToReplica::Prepare(_))),
+        false,
+        true,
+    );
 }
 
 #[test]
 fn drop_commit() {
-    drop_1(|event| matches!(event, Event::SendToReplica(_, ToReplica::Commit(_))));
+    drop_1(
+        |event| matches!(event, Event::SendToReplica(_, ToReplica::Commit(_))),
+        false,
+        true,
+    );
+}
+
+#[test]
+fn drop_replica3() {
+    let spec = Spec {
+        num_faulty: 1,
+        num_replica: 4,
+    };
+    let mut system = System::new(spec, 1);
+    let action = system.clients[0].invoke(b"hello".into());
+    system.handle_client_action(0, action);
+    for i in 0.. {
+        assert!(i < 100);
+        if matches!(system.events.front(), Some(&Event::SendToReplica(id, _)) if id == 3) {
+            system.events.pop_front();
+            continue;
+        }
+        if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+            assert_eq!(client_id, 0);
+            assert_eq!(&result, b"hello");
+            break;
+        }
+    }
 }
