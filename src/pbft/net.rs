@@ -141,6 +141,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
     let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
     let (read_sender, mut read_receiver) = mpsc::channel(4096);
     let active_task = async {
+        sleep(Duration::from_millis(100)).await; // wait for remote listeners start
         for (i, &addr) in config.replica_internal_addresses.iter().enumerate() {
             if i as ReplicaId == replica.config.id {
                 continue;

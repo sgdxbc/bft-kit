@@ -5,10 +5,14 @@ use bft_testbed::pbft::{
     net::{ClientTask, TaskConfig, server_task},
 };
 use tokio::{task::JoinSet, time::timeout};
+use tracing::{Instrument, field};
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+        .init();
     let spec = Spec {
         num_faulty: 1,
         num_replica: 4,
@@ -42,11 +46,15 @@ async fn main() -> anyhow::Result<()> {
         Ok(None) => unreachable!(),
         Err(_) => {}
     }
-    tracing::info!("invoke");
-    let config = ClientConfig { spec, id: 0 };
-    let client = Client::new(config);
-    let mut client_task = ClientTask::init(client, task_config).await?;
-    let result = client_task.invoke(Default::default()).await?;
-    tracing::info!(?result);
+    let span = tracing::info_span!("invoke", result = field::Empty);
+    let result = async {
+        let config = ClientConfig { spec, id: 0 };
+        let client = Client::new(config);
+        let mut client_task = ClientTask::init(client, task_config).await?;
+        anyhow::Ok(client_task.invoke(Default::default()).await?)
+    }
+    .instrument(span.clone())
+    .await?;
+    span.record("result", &*result);
     Ok(())
 }
