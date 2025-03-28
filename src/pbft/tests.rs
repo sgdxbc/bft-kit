@@ -10,8 +10,9 @@ struct System {
     events: VecDeque<Event>,
 }
 
-#[derive(Default)]
 struct Service {
+    replica_id: ReplicaId,
+    view_num: ViewNum,
     replies: HashMap<ClientId, message::Reply>,
 }
 
@@ -32,9 +33,15 @@ impl Service {
         }
     }
 
-    fn commit(&mut self, request: message::Request, replica: &Replica) -> ServiceAction {
+    fn commit(&mut self, request: message::Request) -> ServiceAction {
         let result = request.op; // echo back
-        let reply = replica.reply(request.seq, result);
+        let reply = message::Reply {
+            seq: request.seq,
+            view_num: self.view_num,
+            result,
+            replica_id: self.replica_id,
+            sig: Default::default(), // maybe TODO
+        };
         let replaced = self.replies.insert(request.client_id, reply.clone());
         assert!(replaced.map(|reply| reply.seq) < Some(request.seq)); // None < Some(..)
         ServiceAction::SendToClient(request.client_id, reply)
@@ -68,7 +75,14 @@ impl System {
         let servers = (0..spec.num_replica)
             .map(|i| {
                 let config = ReplicaConfig::new_base(spec.clone(), i);
-                (Replica::new(config), Service::default())
+                (
+                    Replica::new(config),
+                    Service {
+                        replica_id: i,
+                        view_num: 0,
+                        replies: Default::default(),
+                    },
+                )
             })
             .collect();
         Self {
@@ -156,7 +170,7 @@ impl System {
             ReplicaAction::Finalize(requests) => {
                 let (replica, service) = &mut self.servers[replica_id as usize];
                 for request in requests {
-                    match service.commit(request, replica) {
+                    match service.commit(request) {
                         ServiceAction::Nop => {}
                         ServiceAction::SendToClient(client_id, reply) => {
                             self.events.push_back(Event::SendToClient(client_id, reply))
@@ -365,7 +379,7 @@ fn drop_1(skip: impl Fn(&Event) -> bool) -> System {
     let action = system.clients[0].invoke(b"hello".into());
     system.handle_client_action(0, action);
     while !system.events.is_empty() {
-        if skip(system.events.get(0).unwrap()) {
+        if skip(system.events.front().unwrap()) {
             system.events.pop_front();
             continue;
         }

@@ -8,6 +8,7 @@ use sha2::Digest as _;
 use crate::{ClientId, ReplicaId, crypto::Digest};
 
 pub mod message;
+pub mod tcp;
 
 pub type ViewNum = u32;
 pub type BlockNum = u32;
@@ -203,16 +204,6 @@ impl Replica {
                     votes.len() as ReplicaId
                         >= self.config.spec.num_replica - self.config.spec.num_faulty
                 })
-    }
-
-    pub fn reply(&self, seq: u32, result: Vec<u8>) -> message::Reply {
-        message::Reply {
-            seq,
-            view_num: self.view_num,
-            result,
-            replica_id: self.config.id,
-            sig: Default::default(), // TODO
-        }
     }
 
     fn can_propose(&mut self) -> bool {
@@ -441,4 +432,4 @@ impl Replica {
 }
 
 #[cfg(test)]
-mod test;
+mod tests;
