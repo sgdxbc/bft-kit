@@ -25,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
             .map(|i| ([127, 0, 0, 1], 8000 + i as u16).into())
             .collect(),
         tick_interval: Duration::from_secs(365 * 24 * 60 * 60), // effectively disable ticks
+        replica_connect_delay: Duration::from_millis(100),
     };
     let mut server_tasks = JoinSet::new();
     for i in 0..spec.num_replica {

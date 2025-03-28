@@ -19,6 +19,9 @@ pub struct TaskConfig {
     pub replica_external_addresses: Vec<SocketAddr>,
     pub replica_internal_addresses: Vec<SocketAddr>,
     pub tick_interval: Duration,
+    // how long should replicas wait before attempting to connect each other's
+    // internal addresses. set longer in higher latency environments
+    pub replica_connect_delay: Duration,
 }
 
 async fn read_task<M: Decode<()> + Send + Sync + 'static>(
@@ -141,7 +144,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
     let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
     let (read_sender, mut read_receiver) = mpsc::channel(4096);
     let active_task = async {
-        sleep(Duration::from_millis(100)).await; // wait for remote listeners start
+        sleep(config.replica_connect_delay).await;
         for (i, &addr) in config.replica_internal_addresses.iter().enumerate() {
             if i as ReplicaId == replica.config.id {
                 continue;
