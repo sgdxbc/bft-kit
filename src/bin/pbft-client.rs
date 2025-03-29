@@ -1,4 +1,4 @@
-use std::{env::args, path::PathBuf};
+use std::{env::args, path::PathBuf, time::Duration};
 
 use bft_testbed::pbft::{net::concurrent_close_loop_clients_task, parse::Options};
 use hdrhistogram::Histogram;
@@ -29,6 +29,18 @@ async fn main() -> anyhow::Result<()> {
     let throughput = 1_000_000. / latencies.mean();
     let p50 = latencies.value_at_quantile(0.5);
     let p99 = latencies.value_at_quantile(0.99);
-    tracing::info!(throughput, p50, p99);
+    let p100 = latencies.max();
+    tracing::info!(throughput, p50, p99, p100);
+    for value in latencies.iter_quantiles(1) {
+        if value.count_since_last_iteration() == 0 {
+            continue;
+        }
+        tracing::info!(
+            "quantile {:3.2} latency {:8?} request number {}",
+            value.quantile(),
+            Duration::from_micros(value.value_iterated_to()),
+            value.count_since_last_iteration(),
+        )
+    }
     Ok(())
 }

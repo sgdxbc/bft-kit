@@ -261,15 +261,21 @@ impl Replica {
                 ToReplica::Request(request),
             );
         }
-        // preserve at most one request per client id in self.requests
-        // for close loop clients this is just deduplication
-        // for open loops may need to properly select which request to preserve (or just
-        // propose them all), the sequence number is recorded for that
-        if self
-            .request_clients
-            .insert(request.client_id, request.seq)
-            .is_none()
-        {
+        // preserve only the last request of each client
+        // for close loop clients this is almost same as deduplication
+        // however, when primary is late on committing the last request of a client, the
+        // client who is on a tight close loop may send the following (new last) request
+        // to primary before the old last one commits, and this condition allow 
+        // overlapping of these two requests
+        // this state and structure unfortunately duplicates with at most once services,
+        // exactly whom BFT protocols probably drive
+        // the upside of this duplication is to decouple BFT with Reply messages, which
+        // results in more composable consensus facility and enable usage like DSLabs
+        // part 4
+        // anyway, serious at most once is not guaranteed by BFT protocols. they can
+        // legitimately finalize repeatedly requests, as long as in consistent order
+        if self.request_clients.get(&request.client_id) < Some(&request.seq) {
+            self.request_clients.insert(request.client_id, request.seq);
             self.requests.push(request)
         } else {
             tracing::debug!(%request.client_id, "discard duplicated request")
@@ -369,6 +375,11 @@ impl Replica {
         // TODO enter view
         if let Some(block) = self.blocks.get(&prepare.block_num) {
             if prepare.digest != block.digest {
+                tracing::warn!(
+                    prepare.block_num,
+                    prepare.replica_id,
+                    "Prepare digest mismatch"
+                );
                 return ReplicaAction::Nop;
             }
         } // otherwise the vote pruning is delayed until the late PrePrepare arrives
@@ -403,6 +414,11 @@ impl Replica {
         // TODO enter view
         if let Some(block) = self.blocks.get(&commit.block_num) {
             if commit.digest != block.digest {
+                tracing::warn!(
+                    commit.block_num,
+                    commit.replica_id,
+                    "Commit digest mismatch"
+                );
                 return ReplicaAction::Nop;
             }
         } // otherwise the vote pruning is delayed until the late PrePrepare arrives
