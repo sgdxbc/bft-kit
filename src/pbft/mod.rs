@@ -9,6 +9,7 @@ use crate::{ClientId, ReplicaId, crypto::Digest};
 
 pub mod message;
 pub mod net;
+pub mod parse;
 
 pub type ViewNum = u32;
 pub type BlockNum = u32;
@@ -132,7 +133,7 @@ pub struct ReplicaConfig {
 }
 
 impl ReplicaConfig {
-    pub fn new_base(spec: Spec, id: ReplicaId) -> Self {
+    pub fn new_basic(spec: Spec, id: ReplicaId) -> Self {
         Self {
             spec,
             id,

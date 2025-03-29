@@ -72,7 +72,7 @@ impl System {
             .collect();
         let servers = (0..spec.num_replica)
             .map(|i| {
-                let config = ReplicaConfig::new_base(spec.clone(), i);
+                let config = ReplicaConfig::new_basic(spec.clone(), i);
                 (
                     Replica::new(config),
                     Service {
