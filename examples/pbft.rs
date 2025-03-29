@@ -25,7 +25,9 @@ async fn main() -> anyhow::Result<()> {
         num_client: 0,
         client_duration: Duration::ZERO,
 
-        tick_interval: Duration::from_secs(365 * 24 * 60 * 60), // effectively disable ticks
+        // effectively disable ticks
+        client_tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
+        replica_tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
         replica_external_addresses: (0..spec.num_replica)
             .map(|i| ([127, 0, 0, 1], 50000 + i as u16).into())
             .collect(),

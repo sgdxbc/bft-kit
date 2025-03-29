@@ -331,6 +331,11 @@ impl Replica {
                 // * resend Prepare (and Commit) to all replicas, while we only need to progress
                 //   the primary here
                 // so it's a very inefficient fallback path
+                tracing::warn!(
+                    self.config.id,
+                    block_num,
+                    "resend vote for duplicated proposal"
+                );
                 let vote = self.prepare_votes[&block_num][&self.config.id].clone();
                 return ReplicaAction::Prepare(vote);
             }

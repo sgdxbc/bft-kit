@@ -1,8 +1,9 @@
 use std::{env::args, path::PathBuf};
 
 use bft_testbed::pbft::{net::concurrent_close_loop_clients_task, parse::Options};
+use hdrhistogram::Histogram;
 use tokio::fs::read_to_string;
-use tracing::{Instrument, field};
+use tracing::Instrument;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
@@ -15,11 +16,19 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(&task_config_path).await?)?;
     options.parse(&read_to_string(task_config_path.with_file_name("spec.conf")).await?)?;
 
-    let span = tracing::info_span!("concurrent close loops", counts = field::Empty);
-    let counts =
+    let client_latencies =
         concurrent_close_loop_clients_task(options.clone().try_into()?, options.try_into()?)
-            .instrument(span.clone())
+            .instrument(tracing::info_span!("concurrent close loops"))
             .await?;
-    span.record("counts", format!("{counts:?}"));
+    let mut latencies = Histogram::new(3)?;
+    for client_latencies in client_latencies {
+        let throughput = 1_000_000. / client_latencies.mean();
+        tracing::info!(throughput, "client");
+        latencies += client_latencies
+    }
+    let throughput = 1_000_000. / latencies.mean();
+    let p50 = latencies.value_at_quantile(0.5);
+    let p99 = latencies.value_at_quantile(0.99);
+    tracing::info!(throughput, p50, p99);
     Ok(())
 }

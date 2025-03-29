@@ -1,6 +1,7 @@
 use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, time::Duration};
 
 use bincode::{Decode, Encode, error::DecodeError};
+use hdrhistogram::Histogram;
 use rand::random;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -17,9 +18,10 @@ use super::{Client, ClientAction, ClientConfig, Replica, ReplicaAction, Spec, To
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
-    pub tick_interval: Duration,
     pub num_client: usize,
+    pub client_tick_interval: Duration,
     pub client_duration: Duration,
+    pub replica_tick_interval: Duration,
     pub replica_external_addresses: Vec<SocketAddr>,
     pub replica_internal_addresses: Vec<SocketAddr>,
     // how long should replicas wait before attempting to connect each other's
@@ -51,7 +53,9 @@ async fn read_task<M: Decode<()> + Send + Sync + 'static>(
                 offset -= num_bytes
             }
             // expect to be rare and performance does not matter
-            Err(DecodeError::UnexpectedEnd { .. }) => {}
+            Err(DecodeError::UnexpectedEnd { additional }) => {
+                tracing::warn!(offset, additional, "read partial message")
+            }
             Err(err) => anyhow::bail!(err),
         }
     }
@@ -129,7 +133,7 @@ impl ClientTask {
             }
             use Select::*;
             action = match tokio::select! {
-                () = sleep(self.config.tick_interval) => Sleep,
+                () = sleep(self.config.client_tick_interval) => Sleep,
                 reply = self.replica_ingress.recv() => Read(reply),
                 Some(result) = self.read_tasks.join_next() => Join(result??),
             } {
@@ -146,7 +150,7 @@ impl ClientTask {
 pub async fn concurrent_close_loop_clients_task(
     spec: Spec,
     config: TaskConfig,
-) -> anyhow::Result<Vec<u32>> {
+) -> anyhow::Result<Vec<Histogram<u32>>> {
     let mut client_tasks = Vec::new();
     for _ in 0..config.num_client {
         let client = Client::new(ClientConfig {
@@ -160,22 +164,24 @@ pub async fn concurrent_close_loop_clients_task(
         let config = config.clone();
         tasks.spawn(async move {
             let deadline = Instant::now() + config.client_duration;
-            for count in 0.. {
+            let mut latencies = Histogram::new(3)?;
+            loop {
+                let start = Instant::now();
                 match timeout_at(deadline, client_task.invoke(Default::default())).await {
                     Ok(result) => {
                         result?;
+                        latencies += start.elapsed().as_micros() as u64;
                     }
-                    Err(_) => return anyhow::Ok(count),
+                    Err(_) => break anyhow::Ok(latencies),
                 }
             }
-            unreachable!()
         });
     }
-    let mut counts = Vec::new();
-    while let Some(count) = tasks.join_next().await {
-        counts.push(count??)
+    let mut latencies = Vec::new();
+    while let Some(client_latencies) = tasks.join_next().await {
+        latencies.push(client_latencies??)
     }
-    Ok(counts)
+    Ok(latencies)
 }
 
 pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
@@ -221,7 +227,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
         }
         use Select::*;
         let mut option_action = match tokio::select! {
-            () = sleep(config.tick_interval) => Sleep,
+            () = sleep(config.replica_tick_interval) => Sleep,
             accept = external_listener.accept() => Accept(accept?),
             message = read_receiver.recv() => Read(message),
             Some(result) = read_tasks.join_next() => Join(result??),

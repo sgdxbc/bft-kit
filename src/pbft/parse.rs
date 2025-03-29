@@ -15,10 +15,11 @@ pub struct Options {
     max_num_inflight: Option<BlockNum>,
     max_batch_size: Option<usize>,
     num_client: Option<usize>,
+    client_tick_interval: Option<f32>,
     client_duration: Option<f32>,
+    replica_tick_interval: Option<f32>,
     replica_external_addresses: Vec<SocketAddr>,
     replica_internal_addresses: Vec<SocketAddr>,
-    tick_interval: Option<f32>,
     replica_connect_delay: Option<f32>,
 }
 
@@ -61,8 +62,16 @@ impl Options {
                 Some("num_client") => {
                     self.num_client = Some(parse_line("num_client", split.next())?)
                 }
+                Some("client_tick_interval") => {
+                    self.client_tick_interval =
+                        Some(parse_line("client_tick_interval", split.next())?)
+                }
                 Some("client_duration") => {
                     self.client_duration = Some(parse_line("client_duration", split.next())?)
+                }
+                Some("replica_tick_interval") => {
+                    self.replica_tick_interval =
+                        Some(parse_line("replica_tick_interval", split.next())?)
                 }
                 Some("replica_external_address") => self
                     .replica_external_addresses
@@ -70,9 +79,6 @@ impl Options {
                 Some("replica_internal_address") => self
                     .replica_internal_addresses
                     .push(parse_line("replica_internal_address", split.next())?),
-                Some("tick_interval") => {
-                    self.tick_interval = Some(parse_line("tick_interval", split.next())?)
-                }
                 Some("replica_connect_delay") => {
                     self.replica_connect_delay =
                         Some(parse_line("replica_connect_delay", split.next())?)
@@ -134,18 +140,23 @@ impl TryFrom<Options> for super::net::TaskConfig {
             "missing replica_internal_address"
         );
         Ok(Self {
-            tick_interval: Duration::from_secs_f32(
-                options
-                    .tick_interval
-                    .ok_or(anyhow::format_err!("missing tick_interval"))?,
-            ),
             num_client: options
                 .num_client
                 .ok_or(anyhow::format_err!("missing num_client"))?,
+            client_tick_interval: Duration::from_secs_f32(
+                options
+                    .client_tick_interval
+                    .ok_or(anyhow::format_err!("missing client_tick_interval"))?,
+            ),
             client_duration: Duration::from_secs_f32(
                 options
                     .client_duration
                     .ok_or(anyhow::format_err!("missing client_duration"))?,
+            ),
+            replica_tick_interval: Duration::from_secs_f32(
+                options
+                    .replica_tick_interval
+                    .ok_or(anyhow::format_err!("missing replica_tick_interval"))?,
             ),
             replica_external_addresses: options.replica_external_addresses,
             replica_internal_addresses: options.replica_internal_addresses,
