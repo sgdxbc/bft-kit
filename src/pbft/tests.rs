@@ -10,8 +10,11 @@ struct System {
     events: VecDeque<Event>,
 }
 
+type ClientId = u32;
+const _: () = assert!(size_of::<ClientId>() == size_of::<crate::ClientId>());
+
 struct Service {
-    replies: HashMap<ClientId, message::Reply>,
+    replies: HashMap<crate::ClientId, message::Reply>,
 }
 
 enum ServiceAction {
@@ -25,7 +28,7 @@ impl Service {
         match self.replies.get(&request.client_id) {
             Some(reply) if reply.seq > request.seq => ServiceAction::Nop,
             Some(reply) if reply.seq == request.seq => {
-                ServiceAction::SendToClient(request.client_id, reply.clone())
+                ServiceAction::SendToClient(request.client_id.0, reply.clone())
             }
             _ => ServiceAction::Submit(request),
         }
@@ -42,7 +45,7 @@ impl Service {
         };
         let replaced = self.replies.insert(request.client_id, reply.clone());
         assert!(replaced.map(|reply| reply.seq) < Some(request.seq)); // None < Some(..)
-        ServiceAction::SendToClient(request.client_id, reply)
+        ServiceAction::SendToClient(request.client_id.0, reply)
     }
 }
 
@@ -60,12 +63,12 @@ enum StepResult {
 }
 
 impl System {
-    fn new(spec: Spec, num_client: ClientId) -> Self {
+    fn new(spec: Spec, num_client: u32) -> Self {
         let clients = (0..num_client)
             .map(|i| {
                 let config = ClientConfig {
                     spec: spec.clone(),
-                    id: i,
+                    id: ClientId(i),
                 };
                 Client::new(config)
             })

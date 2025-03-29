@@ -90,6 +90,7 @@ impl Client {
         let Some(op) = self.op.clone() else {
             return ClientAction::Nop;
         };
+        tracing::warn!(%self.config.id, self.seq, "resend request");
         let request = message::Request {
             client_id: self.config.id,
             seq: self.seq,
@@ -253,6 +254,7 @@ impl Replica {
 
     fn receive_request(&mut self, request: message::Request) -> ReplicaAction {
         if !self.is_primary() {
+            tracing::warn!(self.config.id, %request.client_id, request.seq, "forward broadcast request to primary");
             // TODO bookkeeping forwarded
             return ReplicaAction::SendToReplica(
                 self.config.spec.primary(self.view_num),
@@ -270,7 +272,7 @@ impl Replica {
         {
             self.requests.push(request)
         } else {
-            tracing::debug!(request.client_id, "discard duplicated request")
+            tracing::debug!(%request.client_id, "discard duplicated request")
         }
         self.propose_blocks()
     }
@@ -436,6 +438,7 @@ impl Replica {
             let action = if self.ticked_propose_num <= self.commit_num {
                 ReplicaAction::Nop
             } else {
+                tracing::warn!(self.config.id, block_num = ?(self.commit_num + 1..=self.ticked_propose_num), "resend PrePrepare(s)");
                 let pre_prepares = (self.commit_num + 1..=self.ticked_propose_num)
                     .map(|block_num| self.blocks[&block_num].clone())
                     .collect();

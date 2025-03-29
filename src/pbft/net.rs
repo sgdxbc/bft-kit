@@ -246,7 +246,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
                         Some(reply) if reply.seq == request.seq => {
                             let egress = client_egresses.get_mut(&request.client_id).ok_or(
                                 anyhow::format_err!(
-                                    "send to unexpected client id {:08x}",
+                                    "send to unexpected client id {}",
                                     request.client_id
                                 ),
                             )?;
@@ -313,20 +313,14 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
                             sig: Default::default(), // TODO
                         };
                         let egress = client_egresses.get_mut(&request.client_id).ok_or(
-                            anyhow::format_err!(
-                                "send to unexpected client id {:08x}",
-                                request.client_id
-                            ),
+                            anyhow::format_err!("send to unexpected client {}", request.client_id),
                         )?;
                         if let Err(err) =
                             write_message(reply.clone(), [egress], &mut encode_bytes).await
                         {
                             if let Some(err) = err.downcast_ref::<std::io::Error>() {
                                 if err.kind() == ErrorKind::BrokenPipe {
-                                    tracing::info!(
-                                        client_id = format!("{:08x}", request.client_id),
-                                        "egress closed",
-                                    )
+                                    tracing::info!(%request.client_id, "egress closed")
                                     // not removing from egress table to prevent the following
                                     // (failed) writing errors
                                     // may cause repeatedly logging but the pattern should be rare

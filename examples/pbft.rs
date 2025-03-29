@@ -1,8 +1,11 @@
 use std::time::Duration;
 
-use bft_testbed::pbft::{
-    Client, ClientConfig, Replica, ReplicaConfig, Spec,
-    net::{ClientTask, TaskConfig, server_task},
+use bft_testbed::{
+    ClientId,
+    pbft::{
+        Client, ClientConfig, Replica, ReplicaConfig, Spec,
+        net::{ClientTask, TaskConfig, server_task},
+    },
 };
 use tokio::{task::JoinSet, time::timeout};
 use tracing::{Instrument, field};
@@ -53,7 +56,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let span = tracing::info_span!("invoke", result = field::Empty);
     let result = async {
-        let config = ClientConfig { spec, id: 0 };
+        let config = ClientConfig {
+            spec,
+            id: ClientId(0),
+        };
         let client = Client::new(config);
         let mut client_task = ClientTask::init(client, task_config).await?;
         anyhow::Ok(client_task.invoke(Default::default()).await?)
