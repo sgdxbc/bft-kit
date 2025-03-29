@@ -376,7 +376,8 @@ fn drop_1(skip: impl Fn(&Event) -> bool, tick_client: bool, tick_replica0: bool)
     system.handle_client_action(0, action);
     while !system.events.is_empty() {
         if skip(system.events.front().unwrap()) {
-            system.events.pop_front();
+            let event = system.events.pop_front();
+            tracing::debug!(?event, "dropping");
             continue;
         }
         system.step();
@@ -401,6 +402,7 @@ fn drop_1(skip: impl Fn(&Event) -> bool, tick_client: bool, tick_replica0: bool)
             break;
         }
     }
+    system.exhaust(100);
     system
 }
 

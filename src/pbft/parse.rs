@@ -14,6 +14,8 @@ pub struct Options {
     replica_id: Option<ReplicaId>,
     max_num_inflight: Option<BlockNum>,
     max_batch_size: Option<usize>,
+    num_client: Option<usize>,
+    client_duration: Option<f32>,
     replica_external_addresses: Vec<SocketAddr>,
     replica_internal_addresses: Vec<SocketAddr>,
     tick_interval: Option<f32>,
@@ -55,6 +57,12 @@ impl Options {
                 }
                 Some("max_batch_size") => {
                     self.max_batch_size = Some(parse_line("max_batch_size", split.next())?)
+                }
+                Some("num_client") => {
+                    self.num_client = Some(parse_line("num_client", split.next())?)
+                }
+                Some("client_duration") => {
+                    self.client_duration = Some(parse_line("client_duration", split.next())?)
                 }
                 Some("replica_external_address") => self
                     .replica_external_addresses
@@ -126,13 +134,21 @@ impl TryFrom<Options> for super::net::TaskConfig {
             "missing replica_internal_address"
         );
         Ok(Self {
-            replica_external_addresses: options.replica_external_addresses,
-            replica_internal_addresses: options.replica_internal_addresses,
             tick_interval: Duration::from_secs_f32(
                 options
                     .tick_interval
                     .ok_or(anyhow::format_err!("missing tick_interval"))?,
             ),
+            num_client: options
+                .num_client
+                .ok_or(anyhow::format_err!("missing num_client"))?,
+            client_duration: Duration::from_secs_f32(
+                options
+                    .client_duration
+                    .ok_or(anyhow::format_err!("missing client_duration"))?,
+            ),
+            replica_external_addresses: options.replica_external_addresses,
+            replica_internal_addresses: options.replica_internal_addresses,
             replica_connect_delay: Duration::from_secs_f32(
                 options
                     .replica_connect_delay

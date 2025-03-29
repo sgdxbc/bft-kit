@@ -1,26 +1,30 @@
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, time::Duration};
 
 use bincode::{Decode, Encode, error::DecodeError};
+use rand::random;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, tcp::OwnedWriteHalf},
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
-    time::sleep,
+    time::{Instant, sleep, timeout_at},
     try_join,
 };
 
 use crate::{ClientId, ReplicaId};
 
-use super::{Client, ClientAction, Replica, ReplicaAction, ToReplica, message};
+use super::{Client, ClientAction, ClientConfig, Replica, ReplicaAction, Spec, ToReplica, message};
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
+    pub tick_interval: Duration,
+    pub num_client: usize,
+    pub client_duration: Duration,
     pub replica_external_addresses: Vec<SocketAddr>,
     pub replica_internal_addresses: Vec<SocketAddr>,
-    pub tick_interval: Duration,
     // how long should replicas wait before attempting to connect each other's
-    // internal addresses. set longer in higher latency environments
+    // internal addresses. set longer in higher latency environments (or human
+    // action is involved)
     pub replica_connect_delay: Duration,
 }
 
@@ -137,6 +141,41 @@ impl ClientTask {
             }
         }
     }
+}
+
+pub async fn concurrent_close_loop_clients_task(
+    spec: Spec,
+    config: TaskConfig,
+) -> anyhow::Result<Vec<u32>> {
+    let mut client_tasks = Vec::new();
+    for _ in 0..config.num_client {
+        let client = Client::new(ClientConfig {
+            spec: spec.clone(),
+            id: random(),
+        });
+        client_tasks.push(ClientTask::init(client, config.clone()).await?)
+    }
+    let mut tasks = JoinSet::new();
+    for mut client_task in client_tasks {
+        let config = config.clone();
+        tasks.spawn(async move {
+            let deadline = Instant::now() + config.client_duration;
+            for count in 0.. {
+                match timeout_at(deadline, client_task.invoke(Default::default())).await {
+                    Ok(result) => {
+                        result?;
+                    }
+                    Err(_) => return anyhow::Ok(count),
+                }
+            }
+            unreachable!()
+        });
+    }
+    let mut counts = Vec::new();
+    while let Some(count) = tasks.join_next().await {
+        counts.push(count??)
+    }
+    Ok(counts)
 }
 
 pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
@@ -279,7 +318,21 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
                                 request.client_id
                             ),
                         )?;
-                        write_message(reply.clone(), [egress], &mut encode_bytes).await?
+                        if let Err(err) =
+                            write_message(reply.clone(), [egress], &mut encode_bytes).await
+                        {
+                            if let Some(err) = err.downcast_ref::<std::io::Error>() {
+                                if err.kind() == ErrorKind::BrokenPipe {
+                                    tracing::info!(
+                                        client_id = format!("{:08x}", request.client_id),
+                                        "egress closed",
+                                    )
+                                    // not removing from egress table to prevent the following
+                                    // (failed) writing errors
+                                    // may cause repeatedly logging but the pattern should be rare
+                                }
+                            }
+                        }
                     }
                     option_action = Some(replica.on_finalize())
                 }

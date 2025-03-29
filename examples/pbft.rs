@@ -18,13 +18,17 @@ async fn main() -> anyhow::Result<()> {
         num_replica: 4,
     };
     let task_config = TaskConfig {
+        // these two values unused. this example sends single request from one client
+        num_client: 0,
+        client_duration: Duration::ZERO,
+
+        tick_interval: Duration::from_secs(365 * 24 * 60 * 60), // effectively disable ticks
         replica_external_addresses: (0..spec.num_replica)
             .map(|i| ([127, 0, 0, 1], 50000 + i as u16).into())
             .collect(),
         replica_internal_addresses: (0..spec.num_replica)
             .map(|i| ([127, 0, 0, 1], 8000 + i as u16).into())
             .collect(),
-        tick_interval: Duration::from_secs(365 * 24 * 60 * 60), // effectively disable ticks
         replica_connect_delay: Duration::from_millis(100),
     };
     let mut server_tasks = JoinSet::new();

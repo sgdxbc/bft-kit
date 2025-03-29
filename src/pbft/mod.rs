@@ -151,6 +151,7 @@ pub struct Replica {
     prepare_votes: BTreeMap<BlockNum, Quorum>,
     commit_votes: BTreeMap<BlockNum, Quorum>,
     requests: Vec<message::Request>,
+    request_clients: HashMap<ClientId, u32>,
     // only primary maintains. the last proposed block number
     propose_num: BlockNum,
     ticked_propose_num: BlockNum,
@@ -170,6 +171,7 @@ impl Replica {
             prepare_votes: Default::default(),
             commit_votes: Default::default(),
             requests: Default::default(),
+            request_clients: Default::default(),
             propose_num: 0,
             ticked_propose_num: 0,
             commit_num: 0,
@@ -257,7 +259,19 @@ impl Replica {
                 ToReplica::Request(request),
             );
         }
-        self.requests.push(request);
+        // preserve at most one request per client id in self.requests
+        // for close loop clients this is just deduplication
+        // for open loops may need to properly select which request to preserve (or just
+        // propose them all), the sequence number is recorded for that
+        if self
+            .request_clients
+            .insert(request.client_id, request.seq)
+            .is_none()
+        {
+            self.requests.push(request)
+        } else {
+            tracing::debug!(request.client_id, "discard duplicated request")
+        }
         self.propose_blocks()
     }
 
@@ -403,6 +417,9 @@ impl Replica {
             requests.extend(self.blocks[&self.commit_num].requests.clone());
             self.is_committed(self.commit_num + 1)
         } {}
+        for request in &requests {
+            self.request_clients.remove(&request.client_id);
+        }
         ReplicaAction::Finalize(requests)
     }
 
