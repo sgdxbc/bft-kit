@@ -166,6 +166,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
         Ok(())
     };
     try_join!(active_task, passive_task)?;
+    tracing::info!("replica ready");
 
     let replies = HashMap::<ClientId, message::Reply>::new();
     let external_listener =

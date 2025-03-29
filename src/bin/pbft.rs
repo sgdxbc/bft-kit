@@ -1,10 +1,7 @@
-use std::{pin::pin, time::Duration};
+use std::{env::args, path::PathBuf, pin::pin, time::Duration};
 
-use bft_testbed::pbft::{
-    Replica, ReplicaConfig, Spec,
-    net::{TaskConfig, server_task},
-};
-use tokio::{signal::ctrl_c, time::sleep};
+use bft_testbed::pbft::{Replica, net::server_task, parse::Options};
+use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep};
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
@@ -12,28 +9,13 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
         .init();
-    let spec = Spec {
-        num_faulty: 1,
-        num_replica: 4,
-    };
-    let task_config = TaskConfig {
-        replica_external_addresses: (0..spec.num_replica)
-            .map(|i| ([127, 0, 0, 1], 50000 + i as u16).into())
-            .collect(),
-        replica_internal_addresses: (0..spec.num_replica)
-            .map(|i| ([127, 0, 0, 1], 8000 + i as u16).into())
-            .collect(),
-        tick_interval: Duration::from_secs(365 * 24 * 60 * 60), // effectively disable ticks
-        replica_connect_delay: Duration::from_millis(100),
-    };
-    let config = ReplicaConfig {
-        spec,
-        id: 0,
-        max_num_inflight: 1,
-        max_batch_size: 1,
-    };
-    let replica = Replica::new(config);
-    let mut server = pin!(server_task(replica, task_config));
+    let replica_config_path = PathBuf::from(args().nth(1).unwrap_or("replica.conf".into()));
+    let mut options = Options::new();
+    options.parse(&read_to_string(&replica_config_path).await?)?;
+    options.parse(&read_to_string(replica_config_path.with_file_name("spec.conf")).await?)?;
+    options.parse(&read_to_string(replica_config_path.with_file_name("task.conf")).await?)?;
+    let replica = Replica::new(options.clone().try_into()?);
+    let mut server = pin!(server_task(replica, options.try_into()?));
     'server: {
         tokio::select! {
             result = &mut server => result?,

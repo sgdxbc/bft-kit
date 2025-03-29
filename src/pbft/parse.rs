@@ -6,7 +6,7 @@ use crate::ReplicaId;
 
 use super::BlockNum;
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct Options {
     num_faulty: Option<ReplicaId>,
     num_replica: Option<ReplicaId>,
@@ -62,7 +62,7 @@ impl Options {
                 Some("replica_internal_address") => self
                     .replica_internal_addresses
                     .push(parse_line("replica_internal_address", split.next())?),
-                Some("tick_internal") => {
+                Some("tick_interval") => {
                     self.tick_interval = Some(parse_line("tick_interval", split.next())?)
                 }
                 Some("replica_connect_delay") => {
@@ -115,6 +115,16 @@ impl TryFrom<Options> for super::net::TaskConfig {
     type Error = anyhow::Error; // TODO
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
+        // technical speaking empty != missing, but in practice a setting without any
+        // replica address is hardly valid
+        anyhow::ensure!(
+            !options.replica_external_addresses.is_empty(),
+            "missing replica_external_address"
+        );
+        anyhow::ensure!(
+            !options.replica_internal_addresses.is_empty(),
+            "missing replica_internal_address"
+        );
         Ok(Self {
             replica_external_addresses: options.replica_external_addresses,
             replica_internal_addresses: options.replica_internal_addresses,
@@ -125,7 +135,7 @@ impl TryFrom<Options> for super::net::TaskConfig {
             ),
             replica_connect_delay: Duration::from_secs_f32(
                 options
-                    .tick_interval
+                    .replica_connect_delay
                     .ok_or(anyhow::format_err!("missing replica_connect_delay"))?,
             ),
         })
