@@ -237,6 +237,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
                 let mut client_id = [0; size_of::<ClientId>()];
                 connection.read_exact(&mut client_id).await?;
                 let client_id = ClientId::from_le_bytes(client_id);
+                tracing::debug!(%client_id, ?connection, "accept client connection");
                 let (read_half, write_half) = connection.into_split();
                 read_tasks.spawn(read_task(read_half, read_sender.clone(), true));
                 let replaced = client_egresses.insert(client_id, write_half);

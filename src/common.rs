@@ -1,14 +1,18 @@
 use std::fmt::{self, Formatter, Write as _};
 
 // pub type ClientId = u32;
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bincode::Encode, bincode::Decode,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bincode::Encode, bincode::Decode)]
 pub struct ClientId(pub u32);
 
 impl fmt::Display for ClientId {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "ClientId({:08x})", self.0)
+    }
+}
+
+impl fmt::Debug for ClientId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
     }
 }
 
