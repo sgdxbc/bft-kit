@@ -15,7 +15,7 @@ pub mod quinn {
     use super::{CERT, KEY_PAIR};
 
     pub fn server_config() -> ServerConfig {
-        const CONFIG: OnceLock<ServerConfig> = OnceLock::new();
+        static CONFIG: OnceLock<ServerConfig> = OnceLock::new();
         CONFIG
             .get_or_init(|| {
                 let cert = CertificateDer::from_pem_slice(CERT.as_bytes()).unwrap();
@@ -29,7 +29,7 @@ pub mod quinn {
     }
 
     pub fn client_config() -> ClientConfig {
-        const CONFIG: OnceLock<ClientConfig> = OnceLock::new();
+        static CONFIG: OnceLock<ClientConfig> = OnceLock::new();
         CONFIG
             .get_or_init(|| {
                 let mut roots = RootCertStore::empty();

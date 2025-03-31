@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use bft_testbed::{
     common::ClientId,
+    init_logging,
     pbft::{
         Client, ClientConfig, Replica, ReplicaConfig, Spec,
         transport::{ClientTask, TaskConfig, server_task},
@@ -9,13 +10,11 @@ use bft_testbed::{
 };
 use tokio::{task::JoinSet, time::timeout};
 use tracing::{Instrument, field};
-use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-        .init();
+    init_logging();
+
     let spec = Spec {
         num_faulty: 1,
         num_replica: 4,
@@ -64,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
         };
         let client = Client::new(config);
         let mut client_task = ClientTask::init(client, task_config).await?;
+        tracing::info!("client initialized");
         anyhow::Ok(client_task.invoke(Default::default()).await?)
     }
     .instrument(span.clone())

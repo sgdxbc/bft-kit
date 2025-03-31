@@ -52,6 +52,7 @@ pub struct Client {
     results: HashMap<ReplicaId, Vec<u8>>,
 }
 
+#[derive(Debug)]
 pub enum ClientAction {
     Nop,
     Return(Vec<u8>),
