@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, time::Duration};
+use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
 
 use bincode::{Decode, Encode};
 use hdrhistogram::Histogram;
@@ -200,11 +200,24 @@ pub async fn concurrent_close_loop_clients_task(
 }
 
 pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(None);
+    let transport = Arc::new(transport);
     let mut internal_endpoint = Endpoint::server(
-        server_config(),
+        // server_config(),
+        {
+            let mut config = server_config();
+            config.transport_config(transport.clone());
+            config
+        },
         config.replica_internal_addresses[replica.config.id as usize],
     )?;
-    internal_endpoint.set_default_client_config(client_config());
+    // internal_endpoint.set_default_client_config(client_config());
+    internal_endpoint.set_default_client_config({
+        let mut config = client_config();
+        config.transport_config(transport);
+        config
+    });
     let active_task = async {
         sleep(config.replica_connect_delay).await;
         let mut connections = HashMap::new();
