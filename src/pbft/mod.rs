@@ -392,7 +392,8 @@ impl Replica {
                 return ReplicaAction::Nop;
             }
         } else {
-            tracing::warn!(
+            // frequently happens with single machine setting
+            tracing::debug!(
                 self.config.id,
                 prepare.block_num,
                 prepare.replica_id,

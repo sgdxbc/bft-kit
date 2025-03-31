@@ -1,6 +1,8 @@
-use std::fmt::{Debug, Write as _};
+use std::fmt::Debug;
 
 use bincode::{Decode, Encode};
+
+use crate::common::fmt_bytes;
 
 // wire type for signature
 // erasing type for simple (de)serialization
@@ -11,11 +13,7 @@ pub struct Digest(pub Vec<u8>);
 
 impl Debug for Digest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Digest")
-            .field(&self.0.iter().fold(String::new(), |mut s, b| {
-                write!(&mut s, "{b:02x}").unwrap();
-                s
-            }))
-            .finish()
+        write!(f, "Digest")?;
+        fmt_bytes(&self.0, f)
     }
 }
