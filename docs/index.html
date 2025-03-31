@@ -10,6 +10,7 @@
 
 <body class="libertinus">
     <div id="content"></div>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <script type="module">
         import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
         const content = `
@@ -44,9 +45,11 @@ to run a PBFT replica that is configured with \`configs/pbft/replica0.conf\` and
 
 **Automated deployment.** Work in progress.
         `;
-        document.querySelector('#content').innerHTML = marked.parse(content);
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelector('#content').innerHTML = marked.parse(content);
+            MathJax.typeset();
+        });
     </script>
-    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 </body>
 
 </html>
