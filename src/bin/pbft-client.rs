@@ -3,7 +3,7 @@ use std::{env::args, path::PathBuf, time::Duration};
 use bft_testbed::{
     init_logging,
     pbft::{
-        net::{TaskConfig, concurrent_close_loop_clients_task},
+        transport::{TaskConfig, concurrent_close_loop_clients_task},
         parse::Options,
     },
 };

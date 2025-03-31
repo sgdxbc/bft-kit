@@ -4,7 +4,7 @@ use bft_testbed::{
     common::ClientId,
     pbft::{
         Client, ClientConfig, Replica, ReplicaConfig, Spec,
-        net::{ClientTask, TaskConfig, server_task},
+        transport::{ClientTask, TaskConfig, server_task},
     },
 };
 use tokio::{task::JoinSet, time::timeout};

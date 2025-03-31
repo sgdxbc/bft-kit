@@ -2,7 +2,7 @@ use std::{env::args, path::PathBuf, pin::pin, time::Duration};
 
 use bft_testbed::{
     init_logging,
-    pbft::{Replica, net::server_task, parse::Options},
+    pbft::{Replica, transport::server_task, parse::Options},
 };
 use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep};
 

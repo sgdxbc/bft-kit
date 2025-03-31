@@ -30,6 +30,10 @@ pub struct TaskConfig {
     pub replica_connect_delay: Duration,
 }
 
+// the first transport was implemented with TCP but it doesn't work well (or
+// doesn't even work), archive it in case of needed
+pub mod tcp;
+
 async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     mut ingress: impl AsyncRead + Unpin,
     read_sender: Sender<M>,

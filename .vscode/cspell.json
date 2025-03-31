@@ -7,7 +7,10 @@
         "Deque",
         "hdrhistogram",
         "pbft",
+        "Pkcs8",
         "quantiles",
+        "rcgen",
+        "rustls",
         "secp"
     ],
     "ignoreWords": [],

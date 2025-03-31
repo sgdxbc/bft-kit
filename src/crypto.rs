@@ -4,6 +4,8 @@ use bincode::{Decode, Encode};
 
 use crate::common::fmt_bytes;
 
+pub mod cert;
+
 // wire type for signature
 // erasing type for simple (de)serialization
 pub type Sig = Vec<u8>;

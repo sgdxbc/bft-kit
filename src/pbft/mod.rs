@@ -11,8 +11,8 @@ use crate::{
 };
 
 pub mod message;
-pub mod net;
 pub mod parse;
+pub mod transport;
 
 pub type ViewNum = u32;
 pub type BlockNum = u32;

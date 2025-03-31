@@ -125,7 +125,7 @@ impl TryFrom<Options> for super::ReplicaConfig {
     }
 }
 
-impl TryFrom<Options> for super::net::TaskConfig {
+impl TryFrom<Options> for super::transport::TaskConfig {
     type Error = anyhow::Error; // TODO
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
