@@ -1,14 +1,15 @@
 use std::{env::args, path::PathBuf, pin::pin, time::Duration};
 
-use bft_testbed::pbft::{Replica, net::server_task, parse::Options};
+use bft_testbed::{
+    init_logging,
+    pbft::{Replica, net::server_task, parse::Options},
+};
 use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep};
-use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-        .init();
+    init_logging();
+
     let replica_config_path = PathBuf::from(args().nth(1).unwrap_or("replica.conf".into()));
     let mut options = Options::new();
     options.parse(&read_to_string(&replica_config_path).await?)?;

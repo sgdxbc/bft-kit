@@ -2,7 +2,7 @@ use std::{error::Error, net::SocketAddr, str::FromStr, time::Duration};
 
 use anyhow::Context as _;
 
-use crate::ReplicaId;
+use crate::common::ReplicaId;
 
 use super::BlockNum;
 

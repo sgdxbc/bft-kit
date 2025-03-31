@@ -1,19 +1,20 @@
 use std::{env::args, path::PathBuf, time::Duration};
 
-use bft_testbed::pbft::{
-    net::{TaskConfig, concurrent_close_loop_clients_task},
-    parse::Options,
+use bft_testbed::{
+    init_logging,
+    pbft::{
+        net::{TaskConfig, concurrent_close_loop_clients_task},
+        parse::Options,
+    },
 };
 use hdrhistogram::Histogram;
 use tokio::fs::read_to_string;
 use tracing::Instrument;
-use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-        .init();
+    init_logging();
+
     let task_config_path = PathBuf::from(args().nth(1).unwrap_or("task.conf".into()));
     let mut options = Options::new();
     options.parse(&read_to_string(&task_config_path).await?)?;

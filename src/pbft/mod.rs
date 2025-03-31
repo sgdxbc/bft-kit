@@ -5,7 +5,10 @@ use std::{
 
 use sha2::Digest as _;
 
-use crate::{ClientId, ReplicaId, crypto::Digest};
+use crate::{
+    common::{ClientId, ReplicaId},
+    crypto::Digest,
+};
 
 pub mod message;
 pub mod net;
@@ -194,14 +197,6 @@ impl Replica {
 
     // `can_commit`?
     fn is_committed(&self, block_num: BlockNum) -> bool {
-        let votes_len = self.commit_votes.get(&block_num).map(|votes| votes.len());
-        tracing::trace!(
-            self.config.id,
-            block_num,
-            is_prepared = self.is_prepared(block_num),
-            ?votes_len,
-            "is_committed?"
-        );
         self.commit_num >= block_num
             || self.is_prepared(block_num)
                 && self.commit_votes.get(&block_num).is_some_and(|votes| {
@@ -244,6 +239,9 @@ pub enum ReplicaAction {
 
 impl Replica {
     pub fn receive(&mut self, message: ToReplica) -> ReplicaAction {
+        if tracing::enabled!(tracing::Level::TRACE) {
+            tracing::trace!(?message)
+        }
         match message {
             ToReplica::Request(request) => self.receive_request(request),
             ToReplica::PrePrepare(pre_prepare) => self.receive_pre_prepare(pre_prepare),
@@ -265,7 +263,7 @@ impl Replica {
         // for close loop clients this is almost same as deduplication
         // however, when primary is late on committing the last request of a client, the
         // client who is on a tight close loop may send the following (new last) request
-        // to primary before the old last one commits, and this condition allow 
+        // to primary before the old last one commits, and this condition allow
         // overlapping of these two requests
         // this state and structure unfortunately duplicates with at most once services,
         // exactly whom BFT protocols probably drive
@@ -274,11 +272,22 @@ impl Replica {
         // part 4
         // anyway, serious at most once is not guaranteed by BFT protocols. they can
         // legitimately finalize repeatedly requests, as long as in consistent order
-        if self.request_clients.get(&request.client_id) < Some(&request.seq) {
+        let client_seq = self.request_clients.get(&request.client_id);
+        if client_seq < Some(&request.seq) {
+            if let Some(client_seq) = client_seq {
+                // frequently happens with low latency setting
+                tracing::debug!(
+                    self.config.id,
+                    %request.client_id,
+                    ongoing = client_seq,
+                    incoming = request.seq,
+                    "overlapping requests"
+                );
+            }
             self.request_clients.insert(request.client_id, request.seq);
             self.requests.push(request)
         } else {
-            tracing::debug!(%request.client_id, "discard duplicated request")
+            tracing::debug!(%request.client_id, request.seq, "discard duplicated request")
         }
         self.propose_blocks()
     }
@@ -382,7 +391,15 @@ impl Replica {
                 );
                 return ReplicaAction::Nop;
             }
-        } // otherwise the vote pruning is delayed until the late PrePrepare arrives
+        } else {
+            tracing::warn!(
+                self.config.id,
+                prepare.block_num,
+                prepare.replica_id,
+                "receive Prepare before PrePrepare"
+            )
+            // the vote pruning is delayed until the late PrePrepare arrives
+        }
         self.insert_prepare(prepare)
     }
 
@@ -396,6 +413,7 @@ impl Replica {
         if !self.is_prepared(block_num) {
             return ReplicaAction::Nop;
         }
+        tracing::trace!(self.config.id, block_num, "prepared");
         let vote = message::Vote {
             view_num: self.view_num,
             block_num,
@@ -421,27 +439,48 @@ impl Replica {
                 );
                 return ReplicaAction::Nop;
             }
-        } // otherwise the vote pruning is delayed until the late PrePrepare arrives
+        } else {
+            tracing::warn!(
+                self.config.id,
+                commit.block_num,
+                commit.replica_id,
+                "receive Commit before PrePrepare"
+            )
+            // the vote pruning is delayed until the late PrePrepare arrives
+        }
         self.insert_commit(commit)
     }
 
     pub fn insert_commit(&mut self, commit: message::Vote) -> ReplicaAction {
-        self.commit_votes
+        let block_num = commit.block_num;
+        let replica_id = commit.replica_id;
+        let replaced = self
+            .commit_votes
             .entry(commit.block_num)
             .or_default()
             .insert(commit.replica_id, commit);
+        if replaced.is_none() && block_num <= self.ticked_propose_num {
+            tracing::debug!(
+                self.config.id,
+                block_num,
+                replica_id,
+                "receive slow Commit for ticked proposal"
+            )
+        }
         if !self.is_committed(self.commit_num + 1) {
             return ReplicaAction::Nop;
         }
         let mut requests = Vec::new();
         while {
             self.commit_num += 1;
-            tracing::debug!(self.config.id, self.commit_num, "committing");
+            tracing::trace!(self.config.id, self.commit_num, "committed");
             requests.extend(self.blocks[&self.commit_num].requests.clone());
             self.is_committed(self.commit_num + 1)
         } {}
         for request in &requests {
-            self.request_clients.remove(&request.client_id);
+            if self.request_clients.get(&request.client_id) == Some(&request.seq) {
+                self.request_clients.remove(&request.client_id);
+            } // otherwise overlapping later request is pending
         }
         ReplicaAction::Finalize(requests)
     }
@@ -456,17 +495,30 @@ impl Replica {
 
     pub fn tick(&mut self) -> ReplicaAction {
         if self.is_primary() {
-            let action = if self.ticked_propose_num <= self.commit_num {
+            let ticked_propose_num = replace(&mut self.ticked_propose_num, self.propose_num);
+            let block_range = self.commit_num + 1..=ticked_propose_num;
+            if block_range.is_empty() {
                 ReplicaAction::Nop
             } else {
-                tracing::warn!(self.config.id, block_num = ?(self.commit_num + 1..=self.ticked_propose_num), "resend PrePrepare(s)");
-                let pre_prepares = (self.commit_num + 1..=self.ticked_propose_num)
+                tracing::warn!(self.config.id, block_range = ?block_range, "resend PrePrepare(s)");
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    for block_num in block_range.clone() {
+                        let prepare_votes = self
+                            .prepare_votes
+                            .get(&block_num)
+                            .map(|votes| votes.keys().collect::<Vec<_>>());
+                        let commit_votes = self
+                            .commit_votes
+                            .get(&block_num)
+                            .map(|votes| votes.keys().collect::<Vec<_>>());
+                        tracing::debug!(block_num, ?prepare_votes, ?commit_votes);
+                    }
+                }
+                let pre_prepares = block_range
                     .map(|block_num| self.blocks[&block_num].clone())
                     .collect();
                 ReplicaAction::Propose(pre_prepares)
-            };
-            self.ticked_propose_num = self.propose_num;
-            action
+            }
         } else {
             ReplicaAction::Nop
         }

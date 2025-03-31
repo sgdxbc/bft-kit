@@ -11,10 +11,10 @@ struct System {
 }
 
 type ClientId = u32;
-const _: () = assert!(size_of::<ClientId>() == size_of::<crate::ClientId>());
+const _: () = assert!(size_of::<ClientId>() == size_of::<crate::common::ClientId>());
 
 struct Service {
-    replies: HashMap<crate::ClientId, message::Reply>,
+    replies: HashMap<crate::common::ClientId, message::Reply>,
 }
 
 enum ServiceAction {

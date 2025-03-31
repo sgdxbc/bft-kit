@@ -12,7 +12,7 @@ use tokio::{
     try_join,
 };
 
-use crate::{ClientId, ReplicaId};
+use crate::common::{ClientId, ReplicaId};
 
 use super::{Client, ClientAction, ClientConfig, Replica, ReplicaAction, Spec, ToReplica, message};
 

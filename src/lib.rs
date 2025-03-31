@@ -1,32 +1,36 @@
+pub mod common;
 pub mod crypto;
 pub mod pbft;
 
-// pub type ClientId = u32;
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bincode::Encode, bincode::Decode,
-)]
-pub struct ClientId(pub u32);
+pub fn init_logging() {
+    use std::{env, str::FromStr as _};
 
-impl std::fmt::Display for ClientId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ClientId({:08x})", self.0)
-    }
+    use tracing::level_filters::LevelFilter;
+    use tracing_subscriber::{
+        filter::Targets,
+        fmt::{Subscriber, format::FmtSpan},
+        layer::SubscriberExt,
+        util::SubscriberInitExt as _,
+    };
+
+    tracing_subscriber::fmt()
+        .with_max_level(LevelFilter::TRACE)
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+        .finish()
+        // https://docs.rs/tracing-subscriber/latest/src/tracing_subscriber/fmt/mod.rs.html#1200
+        .with(match env::var("RUST_LOG") {
+            Ok(var) => Targets::from_str(&var)
+                .map_err(|e| {
+                    eprintln!("Ignoring `RUST_LOG={:?}`: {}", var, e);
+                })
+                .unwrap_or_default(),
+            Err(env::VarError::NotPresent) => {
+                Targets::new().with_default(Subscriber::DEFAULT_MAX_LEVEL)
+            }
+            Err(e) => {
+                eprintln!("Ignoring `RUST_LOG`: {}", e);
+                Targets::new().with_default(Subscriber::DEFAULT_MAX_LEVEL)
+            }
+        })
+        .init();
 }
-
-impl ClientId {
-    pub fn from_le_bytes(bytes: [u8; size_of::<u32>()]) -> Self {
-        Self(u32::from_le_bytes(bytes))
-    }
-
-    pub fn to_le_bytes(self) -> [u8; size_of::<u32>()] {
-        self.0.to_le_bytes()
-    }
-}
-
-impl rand::distr::Distribution<ClientId> for rand::distr::StandardUniform {
-    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> ClientId {
-        ClientId(rand::Rng::random(rng))
-    }
-}
-
-pub type ReplicaId = u8;

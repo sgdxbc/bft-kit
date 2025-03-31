@@ -1,7 +1,7 @@
 use bincode::{Decode, Encode};
 
 use crate::{
-    ClientId, ReplicaId,
+    common::{ClientId, ReplicaId},
     crypto::{Digest, Sig},
 };
 

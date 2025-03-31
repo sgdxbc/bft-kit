@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bft_testbed::{
-    ClientId,
+    common::ClientId,
     pbft::{
         Client, ClientConfig, Replica, ReplicaConfig, Spec,
         net::{ClientTask, TaskConfig, server_task},
