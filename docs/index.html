@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BFT Testbed</title>
+    <link rel="stylesheet" href="https://latex.vercel.app/style.css">
+</head>
+
+<body class="libertinus">
+    <div id="content"></div>
+    <script type="module">
+        import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
+        const content = `
+# BFT Testbed
+$$BFT\\ evaluations\\ made\\ simple$$
+
+The BFT Testbed project provides the implementations and evaluation scaffolds of a selective collection of distributed protocols that relate to tolerating Byzantine faults, most of which are replication protocols. <span style="color:gray">TODO: a listing of provided protocols and implementation status.</span>
+
+The implementations prioritize *intuitive* and *streamlined*. We don't introduce obscurity (or simply more lines of code) for extreme performance e.g. minimal data copies. The goal is to be easy to reason about: both the stock implementations and any experimental modification applied upon them.
+
+## Technology Stack
+
+The testbed uses \`tokio\` for IO transport and timers, \`quinn\` for QUIC network layer, \`bincode\` for serialization/deserialization, \`sha2\` and \`secp256k1\` for hashing and digital signatures, and \`tracing\` and \`tracing-subscriber\` for logging.
+
+As QUIC enforces cryptographic server certificates, we embedded a self-signed private key (and its certificate) into compiled artifacts. The private key is stored (intentionally) in clear text at \`src/crypto/cert/key_pair.pem\`. Do not use it in production (really). If you would like to use another private key, run \`rotate-cert\` example in project root folder to override it.
+
+## Run Protocols
+
+There are several profiles to run the same protocol implementation.
+
+**Testing.** First is to run with the simulated transports that are embedded in the test source files. No serialization/deserialization involved. The order of messages receiving on each node probably differs from what would happen in a real deployment, so passing all the tests is a necessary but not complete condition for the protocols to be free from problems when running in the wild. Also notice that the provided tests mostly focus on liveness instead of correctness. This is because the testbed is primarily for evaluating the performance of the protocols, and the tests are just for revealing performance bugs (while liveness ones are the most critical ones). The "absolutely correct" implementations should be provided by other approaches like formal verification.
+
+**Loopback examples.** The \`examples\` folder contains demos that run multiple servers and clients in the same process with loopback network interface. Thanks to the protocols' transport layers which are based on async runtime, running multiple protocol instances makes little difference to running only once. These examples can be useful to rapidly fix problems of the transport layers of the protocols.
+
+**Manual cluster-scale deployment.** The \`src/bin\` folder contains client and server binaries for distributed deployment. In a manual deployment clients and servers are running in the same machine or a cluster with network file system. You can open a shell for each client and server and execute the binaries with path to the corresponding configuration file. For example, execute
+
+\`\`\`
+$ cargo run -r --bin pbft -- configs/pbft/replica0.conf
+\`\`\`
+
+to run a PBFT replica that is configured with \`configs/pbft/replica0.conf\` and other two configuration files \`spec.conf\` (for common settings of clients and replicas) and \`task.conf\` (for settings of evaluation tasks such as transport layer parameters and number of concurrent clients). The binary will discover these configuration files in the same folder of the passed one, which is \`configs/pbft\` in this case.
+
+**Automated deployment.** Work in progress.
+        `;
+        document.querySelector('#content').innerHTML = marked.parse(content);
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</body>
+
+</html>

@@ -9,6 +9,7 @@
         "pbft",
         "Pkcs8",
         "quantiles",
+        "QUIC",
         "rcgen",
         "rustls",
         "secp"
