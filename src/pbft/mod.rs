@@ -442,7 +442,7 @@ impl Replica {
                 return ReplicaAction::Nop;
             }
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 self.config.id,
                 commit.block_num,
                 commit.replica_id,
@@ -462,7 +462,7 @@ impl Replica {
             .or_default()
             .insert(commit.replica_id, commit);
         if replaced.is_none() && block_num <= self.ticked_propose_num {
-            tracing::debug!(
+            tracing::warn!(
                 self.config.id,
                 block_num,
                 replica_id,
