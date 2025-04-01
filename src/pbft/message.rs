@@ -1,9 +1,8 @@
 use bincode::{Decode, Encode};
-use sha2::{Digest as _, Sha256};
 
 use crate::{
     common::{ClientId, ReplicaId},
-    crypto::{Digest, Sha256Output, Sig},
+    crypto::{Digest, Sig, UpdateHash},
 };
 
 use super::{BlockNum, ViewNum};
@@ -42,23 +41,19 @@ pub struct Vote {
     pub sig: Sig,
 }
 
-impl PrePrepare {
-    pub fn sha256(&self) -> Sha256Output {
-        let mut state = Sha256::new();
+impl<S: sha2::Digest> UpdateHash<S> for PrePrepare {
+    fn update(&self, state: &mut S) {
         state.update(self.view_num.to_le_bytes());
         state.update(self.block_num.to_le_bytes());
-        state.update(&self.digest);
-        state.finalize()
+        state.update(&self.digest)
     }
 }
 
-impl Vote {
-    pub fn sha256(&self) -> Sha256Output {
-        let mut state = Sha256::new();
+impl<S: sha2::Digest> UpdateHash<S> for Vote {
+    fn update(&self, state: &mut S) {
         state.update(self.view_num.to_le_bytes());
         state.update(self.block_num.to_le_bytes());
         state.update(&self.digest);
-        state.update(self.replica_id.to_le_bytes());
-        state.finalize()
+        state.update(self.replica_id.to_le_bytes())
     }
 }

@@ -7,7 +7,9 @@ use sha2::Digest as _;
 
 use crate::{
     common::{ClientId, ReplicaId},
-    crypto::{Digest, PublicKey, SecretKey, public_key, replica_secret_key, sign, verify},
+    crypto::{
+        Digest, PublicKey, SecretKey, Sha256Hash as _, public_key, replica_secret_key, sign, verify,
+    },
 };
 
 pub mod message;
