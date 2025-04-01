@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display};
 
 use bincode::{Decode, Encode};
 
-use crate::common::fmt_bytes;
+use crate::common::{ReplicaId, fmt_bytes};
 
 pub mod cert;
 
@@ -77,4 +77,16 @@ pub fn verify(message: Sha256Hash, public_key: &PublicKey, Sig(sig): &Sig) -> an
         )
     })?;
     Ok(())
+}
+
+pub fn replica_secret_key(replica_id: ReplicaId) -> SecretKey {
+    let mut bytes = [0; 32];
+    let tag = format!("replica#{replica_id}");
+    let tag = tag.as_bytes();
+    bytes[..tag.len()].copy_from_slice(tag);
+    SecretKey::from_byte_array(&bytes).unwrap()
+}
+
+pub fn public_key(secret_key: &SecretKey) -> PublicKey {
+    SECP.with(|secp| secret_key.public_key(secp))
 }

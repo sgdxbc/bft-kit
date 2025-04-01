@@ -37,12 +37,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let mut server_tasks = JoinSet::new();
     for i in 0..spec.num_replica {
-        let config = ReplicaConfig {
-            spec: spec.clone(),
-            id: i,
-            max_num_inflight: 1,
-            max_batch_size: 1,
-        };
+        let config = ReplicaConfig::new_basic(spec.clone(), i);
         let replica = Replica::new(config);
         server_tasks.spawn(server_task(replica, task_config.clone()));
     }
@@ -56,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         Err(_) => {}
     }
     let span = tracing::info_span!("invoke", result = field::Empty);
-    let result = async {
+    let invoke_task = async {
         let config = ClientConfig {
             spec,
             id: ClientId(0),
@@ -66,8 +61,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("client initialized");
         anyhow::Ok(client_task.invoke(Default::default()).await?)
     }
-    .instrument(span.clone())
-    .await?;
+    .instrument(span.clone());
+    let result = tokio::select! {
+        result = invoke_task => result?,
+        Some(result) = server_tasks.join_next() => {
+            result??;
+            unreachable!()
+        }
+    };
     span.record("result", &*result);
     Ok(())
 }

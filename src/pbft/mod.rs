@@ -7,7 +7,7 @@ use sha2::Digest as _;
 
 use crate::{
     common::{ClientId, ReplicaId},
-    crypto::Digest,
+    crypto::{Digest, PublicKey, SecretKey, public_key, replica_secret_key, sign, verify},
 };
 
 pub mod message;
@@ -136,15 +136,23 @@ pub struct ReplicaConfig {
     pub spec: Spec,
     pub id: ReplicaId,
 
+    pub secret_key: SecretKey,
+    pub public_keys: Vec<PublicKey>,
+
     pub max_num_inflight: BlockNum,
     pub max_batch_size: usize,
 }
 
 impl ReplicaConfig {
     pub fn new_basic(spec: Spec, id: ReplicaId) -> Self {
+        let public_keys = (0..spec.num_replica)
+            .map(|id| public_key(&replica_secret_key(id)))
+            .collect();
         Self {
             spec,
             id,
+            secret_key: replica_secret_key(id),
+            public_keys,
             max_num_inflight: 1,
             max_batch_size: 1,
         }
@@ -307,14 +315,15 @@ impl Replica {
                 let requests = self
                     .requests
                     .drain(..self.config.max_batch_size.min(self.requests.len()))
-                    .collect::<Vec<_>>(); // TODO
-                let pre_prepare = message::PrePrepare {
+                    .collect::<Vec<_>>();
+                let mut pre_prepare = message::PrePrepare {
                     view_num: self.view_num,
                     block_num: self.propose_num,
                     digest: block_digest(&requests),
-                    sig: Default::default(), // TODO
+                    sig: Default::default(),
                     requests,
                 };
+                pre_prepare.sig = sign(pre_prepare.sha256(), &self.config.secret_key);
                 let replaced = self
                     .blocks
                     .insert(pre_prepare.block_num, pre_prepare.clone());
@@ -330,7 +339,12 @@ impl Replica {
         if pre_prepare.view_num < self.view_num {
             return ReplicaAction::Nop;
         }
-        // TODO verify PrePrepare
+        let public_key =
+            &self.config.public_keys[self.config.spec.primary(pre_prepare.view_num) as usize];
+        if let Err(err) = verify(pre_prepare.sha256(), public_key, &pre_prepare.sig) {
+            tracing::warn!(%err, "malformed PrePrepare");
+            return ReplicaAction::Nop;
+        }
         // TODO enter view
         assert!(!self.is_primary());
         let block_num = pre_prepare.block_num;
@@ -370,13 +384,14 @@ impl Replica {
         if let Some(votes) = self.commit_votes.get_mut(&block_num) {
             votes.retain(|_, vote| vote.digest == digest);
         }
-        let vote = message::Vote {
+        let mut vote = message::Vote {
             view_num: self.view_num,
             block_num,
             digest,
             replica_id: self.config.id,
-            sig: Default::default(), //TODO
+            sig: Default::default(),
         };
+        vote.sig = sign(vote.sha256(), &self.config.secret_key);
         ReplicaAction::Prepare(vote)
     }
 
@@ -384,7 +399,14 @@ impl Replica {
         if prepare.view_num < self.view_num || self.is_prepared(prepare.block_num) {
             return ReplicaAction::Nop;
         }
-        // TODO verify Prepare
+        if let Err(err) = verify(
+            prepare.sha256(),
+            &self.config.public_keys[prepare.replica_id as usize],
+            &prepare.sig,
+        ) {
+            tracing::warn!(%err, "malformed Prepare");
+            return ReplicaAction::Nop;
+        }
         // TODO enter view
         if let Some(block) = self.blocks.get(&prepare.block_num) {
             if prepare.digest != block.digest {
@@ -419,13 +441,14 @@ impl Replica {
             return ReplicaAction::Nop;
         }
         tracing::trace!(self.config.id, block_num, "prepared");
-        let vote = message::Vote {
+        let mut vote = message::Vote {
             view_num: self.view_num,
             block_num,
             digest,
             replica_id: self.config.id,
-            sig: Default::default(), // TODO
+            sig: Default::default(),
         };
+        vote.sig = sign(vote.sha256(), &self.config.secret_key);
         ReplicaAction::Commit(vote)
     }
 
@@ -433,7 +456,14 @@ impl Replica {
         if commit.view_num < self.view_num || self.is_committed(commit.block_num) {
             return ReplicaAction::Nop;
         }
-        // TODO verify Commit
+        if let Err(err) = verify(
+            commit.sha256(),
+            &self.config.public_keys[commit.replica_id as usize],
+            &commit.sig,
+        ) {
+            tracing::warn!(%err, "malformed Commit");
+            return ReplicaAction::Nop;
+        }
         // TODO enter view
         if let Some(block) = self.blocks.get(&commit.block_num) {
             if commit.digest != block.digest {
