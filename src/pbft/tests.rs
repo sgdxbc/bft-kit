@@ -41,7 +41,6 @@ impl Service {
             view_num: replica.view_num,
             result,
             replica_id: replica.config.id,
-            sig: Default::default(), // maybe TODO
         };
         let replaced = self.replies.insert(request.client_id, reply.clone());
         assert!(replaced.map(|reply| reply.seq) < Some(request.seq)); // None < Some(..)

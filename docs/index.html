@@ -17,9 +17,9 @@
 # BFT Testbed
 $$BFT\\ evaluations\\ made\\ simple$$
 
-The BFT Testbed project provides the implementations and evaluation scaffolds of a selective collection of distributed protocols that relate to tolerating Byzantine faults, most of which are replication protocols. <span style="color:gray">TODO: a listing of provided protocols and implementation status.</span>
+The BFT Testbed project provides the prototype implementations and evaluation scaffolds of a selective collection of distributed protocols that relate to tolerating Byzantine faults, most of which are replication protocols. <span style="color:gray">TODO: a listing of provided protocols and prototype status.</span>
 
-The implementations prioritize *intuitive* and *streamlined*. We don't introduce obscurity (or simply more lines of code) for extreme performance e.g. minimal data copies. The goal is to be easy to reason about: both the stock implementations and any experimental modification applied upon them.
+The prototypes prioritize *intuitive* and *comprehensive*. We don't introduce obscurity (or simply more lines of code) for extreme performance e.g. minimal data copies. The goal is to be easy to reason about and easy to "manageably" mess around by applying experimental modifications upon the reference implementations.
 
 ## Technology Stack
 
@@ -37,7 +37,7 @@ We show various ways to run the same implementation of PBFT (\`src/pbft/mod.rs\`
 
 to run all PBFT tests. You may want to pass environment variables \`RUST_LOG\` and \`RUST_BACKTRACE\` as well.
 
-The tests mostly check for liveness, so that if a protocol gets stuck in the real deployment, that is probably not because of deadlock in the protocol implementations as long as all tests are passed. This testbed is not good at ensuring correctness; you may still look into approaches like model checking for that (maybe add it in the future). Also, the simulated transports may not deliver the messages in a realistic order. The simulated order is just a *reasonable* order that the protocol implementation should work with it.
+The tests mostly check for liveness, so that if a protocol gets stuck in the real deployment, that is probably not because of deadlock in the protocol implementations as long as all tests are passed. This testbed is not good at ensuring correctness; you may still look into approaches like model checking for that (maybe add it in the future). Also, the simulated transports may not deliver the messages in a realistic order. The simulated order is just a *reasonable* order that the protocol prototype should work with it.
 
 **Loopback examples.** The \`src/pbft/transport.rs\` provides a network transport to run PBFT clients and replicas in asynchronous tasks (or coroutines). The \`pbft\` example runs multiple client and replica tasks in the same process with loopback network. The configurations are hardcoded in the example.
 

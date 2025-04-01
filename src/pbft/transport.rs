@@ -390,7 +390,6 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
                             view_num: replica.view_num,
                             result: Default::default(),
                             replica_id: replica.config.id,
-                            sig: Default::default(), // TODO
                         };
                         let egress =
                             client_egresses

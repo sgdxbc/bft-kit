@@ -307,7 +307,6 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
                             view_num: replica.view_num,
                             result: Default::default(),
                             replica_id: replica.config.id,
-                            sig: Default::default(), // TODO
                         };
                         let egress = client_egresses.get_mut(&request.client_id).ok_or(
                             anyhow::format_err!("send to unexpected client {}", request.client_id),

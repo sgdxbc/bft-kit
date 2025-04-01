@@ -33,6 +33,10 @@ impl Spec {
 pub enum ToReplica {
     Request(message::Request),
     PrePrepare(message::PrePrepare),
+    // this is kind of a secure bug: malformed replica can "repackage" a Prepare of
+    // any other replica into a Commit to pretend that replica has sent Commit
+    // can be easily addressed by e.g. adding a nonce in Commit messages
+    // intentionally left unresolved to remind this is a prototype implementation
     Prepare(message::Vote),
     Commit(message::Vote),
 }
@@ -107,7 +111,6 @@ impl Client {
         if reply.seq != self.seq || self.op.is_none() {
             return ClientAction::Nop;
         }
-        // TODO verify signature
         self.results.insert(reply.replica_id, reply.result.clone());
         if self
             .results
@@ -219,7 +222,7 @@ fn block_digest(requests: &[message::Request]) -> Digest {
         state.update(request.seq.to_le_bytes());
         state.update(&request.op)
     }
-    Digest(state.finalize().to_vec())
+    state.finalize().into()
 }
 
 #[derive(Debug)]
