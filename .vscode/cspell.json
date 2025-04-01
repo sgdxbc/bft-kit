@@ -8,6 +8,7 @@
         "hdrhistogram",
         "pbft",
         "Pkcs8",
+        "pkill",
         "quantiles",
         "QUIC",
         "rcgen",

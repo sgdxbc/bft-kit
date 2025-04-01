@@ -25,25 +25,48 @@ The implementations prioritize *intuitive* and *streamlined*. We don't introduce
 
 The testbed uses \`tokio\` for IO transport and timers, \`quinn\` for QUIC network layer, \`bincode\` for serialization/deserialization, \`sha2\` and \`secp256k1\` for hashing and digital signatures, and \`tracing\` and \`tracing-subscriber\` for logging.
 
-As QUIC enforces cryptographic server certificates, we embedded a self-signed private key (and its certificate) into compiled artifacts. The private key is stored (intentionally) in clear text at \`src/crypto/cert/key_pair.pem\`. Do not use it in production (really). If you would like to use another private key, run \`rotate-cert\` example in project root folder to override it.
+As QUIC enforces cryptographic server certificates, we embedded a self-signed private key (and its certificate) into compiled artifacts. The private key is stored (intentionally) in clear text at \`src/crypto/cert/key_pair.pem\`. Do not use it in production (really?). If you would like to use another private key, run \`rotate-cert\` example in project root folder to override it.
 
-## Run Protocols
+## Quick Start: Ways to Run PBFT
 
-There are several profiles to run the same protocol implementation.
+We show various ways to run the same implementation of PBFT (\`src/pbft/mod.rs\`), each of which is tailored for different stages in the development lifecycle.
 
-**Testing.** First is to run with the simulated transports that are embedded in the test source files. No serialization/deserialization involved. The order of messages receiving on each node probably differs from what would happen in a real deployment, so passing all the tests is a necessary but not complete condition for the protocols to be free from problems when running in the wild. Also notice that the provided tests mostly focus on liveness instead of correctness. This is because the testbed is primarily for evaluating the performance of the protocols, and the tests are just for revealing performance bugs (while liveness ones are the most critical ones). The "absolutely correct" implementations should be provided by other approaches like formal verification.
+**Testing.** The test source files of protocols embed simulated transports for the protocols to allow the protocols running with the minimal settings, avoid the hassles for settings up distributed communications. Execute
 
-**Loopback examples.** The \`examples\` folder contains demos that run multiple servers and clients in the same process with loopback network interface. Thanks to the protocols' transport layers which are based on async runtime, running multiple protocol instances makes little difference to running only once. These examples can be useful to rapidly fix problems of the transport layers of the protocols.
+    $ cargo test --lib -- pbft::tests
 
-**Manual cluster-scale deployment.** The \`src/bin\` folder contains client and server binaries for distributed deployment. In a manual deployment clients and servers are running in the same machine or a cluster with network file system. You can open a shell for each client and server and execute the binaries with path to the corresponding configuration file. For example, execute
+to run all PBFT tests. You may want to pass environment variables \`RUST_LOG\` and \`RUST_BACKTRACE\` as well.
 
-\`\`\`
-$ cargo run -r --bin pbft -- configs/pbft/replica0.conf
-\`\`\`
+The tests mostly check for liveness, so that if a protocol gets stuck in the real deployment, that is probably not because of deadlock in the protocol implementations as long as all tests are passed. This testbed is not good at ensuring correctness; you may still look into approaches like model checking for that (maybe add it in the future). Also, the simulated transports may not deliver the messages in a realistic order. The simulated order is just a *reasonable* order that the protocol implementation should work with it.
 
-to run a PBFT replica that is configured with \`configs/pbft/replica0.conf\` and other two configuration files \`spec.conf\` (for common settings of clients and replicas) and \`task.conf\` (for settings of evaluation tasks such as transport layer parameters and number of concurrent clients). The binary will discover these configuration files in the same folder of the passed one, which is \`configs/pbft\` in this case.
+**Loopback examples.** The \`src/pbft/transport.rs\` provides a network transport to run PBFT clients and replicas in asynchronous tasks (or coroutines). The \`pbft\` example runs multiple client and replica tasks in the same process with loopback network. The configurations are hardcoded in the example.
+
+**Manual cluster-scale deployment.** The \`pbft-client\` and \`pbft\` binaries run *a group of close loop clients* and a replica according to a set of configuration files
+- \`spec.conf\` universal parameters for all participating clients and replica e.g. number of tolerated faulty replicas
+- \`replica[N].conf\` exclusive settings for replica N e.g. replica ID
+- \`task.conf\` settings for the evaluation instead of the protocol e.g. the number of concurrent clients spawned by a single client process
+
+Execute
+
+    $ cargo run -r --bin pbft -- configs/pbft/replica0.conf
+
+to run a PBFT replica#0 that is configured with \`configs/pbft/replica0.conf\`, and \`spec.conf\` and \`task.conf\` will be discovered in the same folder of the replica configuration file, which is \`configs/pbft\` in this case. Then, either on the same machine or other machine with identical compiled binaries and configurations (a network file system would be convenient), execute the same command with \`configs/pbft/replica1.conf\` to run replica#1 with its corresponding configuration file and the same specification and task configuration files as replica#0. Repeat two more times for replica#2 and replica#3. 
+
+Wait a while until the replicas report "replica ready" in the logs. Execute
+
+    $ cargo run -r --bin pbft-client -- configs/pbft/task.conf
+
+to run PBFT clients with the same task and specification configurations as the replicas. The clients will exit after report the performance statistics. It is possible to rerun clients against the same replica network, but start with a fresh network is recommended. Execute
+
+    $ pkill -INT pbft
+
+to shutdown current running replicas.
 
 **Automated deployment.** Work in progress.
+
+## Design Practices
+
+**A *clean* separation between protocols and transports is not always the optimal choice.** To be elaborate.
         `;
         document.addEventListener('DOMContentLoaded', () => {
             document.querySelector('#content').innerHTML = marked.parse(content);
