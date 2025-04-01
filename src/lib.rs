@@ -1,7 +1,10 @@
 pub mod common;
 pub mod crypto;
+pub mod hotstuff;
 pub mod pbft;
 
+// similar to tracing_subscriber::fmt::init() but reports spans
+// why init() defaults to not report spans? i don't understand
 pub fn init_logging() {
     use std::{env, str::FromStr as _};
 

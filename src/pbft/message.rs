@@ -3,7 +3,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{
     common::{ClientId, ReplicaId},
-    crypto::{Digest, Sha256Hash, Sig},
+    crypto::{Digest, Sha256Output, Sig},
 };
 
 use super::{BlockNum, ViewNum};
@@ -43,7 +43,7 @@ pub struct Vote {
 }
 
 impl PrePrepare {
-    pub fn sha256(&self) -> Sha256Hash {
+    pub fn sha256(&self) -> Sha256Output {
         let mut state = Sha256::new();
         state.update(self.view_num.to_le_bytes());
         state.update(self.block_num.to_le_bytes());
@@ -53,7 +53,7 @@ impl PrePrepare {
 }
 
 impl Vote {
-    pub fn sha256(&self) -> Sha256Hash {
+    pub fn sha256(&self) -> Sha256Output {
         let mut state = Sha256::new();
         state.update(self.view_num.to_le_bytes());
         state.update(self.block_num.to_le_bytes());

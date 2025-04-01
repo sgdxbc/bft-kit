@@ -6,6 +6,7 @@
     "words": [
         "Deque",
         "hdrhistogram",
+        "hotstuff",
         "pbft",
         "Pkcs8",
         "pkill",
