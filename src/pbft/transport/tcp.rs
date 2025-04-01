@@ -1,22 +1,18 @@
 use std::{collections::HashMap, io::ErrorKind, net::SocketAddr};
 
 use bincode::{Decode, Encode, error::DecodeError};
-use hdrhistogram::Histogram;
-use rand::random;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, tcp::OwnedWriteHalf},
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
-    time::{Instant, sleep, timeout_at},
+    time::sleep,
     try_join,
 };
 
 use crate::common::{ClientId, ReplicaId};
 
-use crate::pbft::{
-    Client, ClientAction, ClientConfig, Replica, ReplicaAction, Spec, ToReplica, message,
-};
+use crate::pbft::{Client, ClientAction, Replica, ReplicaAction, ToReplica, message};
 
 use super::TaskConfig;
 
@@ -137,41 +133,14 @@ impl ClientTask {
     }
 }
 
-pub async fn concurrent_close_loop_clients_task(
-    spec: Spec,
-    config: TaskConfig,
-) -> anyhow::Result<Vec<Histogram<u32>>> {
-    let mut client_tasks = Vec::new();
-    for _ in 0..config.num_client {
-        let client = Client::new(ClientConfig {
-            spec: spec.clone(),
-            id: random(),
-        });
-        client_tasks.push(ClientTask::init(client, config.clone()).await?)
+impl super::AbstractClientTask for ClientTask {
+    fn init(client: Client, config: TaskConfig) -> impl Future<Output = anyhow::Result<Self>> {
+        Self::init(client, config)
     }
-    let mut tasks = JoinSet::new();
-    for mut client_task in client_tasks {
-        let config = config.clone();
-        tasks.spawn(async move {
-            let deadline = Instant::now() + config.client_duration;
-            let mut latencies = Histogram::new(3)?;
-            loop {
-                let start = Instant::now();
-                match timeout_at(deadline, client_task.invoke(Default::default())).await {
-                    Ok(result) => {
-                        result?;
-                        latencies += start.elapsed().as_micros() as u64;
-                    }
-                    Err(_) => break anyhow::Ok(latencies),
-                }
-            }
-        });
+
+    fn invoke(&mut self, op: Vec<u8>) -> impl Future<Output = anyhow::Result<Vec<u8>>> + Send {
+        Self::invoke(self, op)
     }
-    let mut latencies = Vec::new();
-    while let Some(client_latencies) = tasks.join_next().await {
-        latencies.push(client_latencies??)
-    }
-    Ok(latencies)
 }
 
 pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Result<()> {

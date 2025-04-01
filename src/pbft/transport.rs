@@ -162,7 +162,22 @@ impl ClientTask {
     }
 }
 
-pub async fn concurrent_close_loop_clients_task(
+pub trait AbstractClientTask: Sized {
+    fn init(client: Client, config: TaskConfig) -> impl Future<Output = anyhow::Result<Self>>;
+    fn invoke(&mut self, op: Vec<u8>) -> impl Future<Output = anyhow::Result<Vec<u8>>> + Send;
+}
+
+impl AbstractClientTask for ClientTask {
+    fn init(client: Client, config: TaskConfig) -> impl Future<Output = anyhow::Result<Self>> {
+        Self::init(client, config)
+    }
+
+    fn invoke(&mut self, op: Vec<u8>) -> impl Future<Output = anyhow::Result<Vec<u8>>> + Send {
+        Self::invoke(self, op)
+    }
+}
+
+pub async fn concurrent_close_loop_clients_task<C: AbstractClientTask + Send + 'static>(
     spec: Spec,
     config: TaskConfig,
 ) -> anyhow::Result<Vec<Histogram<u32>>> {
@@ -172,7 +187,7 @@ pub async fn concurrent_close_loop_clients_task(
             spec: spec.clone(),
             id: random(),
         });
-        client_tasks.push(ClientTask::init(client, config.clone()).await?)
+        client_tasks.push(C::init(client, config.clone()).await?)
     }
     let mut tasks = JoinSet::new();
     for mut client_task in client_tasks {

@@ -3,8 +3,8 @@ use std::{env::args, path::PathBuf, time::Duration};
 use bft_testbed::{
     init_logging,
     pbft::{
-        transport::{TaskConfig, concurrent_close_loop_clients_task},
         parse::Options,
+        transport::{ClientTask, TaskConfig, concurrent_close_loop_clients_task},
     },
 };
 use hdrhistogram::Histogram;
@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
 
     let task_config = TaskConfig::try_from(options.clone())?;
     let client_latencies =
-        concurrent_close_loop_clients_task(options.try_into()?, task_config.clone())
+        concurrent_close_loop_clients_task::<ClientTask>(options.try_into()?, task_config.clone())
             .instrument(tracing::info_span!("concurrent close loops"))
             .await?;
     let mut latencies = Histogram::new(3)?;

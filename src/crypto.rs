@@ -72,7 +72,7 @@ pub fn verify(message: Sha256Hash, public_key: &PublicKey, Sig(sig): &Sig) -> an
     SECP.with(|secp| {
         secp.verify_ecdsa(
             &message,
-            &secp256k1::ecdsa::Signature::from_compact(&sig)?,
+            &secp256k1::ecdsa::Signature::from_compact(sig)?,
             public_key,
         )
     })?;
