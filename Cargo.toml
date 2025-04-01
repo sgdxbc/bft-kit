@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = { version = "1.0.97", features = ["backtrace"] }
 bincode = "2.0.1"
+futures = { version = "0.3.31", default-features = false, features = ["std"] }
 hdrhistogram = "7.5.4"
 quinn = "0.11.7"
 rand = "0.9.0"

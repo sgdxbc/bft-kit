@@ -1,19 +1,24 @@
-use std::time::Duration;
+use std::{env::args, time::Duration};
 
 use bft_testbed::{
     common::ClientId,
     init_logging,
     pbft::{
         Client, ClientConfig, Replica, ReplicaConfig, Spec,
-        transport::{ClientTask, TaskConfig, server_task},
+        transport::{ClientTask, TaskConfig, server_task, tcp},
     },
 };
+use futures::FutureExt;
 use tokio::{task::JoinSet, time::timeout};
 use tracing::{Instrument, field};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_logging();
+    let use_tcp = args().nth(1).as_deref() == Some("tcp");
+    if use_tcp {
+        tracing::info!("use tcp")
+    }
 
     let spec = Spec {
         num_faulty: 1,
@@ -39,7 +44,11 @@ async fn main() -> anyhow::Result<()> {
     for i in 0..spec.num_replica {
         let config = ReplicaConfig::new_basic(spec.clone(), i);
         let replica = Replica::new(config);
-        server_tasks.spawn(server_task(replica, task_config.clone()));
+        server_tasks.spawn(if !use_tcp {
+            server_task(replica, task_config.clone()).left_future()
+        } else {
+            tcp::server_task(replica, task_config.clone()).right_future()
+        });
     }
     tracing::info!("wait servers up");
     match timeout(Duration::from_secs(1), server_tasks.join_next()).await {
@@ -51,15 +60,25 @@ async fn main() -> anyhow::Result<()> {
         Err(_) => {}
     }
     let span = tracing::info_span!("invoke", result = field::Empty);
-    let invoke_task = async {
-        let config = ClientConfig {
-            spec,
-            id: ClientId(0),
-        };
-        let client = Client::new(config);
-        let mut client_task = ClientTask::init(client, task_config).await?;
-        tracing::info!("client initialized");
-        anyhow::Ok(client_task.invoke(Default::default()).await?)
+    let config = ClientConfig {
+        spec,
+        id: ClientId(0),
+    };
+    let client = Client::new(config);
+    let invoke_task = if !use_tcp {
+        async {
+            let mut client_task = ClientTask::init(client, task_config).await?;
+            tracing::info!("client initialized");
+            anyhow::Ok(client_task.invoke(Default::default()).await?)
+        }
+        .left_future()
+    } else {
+        async {
+            let mut client_task = tcp::ClientTask::init(client, task_config).await?;
+            tracing::info!("client initialized");
+            anyhow::Ok(client_task.invoke(Default::default()).await?)
+        }
+        .right_future()
     }
     .instrument(span.clone());
     let result = tokio::select! {
