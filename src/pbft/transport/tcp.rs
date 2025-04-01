@@ -3,7 +3,7 @@ use std::{collections::HashMap, io::ErrorKind, net::SocketAddr};
 use bincode::{Decode, Encode, error::DecodeError};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener, TcpStream, tcp::OwnedWriteHalf},
+    net::{TcpListener, TcpSocket, TcpStream, tcp::OwnedWriteHalf},
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
     time::sleep,
@@ -144,32 +144,60 @@ impl super::AbstractClientTask for ClientTask {
 }
 
 pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
-    let mut replica_egresses = HashMap::new();
     let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
     let (read_sender, mut read_receiver) = mpsc::channel(4096);
+    let new_socket = || {
+        let socket = TcpSocket::new_v4()?;
+        socket.set_reuseport(true)?;
+        socket.bind(config.replica_internal_addresses[replica.config.id as usize])?;
+        anyhow::Ok(socket)
+    };
     let active_task = async {
         sleep(config.replica_connect_delay).await;
-        for (i, &addr) in config.replica_internal_addresses.iter().enumerate() {
-            if i as ReplicaId == replica.config.id {
-                continue;
-            }
-            replica_egresses.insert(i as ReplicaId, TcpStream::connect(addr).await?);
+        let mut connections = HashMap::new();
+        for (i, &addr) in config
+            .replica_internal_addresses
+            .iter()
+            .enumerate()
+            .skip(replica.config.id as usize + 1)
+        {
+            let mut connection = new_socket()?.connect(addr).await?;
+            connection
+                .write_all(&replica.config.id.to_le_bytes())
+                .await?;
+            connections.insert(i as ReplicaId, connection);
         }
-        anyhow::Ok(())
+        anyhow::Ok(connections)
     };
-    let internal_listener =
-        TcpListener::bind(config.replica_internal_addresses[replica.config.id as usize]).await?;
+    let internal_listener = new_socket()?.listen(100)?;
     let passive_task = async {
-        for _ in 0..config.replica_internal_addresses.len() - 1 {
-            let (connection, _) = internal_listener.accept().await?;
+        let mut connections = HashMap::new();
+        for _ in 0..replica.config.id {
+            // the peer address here usually can be used for lookup, but in proxied
+            // environment like AWS VPC it fails
+            let (mut connection, _) = internal_listener.accept().await?;
+            let mut replica_id = [0; size_of::<ReplicaId>()];
+            connection.read_exact(&mut replica_id).await?;
+            connections.insert(ReplicaId::from_le_bytes(replica_id), connection);
+        }
+        Ok(connections)
+    };
+    let (mut connections, other_connections) = try_join!(active_task, passive_task)?;
+    connections.extend(other_connections);
+    anyhow::ensure!(connections.len() == config.replica_internal_addresses.len() - 1);
+    let mut replica_egresses = HashMap::new();
+    for (replica_id, connection) in connections {
+        let (read_half, write_half) = connection.into_split();
+        read_tasks.spawn(read_task(
+            read_half,
+            read_sender.clone(),
             // this probably causes some `read_task` errors, as there has to be a replica
             // that is the one exits earliest and "remote close" other replicas' read tasks
             // will try some neat polling to prevent the error being _revealed_
-            read_tasks.spawn(read_task(connection, read_sender.clone(), false));
-        }
-        Ok(())
-    };
-    try_join!(active_task, passive_task)?;
+            false,
+        ));
+        replica_egresses.insert(replica_id, write_half);
+    }
     tracing::info!("replica ready");
 
     let replies = HashMap::<ClientId, message::Reply>::new();
@@ -299,3 +327,5 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
         }
     }
 }
+
+// cspell:enableCompoundWords
