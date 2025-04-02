@@ -70,7 +70,17 @@ to shutdown current running replicas.
 
 ## Design Practices
 
-**A *clean* separation between protocols and transports may *not* always be the optimal choice.** To be elaborate.
+**Abstract over receiver actions instead of runtime context, or [sans I/O] (that is specialized to higher level protocols).** In a codebase that consists of protocol state machines and the "outside world" e.g. network transport, simulated event queue, etc, it is tempting to let receiver (i.e. protocol state machines) and runtime context to hold reference to each other. Runtime calls into receivers for processing arriving messages, and receivers call runtime context in the middle of processing for making any *effect*, mostly send messages and set timers. The projects following this practice include the good old [specpaxos] (replicating whom became my starting point from long time ago), and [Demikernel].
+
+[sans I/O]: https://sans-io.readthedocs.io/
+[specpaxos]: https://github.com/UWSysLab/specpaxos
+[Demikernel]: https://github.com/microsoft/demikernel
+
+However, this is not the optimal solution at least for *simplicity*. In particular of Rust, cyclic (mutable) references between receivers and runtime cannot be elegantly expressed. If we don't want to involve \`dyn\` (omit the inconveniences caused by it for brevity), the receiver and runtime types will lock into each other through generic parameters. The root cause of these troubles is to interleave code of protocol logic and calling runtime context methods.
+
+Sans I/O has been the preferred practice to implement protocol recently. Different from its original proposed setup where protocols interact with outside world with receiving and sending binary buffers, in this testbed we would like to design a rather higher level interface e.g. for better testing ergonomics. The receiving buffer is replaced by calling into two methods \`receive_message\` and \`tick\`, and the sending buffer is replaced by an "action" buffer where actions are like "send a message to each one of these replicas", etc.
+
+The downside of this approach is the mandatory copying for the message sending out, comparing to the runtime context approach where protocols can pass to the context the reference to some data they own. The copying should not be a heavy hitter of performance in most expected cases, and even if we implement some protocols dealing with bulk data in the future, swallow copy achieved by e.g. utilizing \`bytes\` is straightforward. On the other hand, the runtime usually cannot finish sending messages in place, such as the simulated runtime and the asynchronous runtime (and we probably don't want to color our protocols with \`async\`), then a copying becomes unavoidable.
         `;
         document.addEventListener('DOMContentLoaded', () => {
             document.querySelector('#content').innerHTML = marked.parse(content);

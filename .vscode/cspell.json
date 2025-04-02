@@ -4,6 +4,7 @@
     "dictionaryDefinitions": [],
     "dictionaries": [],
     "words": [
+        "Demikernel",
         "Deque",
         "hdrhistogram",
         "hotstuff",
@@ -15,7 +16,8 @@
         "rcgen",
         "rustls",
         "secp",
-        "seqs"
+        "seqs",
+        "specpaxos"
     ],
     "ignoreWords": [],
     "import": []
