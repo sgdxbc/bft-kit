@@ -59,12 +59,12 @@ async fn main() -> anyhow::Result<()> {
         Ok(None) => unreachable!(),
         Err(_) => {}
     }
-    let span = tracing::info_span!("invoke", result = field::Empty);
     let config = ClientConfig {
         spec,
         id: ClientId(0),
     };
     let client = Client::new(config);
+    let span = tracing::info_span!("invoke", result = field::Empty);
     let invoke_task = if !use_tcp {
         async {
             let mut client_task = ClientTask::init(client, task_config).await?;
@@ -89,5 +89,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     span.record("result", &*result);
+    server_tasks.abort_all();
     Ok(())
 }

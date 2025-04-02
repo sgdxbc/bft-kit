@@ -234,52 +234,44 @@ fn block_digest(requests: &[message::Request]) -> Digest {
 
 #[derive(Debug)]
 pub enum ReplicaAction {
-    Nop,
     SendToReplica(ReplicaId, ToReplica),
     SendToAllReplicas(ToReplica), // except loopback
-
-    // same as SendToAllReplicas(ToReplica::PrePrepare(block)) for each block
-    Propose(Vec<message::PrePrepare>),
-    // same as SendToAllReplicas(ToReplica::Prepare(vote)) + runtime calls
-    // insert_prepare(vote) afterward
-    Prepare(message::Vote),
-    // similar to above but with insert_commit call
-    Commit(message::Vote),
     Finalize(Vec<message::Request>),
 }
 
+pub type ReplicaActions = Vec<ReplicaAction>;
+
 impl Replica {
-    pub fn receive(&mut self, message: ToReplica) -> ReplicaAction {
+    pub fn receive(&mut self, message: ToReplica, actions: &mut ReplicaActions) {
         if tracing::enabled!(tracing::Level::TRACE) {
             tracing::trace!(?message)
         }
         match message {
-            ToReplica::Request(request) => self.receive_request(request),
-            ToReplica::PrePrepare(pre_prepare) => self.receive_pre_prepare(pre_prepare),
-            ToReplica::Prepare(vote) => self.receive_prepare(vote),
-            ToReplica::Commit(vote) => self.receive_commit(vote),
+            ToReplica::Request(request) => self.receive_request(request, actions),
+            ToReplica::PrePrepare(pre_prepare) => self.receive_pre_prepare(pre_prepare, actions),
+            ToReplica::Prepare(vote) => self.receive_prepare(vote, actions),
+            ToReplica::Commit(vote) => self.receive_commit(vote, actions),
         }
     }
 
-    fn receive_request(&mut self, request: message::Request) -> ReplicaAction {
+    fn receive_request(&mut self, request: message::Request, actions: &mut ReplicaActions) {
         self.request_pool.push(request.clone());
         if self.is_primary() {
-            self.propose_blocks()
+            self.propose_blocks(actions)
         } else {
             tracing::warn!(self.config.id, %request.client_id, request.seq, "forward broadcast request to primary");
             // TODO bookkeeping forwarded
-            ReplicaAction::SendToReplica(
+            actions.push(ReplicaAction::SendToReplica(
                 self.config.spec.primary(self.view_num),
                 ToReplica::Request(request),
-            )
+            ))
         }
     }
 
-    fn propose_blocks(&mut self) -> ReplicaAction {
+    fn propose_blocks(&mut self, actions: &mut ReplicaActions) {
         if !self.can_propose() {
-            return ReplicaAction::Nop;
+            return;
         };
-        let mut pre_prepares = Vec::new();
         while let Some(requests) = self.request_pool.close_batch(self.config.max_batch_size) {
             self.propose_num += 1;
             let mut pre_prepare = message::PrePrepare {
@@ -294,53 +286,66 @@ impl Replica {
                 .blocks
                 .insert(pre_prepare.block_num, pre_prepare.clone());
             assert!(replaced.is_none());
-            pre_prepares.push(pre_prepare);
+            actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
+                pre_prepare,
+            )));
             if !self.can_propose() {
                 break;
             }
         }
-        ReplicaAction::Propose(pre_prepares)
     }
 
-    fn receive_pre_prepare(&mut self, pre_prepare: message::PrePrepare) -> ReplicaAction {
+    fn receive_pre_prepare(
+        &mut self,
+        pre_prepare: message::PrePrepare,
+        actions: &mut ReplicaActions,
+    ) {
         if pre_prepare.view_num < self.view_num {
-            return ReplicaAction::Nop;
+            return;
         }
         // TODO ignore PrePrepare with anomaly block number
         let public_key =
             &self.config.public_keys[self.config.spec.primary(pre_prepare.view_num) as usize];
         if let Err(err) = verify(pre_prepare.sha256(), public_key, &pre_prepare.sig) {
             tracing::warn!(%err, "malformed PrePrepare");
-            return ReplicaAction::Nop;
+            return;
         }
         // TODO enter view
         assert!(!self.is_primary());
         let block_num = pre_prepare.block_num;
         let digest = pre_prepare.digest.clone();
         if let Some(block) = self.blocks.get(&block_num) {
-            if digest == block.digest {
-                // primary is retrying on the block/PrePrepare, so try to progress the primary
-                // in a minimalism way. note that this only ensures liveness on the primary,
-                // other replicas request state transfer when they believe someone (at least the
-                // primary) has committed the block
-                // by returning ReplicationAction::Prepare(vote) here, current implementation
-                // _happens_ to resend Prepare, and additionally resend Commit if applicable
-                // further updates may affect this coincidence and cause liveness problems
-                // at the same time it would
-                // * (re)insert the loopback Prepare (and Commit) which has no effect
-                // * re-signing the resent Commit (if any)
-                // * resend Prepare (and Commit) to all replicas, while we only need to progress
-                //   the primary here
-                // so it's a very inefficient fallback path
+            if digest != block.digest {
+                tracing::warn!(
+                    self.config.id,
+                    block_num,
+                    preparing = %block.digest,
+                    incoming = %digest,
+                    "multiple proposals",
+                );
+            } else {
                 tracing::warn!(
                     self.config.id,
                     block_num,
                     "resend vote for duplicated proposal"
                 );
                 let vote = self.prepare_votes[&block_num][&self.config.id].clone();
-                return ReplicaAction::Prepare(vote);
+                actions.push(ReplicaAction::SendToReplica(
+                    self.config.spec.primary(self.view_num),
+                    ToReplica::Prepare(vote),
+                ));
+                if let Some(vote) = self
+                    .commit_votes
+                    .get(&block_num)
+                    .and_then(|votes| votes.get(&self.config.id))
+                {
+                    actions.push(ReplicaAction::SendToReplica(
+                        self.config.spec.primary(self.view_num),
+                        ToReplica::Commit(vote.clone()),
+                    ))
+                }
             }
-            return ReplicaAction::Nop;
+            return;
         }
 
         let replaced = self.blocks.insert(pre_prepare.block_num, pre_prepare);
@@ -360,12 +365,15 @@ impl Replica {
             sig: Default::default(),
         };
         vote.sig = sign(vote.sha256(), &self.config.secret_key);
-        ReplicaAction::Prepare(vote)
+        actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Prepare(
+            vote.clone(),
+        )));
+        self.insert_prepare(vote, actions)
     }
 
-    fn receive_prepare(&mut self, prepare: message::Vote) -> ReplicaAction {
+    fn receive_prepare(&mut self, prepare: message::Vote, actions: &mut ReplicaActions) {
         if prepare.view_num < self.view_num || self.is_prepared(prepare.block_num) {
-            return ReplicaAction::Nop;
+            return;
         }
         if let Err(err) = verify(
             prepare.sha256(),
@@ -373,7 +381,7 @@ impl Replica {
             &prepare.sig,
         ) {
             tracing::warn!(%err, "malformed Prepare");
-            return ReplicaAction::Nop;
+            return;
         }
         // TODO enter view
         if let Some(block) = self.blocks.get(&prepare.block_num) {
@@ -383,7 +391,7 @@ impl Replica {
                     prepare.replica_id,
                     "Prepare digest mismatch"
                 );
-                return ReplicaAction::Nop;
+                return;
             }
         } else {
             // frequently happens with single machine setting
@@ -395,10 +403,10 @@ impl Replica {
             )
             // the vote pruning is delayed until the late PrePrepare arrives
         }
-        self.insert_prepare(prepare)
+        self.insert_prepare(prepare, actions)
     }
 
-    pub fn insert_prepare(&mut self, prepare: message::Vote) -> ReplicaAction {
+    pub fn insert_prepare(&mut self, prepare: message::Vote, actions: &mut ReplicaActions) {
         let block_num = prepare.block_num;
         let digest = prepare.digest.clone();
         self.prepare_votes
@@ -406,7 +414,7 @@ impl Replica {
             .or_default()
             .insert(prepare.replica_id, prepare);
         if !self.is_prepared(block_num) {
-            return ReplicaAction::Nop;
+            return;
         }
         tracing::trace!(self.config.id, block_num, "prepared");
         let mut vote = message::Vote {
@@ -417,12 +425,15 @@ impl Replica {
             sig: Default::default(),
         };
         vote.sig = sign(vote.sha256(), &self.config.secret_key);
-        ReplicaAction::Commit(vote)
+        actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Commit(
+            vote.clone(),
+        )));
+        self.insert_commit(vote, actions)
     }
 
-    fn receive_commit(&mut self, commit: message::Vote) -> ReplicaAction {
+    fn receive_commit(&mut self, commit: message::Vote, actions: &mut ReplicaActions) {
         if commit.view_num < self.view_num || self.is_committed(commit.block_num) {
-            return ReplicaAction::Nop;
+            return;
         }
         if let Err(err) = verify(
             commit.sha256(),
@@ -430,7 +441,7 @@ impl Replica {
             &commit.sig,
         ) {
             tracing::warn!(%err, "malformed Commit");
-            return ReplicaAction::Nop;
+            return;
         }
         // TODO enter view
         if let Some(block) = self.blocks.get(&commit.block_num) {
@@ -440,7 +451,7 @@ impl Replica {
                     commit.replica_id,
                     "Commit digest mismatch"
                 );
-                return ReplicaAction::Nop;
+                return;
             }
         } else {
             tracing::debug!(
@@ -451,10 +462,10 @@ impl Replica {
             )
             // the vote pruning is delayed until the late PrePrepare arrives
         }
-        self.insert_commit(commit)
+        self.insert_commit(commit, actions)
     }
 
-    pub fn insert_commit(&mut self, commit: message::Vote) -> ReplicaAction {
+    pub fn insert_commit(&mut self, commit: message::Vote, actions: &mut ReplicaActions) {
         let block_num = commit.block_num;
         let replica_id = commit.replica_id;
         let replaced = self
@@ -471,36 +482,32 @@ impl Replica {
             )
         }
         if !self.is_committed(self.commit_num + 1) {
-            return ReplicaAction::Nop;
+            return;
         }
-        let mut requests = Vec::new();
         while {
             self.commit_num += 1;
             tracing::trace!(self.config.id, self.commit_num, "committed");
-            requests.extend(self.blocks[&self.commit_num].requests.clone());
+            let requests = self.blocks[&self.commit_num].requests.clone();
+            for request in &requests {
+                self.request_pool.commit(request)
+            }
+            actions.push(ReplicaAction::Finalize(requests));
             self.is_committed(self.commit_num + 1)
         } {}
-        for request in &requests {
-            self.request_pool.commit(request)
-        }
-        ReplicaAction::Finalize(requests)
+        self.on_finalize(actions)
     }
 
-    pub fn on_finalize(&mut self) -> ReplicaAction {
+    pub fn on_finalize(&mut self, actions: &mut ReplicaActions) {
         if self.is_primary() {
-            self.propose_blocks()
-        } else {
-            ReplicaAction::Nop
+            self.propose_blocks(actions)
         }
     }
 
-    pub fn tick(&mut self) -> ReplicaAction {
+    pub fn tick(&mut self, actions: &mut ReplicaActions) {
         if self.is_primary() {
             let ticked_propose_num = replace(&mut self.ticked_propose_num, self.propose_num);
             let block_range = self.commit_num + 1..=ticked_propose_num;
-            if block_range.is_empty() {
-                ReplicaAction::Nop
-            } else {
+            if !block_range.is_empty() {
                 tracing::warn!(self.config.id, block_range = ?block_range, "resend PrePrepare(s)");
                 if tracing::enabled!(tracing::Level::DEBUG) {
                     for block_num in block_range.clone() {
@@ -515,13 +522,12 @@ impl Replica {
                         tracing::debug!(block_num, ?prepare_votes, ?commit_votes);
                     }
                 }
-                let pre_prepares = block_range
-                    .map(|block_num| self.blocks[&block_num].clone())
-                    .collect();
-                ReplicaAction::Propose(pre_prepares)
+                for block_num in block_range {
+                    actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
+                        self.blocks[&block_num].clone(),
+                    )))
+                }
             }
-        } else {
-            ReplicaAction::Nop
         }
     }
 }

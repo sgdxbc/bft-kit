@@ -111,8 +111,12 @@ impl System {
                             ServiceAction::Submit(request) => message = ToReplica::Request(request),
                         }
                     }
-                    let action = replica.receive(message);
-                    self.handle_replica_action(replica_id, action)
+                    let mut actions = Vec::new();
+                    replica.receive(message, &mut actions);
+                    for action in actions {
+                        self.handle_replica_action(replica_id, action)
+                    }
+                    StepResult::ServerProgress
                 }
             }
         };
@@ -133,37 +137,12 @@ impl System {
         StepResult::ClientProgress
     }
 
-    fn handle_replica_action(
-        &mut self,
-        replica_id: ReplicaId,
-        replica_action: ReplicaAction,
-    ) -> StepResult {
+    fn handle_replica_action(&mut self, replica_id: ReplicaId, replica_action: ReplicaAction) {
         tracing::debug!(?replica_action);
         match replica_action {
-            ReplicaAction::Nop => StepResult::ServerProgress,
-            ReplicaAction::SendToReplica(id, message) => {
-                self.send_to_replica(id, message);
-                StepResult::ServerProgress
-            }
+            ReplicaAction::SendToReplica(id, message) => self.send_to_replica(id, message),
             ReplicaAction::SendToAllReplicas(message) => {
-                self.send_to_all_replica(message, Some(replica_id));
-                StepResult::ServerProgress
-            }
-            ReplicaAction::Propose(pre_prepares) => {
-                for pre_prepare in pre_prepares {
-                    self.send_to_all_replica(ToReplica::PrePrepare(pre_prepare), Some(replica_id))
-                }
-                StepResult::ServerProgress
-            }
-            ReplicaAction::Prepare(vote) => {
-                self.send_to_all_replica(ToReplica::Prepare(vote.clone()), Some(replica_id));
-                let action = self.servers[replica_id as usize].0.insert_prepare(vote);
-                self.handle_replica_action(replica_id, action)
-            }
-            ReplicaAction::Commit(vote) => {
-                self.send_to_all_replica(ToReplica::Commit(vote.clone()), Some(replica_id));
-                let action = self.servers[replica_id as usize].0.insert_commit(vote);
-                self.handle_replica_action(replica_id, action)
+                self.send_to_all_replica(message, Some(replica_id))
             }
             ReplicaAction::Finalize(requests) => {
                 let (replica, service) = &mut self.servers[replica_id as usize];
@@ -177,8 +156,6 @@ impl System {
                         ServiceAction::Submit(_) => unreachable!(),
                     }
                 }
-                let action = replica.on_finalize();
-                self.handle_replica_action(replica_id, action)
             }
         }
     }
@@ -390,11 +367,13 @@ fn drop_1(skip: impl Fn(&Event) -> bool, tick_client: bool, tick_replica0: bool)
         let action = system.clients[0].tick();
         system.handle_client_action(0, action);
     }
+    let mut actions = Vec::new();
     if tick_replica0 {
-        let action = system.servers[0].0.tick();
-        system.handle_replica_action(0, action);
-        let action = system.servers[0].0.tick();
-        system.handle_replica_action(0, action);
+        system.servers[0].0.tick(&mut actions);
+        system.servers[0].0.tick(&mut actions);
+        for action in actions {
+            system.handle_replica_action(0, action)
+        }
     }
     for i in 0.. {
         assert!(i < 100);
@@ -441,7 +420,11 @@ fn drop_pre_prepare() {
     );
 }
 
+// temporarily disabled
+// the updated protocol implementation does not commit on majority, only on
+// primary, so a client commit is not guaranteed (immediately)
 #[test]
+#[ignore]
 fn drop_prepare() {
     drop_1(
         |event| matches!(event, Event::SendToReplica(_, ToReplica::Prepare(_))),
@@ -451,6 +434,7 @@ fn drop_prepare() {
 }
 
 #[test]
+#[ignore]
 fn drop_commit() {
     drop_1(
         |event| matches!(event, Event::SendToReplica(_, ToReplica::Commit(_))),

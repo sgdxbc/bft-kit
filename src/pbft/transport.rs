@@ -265,6 +265,7 @@ where
         finalize_receiver,
     ));
     let mut encode_bytes = vec![0; 1 << 16];
+    let mut actions = Vec::new();
     loop {
         #[derive(Debug)]
         enum Select {
@@ -274,29 +275,25 @@ where
             ReadJoin(()),
         }
         use Select::*;
-        let mut option_action = {
-            let select = tokio::select! {
-                () = sleep(config.replica_tick_interval) => Sleep,
-                message = read_receiver.recv() => Read(message),
-                result = &mut service_task => Service(result?),
-                Some(result) = read_tasks.join_next() => ReadJoin(result??)
-            };
-            if tracing::enabled!(tracing::Level::TRACE) {
-                tracing::trace!(?select)
-            }
-            match select {
-                Sleep => Some(replica.tick()),
-                Read(message) => {
-                    let message =
-                        message.ok_or(anyhow::format_err!("unexpect read channel close"))?;
-                    Some(replica.receive(message))
-                }
-                Service(()) | ReadJoin(()) => unreachable!(),
-            }
+        let select = tokio::select! {
+            () = sleep(config.replica_tick_interval) => Sleep,
+            message = read_receiver.recv() => Read(message),
+            result = &mut service_task => Service(result?),
+            Some(result) = read_tasks.join_next() => ReadJoin(result??)
         };
-        while let Some(action) = option_action.take() {
+        if tracing::enabled!(tracing::Level::TRACE) {
+            tracing::trace!(?select)
+        }
+        match select {
+            Sleep => replica.tick(&mut actions),
+            Read(message) => {
+                let message = message.ok_or(anyhow::format_err!("unexpect read channel close"))?;
+                replica.receive(message, &mut actions)
+            }
+            Service(()) | ReadJoin(()) => unreachable!(),
+        }
+        for action in actions.drain(..) {
             match action {
-                ReplicaAction::Nop => {}
                 ReplicaAction::SendToReplica(replica_id, message) => {
                     let egress =
                         replica_egresses
@@ -309,42 +306,13 @@ where
                 ReplicaAction::SendToAllReplicas(message) => {
                     write_message(message, replica_egresses.values_mut(), &mut encode_bytes).await?
                 }
-                ReplicaAction::Propose(pre_prepares) => {
-                    for pre_prepare in pre_prepares {
-                        write_message(
-                            ToReplica::PrePrepare(pre_prepare),
-                            replica_egresses.values_mut(),
-                            &mut encode_bytes,
-                        )
-                        .await?
-                    }
-                }
-                ReplicaAction::Prepare(vote) => {
-                    write_message(
-                        ToReplica::Prepare(vote.clone()),
-                        replica_egresses.values_mut(),
-                        &mut encode_bytes,
-                    )
-                    .await?;
-                    option_action = Some(replica.insert_prepare(vote))
-                }
-                ReplicaAction::Commit(vote) => {
-                    write_message(
-                        ToReplica::Commit(vote.clone()),
-                        replica_egresses.values_mut(),
-                        &mut encode_bytes,
-                    )
-                    .await?;
-                    option_action = Some(replica.insert_commit(vote))
-                }
                 ReplicaAction::Finalize(requests) => {
                     finalize_sender
                         .send(Finalize {
                             requests,
                             view_num: replica.view_num,
                         })
-                        .await?;
-                    option_action = Some(replica.on_finalize())
+                        .await?
                 }
             }
         }
