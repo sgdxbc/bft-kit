@@ -4,7 +4,7 @@ use bft_testbed::{
     init_logging,
     pbft::{
         parse::Options,
-        transport::{ClientTask, TaskConfig, concurrent_close_loop_clients_task},
+        transport::{ClientTask, TaskConfig, WARMUP_DURATION, concurrent_close_loop_clients_task},
     },
 };
 use hdrhistogram::Histogram;
@@ -27,12 +27,14 @@ async fn main() -> anyhow::Result<()> {
             .await?;
     let mut latencies = Histogram::new(3)?;
     for client_latencies in client_latencies {
-        let throughput = client_latencies.len() as f32 / task_config.client_duration.as_secs_f32();
+        let throughput = client_latencies.len() as f32
+            / (task_config.client_duration - WARMUP_DURATION).as_secs_f32();
         let throughput2 = 1_000_000. / client_latencies.mean();
         tracing::info!("client throughput {throughput:.2} ({throughput2:.2})");
         latencies += client_latencies
     }
-    let throughput = latencies.len() as f32 / task_config.client_duration.as_secs_f32();
+    let throughput =
+        latencies.len() as f32 / (task_config.client_duration - WARMUP_DURATION).as_secs_f32();
     let throughput2 = 1_000_000. / latencies.mean();
     tracing::info!("throughput {throughput:.2} ({throughput2:.2})");
     for value in latencies.iter_quantiles(1) {

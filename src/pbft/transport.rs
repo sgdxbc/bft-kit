@@ -33,6 +33,8 @@ pub struct TaskConfig {
     pub replica_connect_delay: Duration,
 }
 
+pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
+
 // the first transport was implemented with TCP but it doesn't work well (or
 // doesn't even work), archive it in case of needed
 pub mod tcp;
@@ -194,14 +196,19 @@ pub async fn concurrent_close_loop_clients_task<C: AbstractClientTask + Send + '
     for mut client_task in client_tasks {
         let config = config.clone();
         tasks.spawn(async move {
-            let deadline = Instant::now() + config.client_duration;
+            let now = Instant::now();
+            let deadline = now + config.client_duration;
+            let start_record = now + WARMUP_DURATION; // TODO configurable?
             let mut latencies = Histogram::new(3)?;
             loop {
                 let start = Instant::now();
+                let record = start >= start_record;
                 match timeout_at(deadline, client_task.invoke(Default::default())).await {
                     Ok(result) => {
                         result?;
-                        latencies += start.elapsed().as_micros() as u64;
+                        if record {
+                            latencies += start.elapsed().as_micros() as u64
+                        }
                     }
                     Err(_) => break anyhow::Ok(latencies),
                 }
@@ -216,72 +223,9 @@ pub async fn concurrent_close_loop_clients_task<C: AbstractClientTask + Send + '
 }
 
 pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(None);
-    let transport = Arc::new(transport);
-    let mut internal_endpoint = Endpoint::server(
-        // server_config(),
-        {
-            let mut config = server_config();
-            config.transport_config(transport.clone());
-            config
-        },
-        config.replica_internal_addresses[replica.config.id as usize],
-    )?;
-    // internal_endpoint.set_default_client_config(client_config());
-    internal_endpoint.set_default_client_config({
-        let mut config = client_config();
-        config.transport_config(transport);
-        config
-    });
-    let active_task = async {
-        sleep(config.replica_connect_delay).await;
-        let mut connections = HashMap::new();
-        for (i, &addr) in config
-            .replica_internal_addresses
-            .iter()
-            .enumerate()
-            .skip(replica.config.id as usize + 1)
-        {
-            let connection = internal_endpoint.connect(addr, "server.example")?.await?;
-            connection
-                .open_uni()
-                .await?
-                // to need to `to_le_bytes()` for current u8 based ReplicaId, just future proof
-                .write_all(&replica.config.id.to_le_bytes())
-                .await?;
-            connections.insert(i as ReplicaId, connection);
-        }
-        anyhow::Ok(connections)
-    };
-    let passive_task = async {
-        let mut connections = HashMap::new();
-        for _ in 0..replica.config.id {
-            let connection = internal_endpoint
-                .accept()
-                .await
-                .expect("endpoint not closed")
-                .await?;
-            let mut replica_id = [0; size_of::<ReplicaId>()];
-            connection
-                .accept_uni()
-                .await?
-                .read_exact(&mut replica_id)
-                .await?;
-            connections.insert(ReplicaId::from_le_bytes(replica_id), connection);
-        }
-        Ok(connections)
-    };
-    let (mut connections, other_connections) = try_join!(active_task, passive_task)?;
-    connections.extend(other_connections);
-    anyhow::ensure!(connections.len() == config.replica_internal_addresses.len() - 1);
-
-    let replica_egresses = connections;
-    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
-    let (read_sender, mut read_receiver) = mpsc::channel(4096);
-    for connection in replica_egresses.values() {
-        read_tasks.spawn(read_task(connection.clone(), read_sender.clone(), false));
-    }
+    let (read_sender, mut read_receiver) = mpsc::channel(100);
+    let (mut read_tasks, replica_egresses) =
+        boot_server(replica.config.id, config.clone(), read_sender.clone()).await?;
     tracing::info!("replica ready");
 
     // a bit terrible to abuse read_sender, which suppose to directly connect to
@@ -302,13 +246,15 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
             Sleep,
             Read(Option<ToReplica>),
             Service(()),
+            ReadJoin(()),
         }
         use Select::*;
         let mut option_action = {
             let select = tokio::select! {
                 () = sleep(config.replica_tick_interval) => Sleep,
                 message = read_receiver.recv() => Read(message),
-                result = &mut service_task => Service(result?)
+                result = &mut service_task => Service(result?),
+                Some(result) = read_tasks.join_next() => ReadJoin(result??)
             };
             if tracing::enabled!(tracing::Level::TRACE) {
                 tracing::trace!(?select)
@@ -320,7 +266,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
                         message.ok_or(anyhow::format_err!("unexpect read channel close"))?;
                     Some(replica.receive(message))
                 }
-                Service(()) => unreachable!(),
+                Service(()) | ReadJoin(()) => unreachable!(),
             }
         };
         while let Some(action) = option_action.take() {
@@ -379,6 +325,77 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
     }
 }
 
+async fn boot_server(
+    replica_id: ReplicaId,
+    config: TaskConfig,
+    read_sender: Sender<ToReplica>,
+) -> anyhow::Result<(JoinSet<anyhow::Result<()>>, HashMap<u8, Connection>)> {
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(None);
+    let transport = Arc::new(transport);
+    let mut internal_endpoint = Endpoint::server(
+        // server_config(),
+        {
+            let mut config = server_config();
+            config.transport_config(transport.clone());
+            config
+        },
+        config.replica_internal_addresses[replica_id as usize],
+    )?;
+    internal_endpoint.set_default_client_config({
+        let mut config = client_config();
+        config.transport_config(transport);
+        config
+    });
+    let active_task = async {
+        sleep(config.replica_connect_delay).await;
+        let mut connections = HashMap::new();
+        for (i, &addr) in config
+            .replica_internal_addresses
+            .iter()
+            .enumerate()
+            .skip(replica_id as usize + 1)
+        {
+            let connection = internal_endpoint.connect(addr, "server.example")?.await?;
+            connection
+                .open_uni()
+                .await?
+                // to need to `to_le_bytes()` for current u8 based ReplicaId, just future proof
+                .write_all(&replica_id.to_le_bytes())
+                .await?;
+            connections.insert(i as ReplicaId, connection);
+        }
+        anyhow::Ok(connections)
+    };
+    let passive_task = async {
+        let mut connections = HashMap::new();
+        for _ in 0..replica_id {
+            let connection = internal_endpoint
+                .accept()
+                .await
+                .expect("endpoint not closed")
+                .await?;
+            let mut replica_id = [0; size_of::<ReplicaId>()];
+            connection
+                .accept_uni()
+                .await?
+                .read_exact(&mut replica_id)
+                .await?;
+            connections.insert(ReplicaId::from_le_bytes(replica_id), connection);
+        }
+        Ok(connections)
+    };
+    let (mut connections, other_connections) = try_join!(active_task, passive_task)?;
+    connections.extend(other_connections);
+    anyhow::ensure!(connections.len() == config.replica_internal_addresses.len() - 1);
+    let replica_egresses = connections;
+    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
+    for connection in replica_egresses.values() {
+        read_tasks.spawn(read_task(connection.clone(), read_sender.clone(), false));
+    }
+    Ok((read_tasks, replica_egresses))
+}
+
 struct Finalize {
     requests: Vec<message::Request>,
     view_num: ViewNum,
@@ -390,7 +407,7 @@ async fn service_task(
     submit_sender: Sender<ToReplica>,
     mut finalize_receiver: Receiver<Finalize>,
 ) -> anyhow::Result<()> {
-    let replies = HashMap::<ClientId, message::Reply>::new();
+    let mut replies = HashMap::<ClientId, message::Reply>::new();
     let external_endpoint = Endpoint::server(server_config(), addr)?;
     let mut read_tasks = JoinSet::new();
     let mut client_egresses = HashMap::new();
@@ -462,9 +479,12 @@ async fn service_task(
                     let reply = message::Reply {
                         seq: request.seq,
                         view_num: finalize.view_num,
+                        // a 0/0 service, extend to support arbitrary state machine later
                         result: Default::default(),
                         replica_id,
                     };
+                    let replaced = replies.insert(request.client_id, reply.clone());
+                    assert!(replaced.map(|reply| reply.seq) < Some(reply.seq));
                     let egress =
                         client_egresses
                             .get(&request.client_id)
@@ -472,9 +492,7 @@ async fn service_task(
                                 "send to unexpected client {}",
                                 request.client_id
                             ))?;
-                    if let Err(err) =
-                        write_message(reply.clone(), [egress], &mut encode_bytes).await
-                    {
+                    if let Err(err) = write_message(reply, [egress], &mut encode_bytes).await {
                         tracing::info!(%err, "egress to client failed")
                         // not removing from egress table to prevent the following
                         // (failed) writing errors
