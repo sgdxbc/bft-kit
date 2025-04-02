@@ -82,7 +82,7 @@ pub type PublicKey = secp256k1::PublicKey;
 
 thread_local!(static SECP: secp256k1::Secp256k1<secp256k1::All> = secp256k1::Secp256k1::new());
 
-pub fn sign(message: Sha256Output, secret_key: &SecretKey) -> Sig {
+pub fn sign(message: impl Into<[u8; 32]>, secret_key: &SecretKey) -> Sig {
     let message = secp256k1::Message::from_digest(message.into());
     Sig(SECP
         .with(|secp| secp.sign_ecdsa(&message, secret_key))
@@ -90,7 +90,11 @@ pub fn sign(message: Sha256Output, secret_key: &SecretKey) -> Sig {
         .to_vec())
 }
 
-pub fn verify(message: Sha256Output, public_key: &PublicKey, Sig(sig): &Sig) -> anyhow::Result<()> {
+pub fn verify(
+    message: impl Into<[u8; 32]>,
+    public_key: &PublicKey,
+    Sig(sig): &Sig,
+) -> anyhow::Result<()> {
     let message = secp256k1::Message::from_digest(message.into());
     SECP.with(|secp| {
         secp.verify_ecdsa(
