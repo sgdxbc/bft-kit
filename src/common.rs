@@ -1,5 +1,10 @@
 use std::fmt::{self, Formatter, Write as _};
 
+use bincode::{Decode, Encode};
+
+pub mod request_pool;
+pub use request_pool::RequestPool;
+
 // pub type ClientId = u32;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bincode::Encode, bincode::Decode)]
 pub struct ClientId(pub u32);
@@ -45,4 +50,13 @@ pub fn fmt_bytes(bytes: &[u8], f: &mut Formatter<'_>) -> fmt::Result {
         bytes.len(),
         if bytes.len() > 4 { "..." } else { "" }
     )
+}
+
+pub type ClientSeq = u32;
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct Request {
+    pub client_id: ClientId,
+    pub seq: ClientSeq,
+    pub op: Vec<u8>,
 }

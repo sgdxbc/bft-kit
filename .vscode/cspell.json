@@ -14,7 +14,8 @@
         "QUIC",
         "rcgen",
         "rustls",
-        "secp"
+        "secp",
+        "seqs"
     ],
     "ignoreWords": [],
     "import": []
