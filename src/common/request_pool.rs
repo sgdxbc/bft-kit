@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{ClientId, ClientSeq, Request};
+use super::{ClientId, ClientSeq, client::Request};
 
 // "mempool" in cryptocurrency term
 #[derive(Debug, Default)]

@@ -6,7 +6,7 @@ use std::{
 use sha2::Digest as _;
 
 use crate::{
-    common::{ClientId, ReplicaId, RequestPool},
+    common::{ClientId, ReplicaId, RequestPool, client},
     crypto::{
         Digest, PublicKey, SecretKey, Sha256Hash as _, public_key, replica_secret_key, sign, verify,
     },
@@ -58,13 +58,7 @@ pub struct Client {
     results: HashMap<ReplicaId, Vec<u8>>,
 }
 
-#[derive(Debug)]
-pub enum ClientAction {
-    Nop,
-    Return(Vec<u8>),
-    SendToReplica(ReplicaId, ToReplica),
-    SendToAllReplicas(ToReplica),
-}
+type ClientAction = client::Action<ToReplica>;
 
 impl Client {
     pub fn new(config: ClientConfig) -> Self {
@@ -232,14 +226,8 @@ fn block_digest(requests: &[message::Request]) -> Digest {
     state.finalize().into()
 }
 
-#[derive(Debug)]
-pub enum ReplicaAction {
-    SendToReplica(ReplicaId, ToReplica),
-    SendToAllReplicas(ToReplica), // except loopback
-    Finalize(Vec<message::Request>),
-}
-
-pub type ReplicaActions = Vec<ReplicaAction>;
+type ReplicaAction = crate::common::ReplicaAction<ToReplica>;
+type ReplicaActions = Vec<ReplicaAction>;
 
 impl Replica {
     pub fn receive(&mut self, message: ToReplica, actions: &mut ReplicaActions) {
