@@ -222,20 +222,44 @@ pub async fn concurrent_close_loop_clients_task<C: AbstractClientTask + Send + '
     Ok(latencies)
 }
 
-pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
+pub trait AbstractServer {
+    type Egress;
+    fn boot_server(
+        replica_id: ReplicaId,
+        config: TaskConfig,
+        read_sender: Sender<ToReplica>,
+    ) -> impl Future<
+        Output = anyhow::Result<(
+            JoinSet<anyhow::Result<()>>,
+            HashMap<ReplicaId, Self::Egress>,
+        )>,
+    >;
+
+    fn service_task(
+        replica_id: ReplicaId,
+        config: TaskConfig,
+        submit_sender: Sender<ToReplica>,
+        finalize_receiver: Receiver<Finalize>,
+    ) -> impl Future<Output = anyhow::Result<()>>;
+}
+
+pub async fn server_task<S: AbstractServer<Egress = Connection>>(
+    mut replica: Replica,
+    config: TaskConfig,
+) -> anyhow::Result<()> {
     let (read_sender, mut read_receiver) = mpsc::channel(100);
     let (mut read_tasks, replica_egresses) =
-        boot_server(replica.config.id, config.clone(), read_sender.clone()).await?;
+        S::boot_server(replica.config.id, config.clone(), read_sender.clone()).await?;
     tracing::info!("replica ready");
 
     // a bit terrible to abuse read_sender, which suppose to directly connect to
     // read tasks in the original design
-    let submit_sender = read_sender.clone();
+    let submit_sender = read_sender;
     let (finalize_sender, finalize_receiver) = mpsc::channel(16);
     let replica_id = replica.config.id;
-    let mut service_task = pin!(service_task(
+    let mut service_task = pin!(S::service_task(
         replica_id,
-        config.replica_external_addresses[replica_id as usize],
+        config.clone(),
         submit_sender,
         finalize_receiver,
     ));
@@ -396,19 +420,22 @@ async fn boot_server(
     Ok((read_tasks, replica_egresses))
 }
 
-struct Finalize {
+pub struct Finalize {
     requests: Vec<message::Request>,
     view_num: ViewNum,
 }
 
 async fn service_task(
     replica_id: ReplicaId,
-    addr: SocketAddr,
+    config: TaskConfig,
     submit_sender: Sender<ToReplica>,
     mut finalize_receiver: Receiver<Finalize>,
 ) -> anyhow::Result<()> {
     let mut replies = HashMap::<ClientId, message::Reply>::new();
-    let external_endpoint = Endpoint::server(server_config(), addr)?;
+    let external_endpoint = Endpoint::server(
+        server_config(),
+        config.replica_external_addresses[replica_id as usize],
+    )?;
     let mut read_tasks = JoinSet::new();
     let mut client_egresses = HashMap::new();
     let mut encode_bytes = vec![0; 1 << 16];
@@ -502,5 +529,33 @@ async fn service_task(
             }
             Join(()) => {}
         }
+    }
+}
+
+pub struct Server;
+
+impl AbstractServer for Server {
+    type Egress = Connection;
+
+    fn boot_server(
+        replica_id: ReplicaId,
+        config: TaskConfig,
+        read_sender: Sender<ToReplica>,
+    ) -> impl Future<
+        Output = anyhow::Result<(
+            JoinSet<anyhow::Result<()>>,
+            HashMap<ReplicaId, Self::Egress>,
+        )>,
+    > {
+        boot_server(replica_id, config, read_sender)
+    }
+
+    fn service_task(
+        replica_id: ReplicaId,
+        config: TaskConfig,
+        submit_sender: Sender<ToReplica>,
+        finalize_receiver: Receiver<Finalize>,
+    ) -> impl Future<Output = anyhow::Result<()>> {
+        service_task(replica_id, config, submit_sender, finalize_receiver)
     }
 }

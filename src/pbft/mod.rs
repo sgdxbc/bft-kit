@@ -268,10 +268,10 @@ impl Replica {
         } else {
             tracing::warn!(self.config.id, %request.client_id, request.seq, "forward broadcast request to primary");
             // TODO bookkeeping forwarded
-            return ReplicaAction::SendToReplica(
+            ReplicaAction::SendToReplica(
                 self.config.spec.primary(self.view_num),
                 ToReplica::Request(request),
-            );
+            )
         }
     }
 

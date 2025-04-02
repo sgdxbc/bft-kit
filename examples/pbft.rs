@@ -5,7 +5,7 @@ use bft_testbed::{
     init_logging,
     pbft::{
         Client, ClientConfig, Replica, ReplicaConfig, Spec,
-        transport::{ClientTask, TaskConfig, server_task, tcp},
+        transport::{ClientTask, Server, TaskConfig, server_task, tcp},
     },
 };
 use futures::FutureExt;
@@ -44,11 +44,12 @@ async fn main() -> anyhow::Result<()> {
     for i in 0..spec.num_replica {
         let config = ReplicaConfig::new_basic(spec.clone(), i);
         let replica = Replica::new(config);
-        server_tasks.spawn(if !use_tcp {
-            server_task(replica, task_config.clone()).left_future()
-        } else {
-            tcp::server_task(replica, task_config.clone()).right_future()
-        });
+        // server_tasks.spawn(if !use_tcp {
+        //     server_task::<Server>(replica, task_config.clone()).left_future()
+        // } else {
+        //     tcp::server_task(replica, task_config.clone()).right_future()
+        // });
+        server_tasks.spawn(server_task::<Server>(replica, task_config.clone()));
     }
     tracing::info!("wait servers up");
     match timeout(Duration::from_secs(1), server_tasks.join_next()).await {

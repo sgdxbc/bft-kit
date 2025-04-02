@@ -2,7 +2,11 @@ use std::{env::args, path::PathBuf, pin::pin, time::Duration};
 
 use bft_testbed::{
     init_logging,
-    pbft::{Replica, transport::server_task, parse::Options},
+    pbft::{
+        Replica,
+        parse::Options,
+        transport::{Server, server_task},
+    },
 };
 use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep};
 
@@ -16,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(replica_config_path.with_file_name("spec.conf")).await?)?;
     options.parse(&read_to_string(replica_config_path.with_file_name("task.conf")).await?)?;
     let replica = Replica::new(options.clone().try_into()?);
-    let mut server = pin!(server_task(replica, options.try_into()?));
+    let mut server = pin!(server_task::<Server>(replica, options.try_into()?));
     'server: {
         tokio::select! {
             result = &mut server => result?,
