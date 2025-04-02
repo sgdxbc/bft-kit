@@ -1,9 +1,6 @@
 use bincode::{Decode, Encode};
 
-use crate::{
-    common::ReplicaId,
-    crypto::{Digest, Sig},
-};
+use crate::crypto::{Digest, threshold::Sig};
 
 pub mod message;
 
@@ -18,8 +15,5 @@ struct Block {
 #[derive(Debug, Clone, Encode, Decode)]
 struct QuorumCert {
     node: Digest,
-    sig: QCSig,
+    sig: Sig,
 }
-
-// TODO
-type QCSig = Vec<(ReplicaId, Sig)>;
