@@ -35,8 +35,8 @@ pub struct TaskConfig {
 
 pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
 
-// the first transport was implemented with TCP but it doesn't work well (or
-// doesn't even work), archive it in case of needed
+// the first transport implemented is with TCP but it doesn't work well (or it
+// is just broken), archive it in case of needed
 pub mod tcp;
 
 async fn read_task<M: Decode<()> + Send + Sync + 'static>(
@@ -223,18 +223,15 @@ pub async fn concurrent_close_loop_clients_task<C: AbstractClientTask + Send + '
     Ok(latencies)
 }
 
+type BootServer<E> = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, E>);
+
 pub trait AbstractServer {
     type Egress;
     fn boot_server(
         replica_id: ReplicaId,
         config: TaskConfig,
         read_sender: Sender<ToReplica>,
-    ) -> impl Future<
-        Output = anyhow::Result<(
-            JoinSet<anyhow::Result<()>>,
-            HashMap<ReplicaId, Self::Egress>,
-        )>,
-    >;
+    ) -> impl Future<Output = anyhow::Result<BootServer<Self::Egress>>>;
 
     fn service_task(
         replica_id: ReplicaId,

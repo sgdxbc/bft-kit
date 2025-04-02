@@ -25,6 +25,9 @@ async fn main() -> anyhow::Result<()> {
         concurrent_close_loop_clients_task::<ClientTask>(options.try_into()?, task_config.clone())
             .instrument(tracing::info_span!("concurrent close loops"))
             .await?;
+    // concurrent_close_loop_clients_task::<tcp::ClientTask>(options.try_into()?, task_config.clone())
+    //     .instrument(tracing::info_span!("concurrent close loops"))
+    //     .await?;
     let mut latencies = Histogram::new(3)?;
     for client_latencies in client_latencies {
         let throughput = client_latencies.len() as f32
