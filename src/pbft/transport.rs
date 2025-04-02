@@ -66,18 +66,18 @@ async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     }
 }
 
-async fn write_message(
+pub trait AbstractEgress {
+    fn write_bytes(&mut self, encode_bytes: &[u8]) -> impl Future<Output = anyhow::Result<()>>;
+}
+
+async fn write_message<'a, C: AbstractEgress + 'a>(
     message: impl Encode,
-    egresses: impl IntoIterator<Item = &Connection>,
+    egresses: impl IntoIterator<Item = &'a mut C>,
     encode_bytes: &mut [u8],
 ) -> anyhow::Result<()> {
     let len = bincode::encode_into_slice(message, encode_bytes, bincode::config::standard())?;
     for egress in egresses {
-        egress
-            .open_uni()
-            .await?
-            .write_all(&encode_bytes[..len])
-            .await?;
+        egress.write_bytes(&encode_bytes[..len]).await?
     }
     Ok(())
 }
@@ -132,13 +132,14 @@ impl ClientTask {
                 ClientAction::SendToReplica(replica_id, message) => {
                     write_message(
                         message,
-                        [&self.replica_egresses[replica_id as usize]],
+                        [&mut self.replica_egresses[replica_id as usize]],
                         &mut self.encode_bytes,
                     )
                     .await?
                 }
                 ClientAction::SendToAllReplicas(message) => {
-                    write_message(message, &self.replica_egresses, &mut self.encode_bytes).await?
+                    write_message(message, &mut self.replica_egresses, &mut self.encode_bytes)
+                        .await?
                 }
                 ClientAction::Return(result) => break Ok(result),
             }
@@ -243,12 +244,15 @@ pub trait AbstractServer {
     ) -> impl Future<Output = anyhow::Result<()>>;
 }
 
-pub async fn server_task<S: AbstractServer<Egress = Connection>>(
+pub async fn server_task<S: AbstractServer>(
     mut replica: Replica,
     config: TaskConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S::Egress: AbstractEgress,
+{
     let (read_sender, mut read_receiver) = mpsc::channel(100);
-    let (mut read_tasks, replica_egresses) =
+    let (mut read_tasks, mut replica_egresses) =
         S::boot_server(replica.config.id, config.clone(), read_sender.clone()).await?;
     tracing::info!("replica ready");
 
@@ -297,21 +301,22 @@ pub async fn server_task<S: AbstractServer<Egress = Connection>>(
             match action {
                 ReplicaAction::Nop => {}
                 ReplicaAction::SendToReplica(replica_id, message) => {
-                    let egress = replica_egresses
-                        .get(&replica_id)
-                        .ok_or(anyhow::format_err!(
-                            "send to unexpected replica id {replica_id}"
-                        ))?;
+                    let egress =
+                        replica_egresses
+                            .get_mut(&replica_id)
+                            .ok_or(anyhow::format_err!(
+                                "send to unexpected replica id {replica_id}"
+                            ))?;
                     write_message(message, [egress], &mut encode_bytes).await?
                 }
                 ReplicaAction::SendToAllReplicas(message) => {
-                    write_message(message, replica_egresses.values(), &mut encode_bytes).await?
+                    write_message(message, replica_egresses.values_mut(), &mut encode_bytes).await?
                 }
                 ReplicaAction::Propose(pre_prepares) => {
                     for pre_prepare in pre_prepares {
                         write_message(
                             ToReplica::PrePrepare(pre_prepare),
-                            replica_egresses.values(),
+                            replica_egresses.values_mut(),
                             &mut encode_bytes,
                         )
                         .await?
@@ -320,7 +325,7 @@ pub async fn server_task<S: AbstractServer<Egress = Connection>>(
                 ReplicaAction::Prepare(vote) => {
                     write_message(
                         ToReplica::Prepare(vote.clone()),
-                        replica_egresses.values(),
+                        replica_egresses.values_mut(),
                         &mut encode_bytes,
                     )
                     .await?;
@@ -329,7 +334,7 @@ pub async fn server_task<S: AbstractServer<Egress = Connection>>(
                 ReplicaAction::Commit(vote) => {
                     write_message(
                         ToReplica::Commit(vote.clone()),
-                        replica_egresses.values(),
+                        replica_egresses.values_mut(),
                         &mut encode_bytes,
                     )
                     .await?;
@@ -485,13 +490,12 @@ async fn service_task(
                 match replies.get(&request.client_id) {
                     Some(reply) if reply.seq > request.seq => {}
                     Some(reply) if reply.seq == request.seq => {
-                        let egress =
-                            client_egresses
-                                .get(&request.client_id)
-                                .ok_or(anyhow::format_err!(
-                                    "send to unexpected client id {}",
-                                    request.client_id
-                                ))?;
+                        let egress = client_egresses.get_mut(&request.client_id).ok_or(
+                            anyhow::format_err!(
+                                "send to unexpected client id {}",
+                                request.client_id
+                            ),
+                        )?;
                         write_message(reply.clone(), [egress], &mut encode_bytes).await?
                     }
                     _ => submit_sender.send(ToReplica::Request(request)).await?,
@@ -514,12 +518,13 @@ async fn service_task(
                     assert!(replaced.map(|reply| reply.seq) < Some(reply.seq));
                     let egress =
                         client_egresses
-                            .get(&request.client_id)
+                            .get_mut(&request.client_id)
                             .ok_or(anyhow::format_err!(
                                 "send to unexpected client {}",
                                 request.client_id
                             ))?;
                     if let Err(err) = write_message(reply, [egress], &mut encode_bytes).await {
+                        // TODO only suppress certain errors e.g. BrokenPipe and ApplicationClose
                         tracing::info!(%err, "egress to client failed")
                         // not removing from egress table to prevent the following
                         // (failed) writing errors
@@ -557,5 +562,12 @@ impl AbstractServer for Server {
         finalize_receiver: Receiver<Finalize>,
     ) -> impl Future<Output = anyhow::Result<()>> {
         service_task(replica_id, config, submit_sender, finalize_receiver)
+    }
+}
+
+impl AbstractEgress for Connection {
+    async fn write_bytes(&mut self, encode_bytes: &[u8]) -> anyhow::Result<()> {
+        self.open_uni().await?.write_all(encode_bytes).await?;
+        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::ErrorKind, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr};
 
 use bincode::{Decode, Encode, error::DecodeError};
 use tokio::{
@@ -12,9 +12,9 @@ use tokio::{
 
 use crate::common::{ClientId, ReplicaId};
 
-use crate::pbft::{Client, ClientAction, Replica, ReplicaAction, ToReplica, message};
+use crate::pbft::{Client, ClientAction, ToReplica, message};
 
-use super::TaskConfig;
+use super::{AbstractEgress, AbstractServer, Finalize, TaskConfig};
 
 async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     mut ingress: impl AsyncRead + Unpin,
@@ -143,13 +143,16 @@ impl super::AbstractClientTask for ClientTask {
     }
 }
 
-pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
+async fn boot_server(
+    replica_id: ReplicaId,
+    config: TaskConfig,
+    read_sender: Sender<ToReplica>,
+) -> anyhow::Result<(JoinSet<anyhow::Result<()>>, HashMap<u8, OwnedWriteHalf>)> {
     let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
-    let (read_sender, mut read_receiver) = mpsc::channel(4096);
     let new_socket = || {
         let socket = TcpSocket::new_v4()?;
         socket.set_reuseport(true)?;
-        socket.bind(config.replica_internal_addresses[replica.config.id as usize])?;
+        socket.bind(config.replica_internal_addresses[replica_id as usize])?;
         anyhow::Ok(socket)
     };
     let active_task = async {
@@ -159,12 +162,10 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
             .replica_internal_addresses
             .iter()
             .enumerate()
-            .skip(replica.config.id as usize + 1)
+            .skip(replica_id as usize + 1)
         {
             let mut connection = new_socket()?.connect(addr).await?;
-            connection
-                .write_all(&replica.config.id.to_le_bytes())
-                .await?;
+            connection.write_all(&replica_id.to_le_bytes()).await?;
             connections.insert(i as ReplicaId, connection);
         }
         anyhow::Ok(connections)
@@ -172,7 +173,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
     let internal_listener = new_socket()?.listen(100)?;
     let passive_task = async {
         let mut connections = HashMap::new();
-        for _ in 0..replica.config.id {
+        for _ in 0..replica_id {
             // the peer address here usually can be used for lookup, but in proxied
             // environment like AWS VPC it fails
             let (mut connection, _) = internal_listener.accept().await?;
@@ -198,133 +199,130 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
         ));
         replica_egresses.insert(replica_id, write_half);
     }
-    tracing::info!("replica ready");
+    Ok((read_tasks, replica_egresses))
+}
 
-    let replies = HashMap::<ClientId, message::Reply>::new();
+async fn service_task(
+    replica_id: ReplicaId,
+    config: TaskConfig,
+    submit_sender: Sender<ToReplica>,
+    mut finalize_receiver: Receiver<Finalize>,
+) -> anyhow::Result<()> {
+    let mut replies = HashMap::<ClientId, message::Reply>::new();
     let external_listener =
-        TcpListener::bind(config.replica_external_addresses[replica.config.id as usize]).await?;
+        TcpListener::bind(config.replica_external_addresses[replica_id as usize]).await?;
+    let mut read_tasks = JoinSet::new();
     let mut client_egresses = HashMap::new();
     let mut encode_bytes = vec![0; 1 << 16];
+    let (client_read_sender, mut client_read_receiver) = mpsc::channel(4096);
     loop {
         enum Select {
-            Sleep,
             Accept((TcpStream, SocketAddr)),
             Read(Option<ToReplica>),
+            Finalize(Option<Finalize>),
             Join(()),
         }
-        use Select::*;
-        let mut option_action = match tokio::select! {
-            () = sleep(config.replica_tick_interval) => Sleep,
+        use Select::{Accept, Join, Read};
+        match tokio::select! {
             accept = external_listener.accept() => Accept(accept?),
-            message = read_receiver.recv() => Read(message),
+            message = client_read_receiver.recv() => Read(message),
+            finalize = finalize_receiver.recv() => Select::Finalize(finalize),
             Some(result) = read_tasks.join_next() => Join(result??),
         } {
-            Sleep => Some(replica.tick()),
             Accept((mut connection, _)) => {
                 let mut client_id = [0; size_of::<ClientId>()];
                 connection.read_exact(&mut client_id).await?;
                 let client_id = ClientId::from_le_bytes(client_id);
-                tracing::debug!(%client_id, ?connection, "accept client connection");
+                tracing::debug!(%client_id, "accept client connection");
                 let (read_half, write_half) = connection.into_split();
-                read_tasks.spawn(read_task(read_half, read_sender.clone(), true));
+                read_tasks.spawn(read_task(read_half, client_read_sender.clone(), true));
                 let replaced = client_egresses.insert(client_id, write_half);
                 anyhow::ensure!(replaced.is_none());
-                None
             }
-            Read(message) => 'read: {
-                let mut message =
-                    message.ok_or(anyhow::format_err!("unexpect read channel close"))?;
-                if let ToReplica::Request(request) = message {
-                    match replies.get(&request.client_id) {
-                        Some(reply) if reply.seq > request.seq => break 'read None,
-                        Some(reply) if reply.seq == request.seq => {
-                            let egress = client_egresses.get_mut(&request.client_id).ok_or(
-                                anyhow::format_err!(
-                                    "send to unexpected client id {}",
-                                    request.client_id
-                                ),
-                            )?;
-                            write_message(reply.clone(), [egress], &mut encode_bytes).await?;
-                            break 'read None;
-                        }
-                        _ => message = ToReplica::Request(request),
-                    }
-                }
-                Some(replica.receive(message))
-            }
-            Join(()) => None,
-        };
-        while let Some(action) = option_action.take() {
-            match action {
-                ReplicaAction::Nop => {}
-                ReplicaAction::SendToReplica(replica_id, message) => {
-                    let egress =
-                        replica_egresses
-                            .get_mut(&replica_id)
-                            .ok_or(anyhow::format_err!(
-                                "send to unexpected replica id {replica_id}"
-                            ))?;
-                    write_message(message, [egress], &mut encode_bytes).await?
-                }
-                ReplicaAction::SendToAllReplicas(message) => {
-                    write_message(message, replica_egresses.values_mut(), &mut encode_bytes).await?
-                }
-                ReplicaAction::Propose(pre_prepares) => {
-                    for pre_prepare in pre_prepares {
-                        write_message(
-                            ToReplica::PrePrepare(pre_prepare),
-                            replica_egresses.values_mut(),
-                            &mut encode_bytes,
-                        )
-                        .await?
-                    }
-                }
-                ReplicaAction::Prepare(vote) => {
-                    write_message(
-                        ToReplica::Prepare(vote.clone()),
-                        replica_egresses.values_mut(),
-                        &mut encode_bytes,
-                    )
-                    .await?;
-                    option_action = Some(replica.insert_prepare(vote))
-                }
-                ReplicaAction::Commit(vote) => {
-                    write_message(
-                        ToReplica::Commit(vote.clone()),
-                        replica_egresses.values_mut(),
-                        &mut encode_bytes,
-                    )
-                    .await?;
-                    option_action = Some(replica.insert_commit(vote))
-                }
-                ReplicaAction::Finalize(requests) => {
-                    for request in requests {
-                        let reply = message::Reply {
-                            seq: request.seq,
-                            view_num: replica.view_num,
-                            result: Default::default(),
-                            replica_id: replica.config.id,
-                        };
+            Read(message) => {
+                let Some(ToReplica::Request(request)) = message else {
+                    unimplemented!()
+                };
+                match replies.get(&request.client_id) {
+                    Some(reply) if reply.seq > request.seq => {}
+                    Some(reply) if reply.seq == request.seq => {
                         let egress = client_egresses.get_mut(&request.client_id).ok_or(
-                            anyhow::format_err!("send to unexpected client {}", request.client_id),
+                            anyhow::format_err!(
+                                "send to unexpected client id {}",
+                                request.client_id
+                            ),
                         )?;
-                        if let Err(err) =
-                            write_message(reply.clone(), [egress], &mut encode_bytes).await
-                        {
-                            if let Some(err) = err.downcast_ref::<std::io::Error>() {
-                                if err.kind() == ErrorKind::BrokenPipe {
-                                    tracing::info!(%request.client_id, "egress closed")
-                                    // not removing from egress table to prevent the following
-                                    // (failed) writing errors
-                                    // may cause repeatedly logging but the pattern should be rare
-                                }
-                            }
-                        }
+                        write_message(reply.clone(), [egress], &mut encode_bytes).await?
                     }
-                    option_action = Some(replica.on_finalize())
+                    _ => submit_sender.send(ToReplica::Request(request)).await?,
                 }
             }
+            Select::Finalize(finalize) => 'finalize: {
+                let Some(finalize) = finalize else {
+                    tracing::warn!("finalize channel closed");
+                    break 'finalize;
+                };
+                for request in finalize.requests {
+                    let reply = message::Reply {
+                        seq: request.seq,
+                        view_num: finalize.view_num,
+                        // a 0/0 service, extend to support arbitrary state machine later
+                        result: Default::default(),
+                        replica_id,
+                    };
+                    let replaced = replies.insert(request.client_id, reply.clone());
+                    assert!(replaced.map(|reply| reply.seq) < Some(reply.seq));
+                    let egress =
+                        client_egresses
+                            .get_mut(&request.client_id)
+                            .ok_or(anyhow::format_err!(
+                                "send to unexpected client {}",
+                                request.client_id
+                            ))?;
+                    if let Err(err) = write_message(reply, [egress], &mut encode_bytes).await {
+                        tracing::info!(%err, "egress to client failed")
+                        // not removing from egress table to prevent the following
+                        // (failed) writing errors
+                        // may cause repeatedly logging but the pattern should be rare
+                    }
+                }
+            }
+            Join(()) => {}
         }
+    }
+}
+
+pub struct Server;
+impl AbstractServer for Server {
+    type Egress = OwnedWriteHalf;
+
+    fn boot_server(
+        replica_id: ReplicaId,
+        config: TaskConfig,
+        read_sender: Sender<ToReplica>,
+    ) -> impl Future<
+        Output = anyhow::Result<(
+            JoinSet<anyhow::Result<()>>,
+            HashMap<ReplicaId, Self::Egress>,
+        )>,
+    > {
+        boot_server(replica_id, config, read_sender)
+    }
+
+    fn service_task(
+        replica_id: ReplicaId,
+        config: TaskConfig,
+        submit_sender: Sender<ToReplica>,
+        finalize_receiver: Receiver<Finalize>,
+    ) -> impl Future<Output = anyhow::Result<()>> {
+        service_task(replica_id, config, submit_sender, finalize_receiver)
+    }
+}
+
+impl AbstractEgress for OwnedWriteHalf {
+    async fn write_bytes(&mut self, encode_bytes: &[u8]) -> anyhow::Result<()> {
+        self.write_all(encode_bytes).await?;
+        Ok(())
     }
 }
 

@@ -306,6 +306,7 @@ impl Replica {
         if pre_prepare.view_num < self.view_num {
             return ReplicaAction::Nop;
         }
+        // TODO ignore PrePrepare with anomaly block number
         let public_key =
             &self.config.public_keys[self.config.spec.primary(pre_prepare.view_num) as usize];
         if let Err(err) = verify(pre_prepare.sha256(), public_key, &pre_prepare.sig) {

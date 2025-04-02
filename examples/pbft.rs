@@ -44,12 +44,11 @@ async fn main() -> anyhow::Result<()> {
     for i in 0..spec.num_replica {
         let config = ReplicaConfig::new_basic(spec.clone(), i);
         let replica = Replica::new(config);
-        // server_tasks.spawn(if !use_tcp {
-        //     server_task::<Server>(replica, task_config.clone()).left_future()
-        // } else {
-        //     tcp::server_task(replica, task_config.clone()).right_future()
-        // });
-        server_tasks.spawn(server_task::<Server>(replica, task_config.clone()));
+        server_tasks.spawn(if !use_tcp {
+            server_task::<Server>(replica, task_config.clone()).left_future()
+        } else {
+            server_task::<tcp::Server>(replica, task_config.clone()).right_future()
+        });
     }
     tracing::info!("wait servers up");
     match timeout(Duration::from_secs(1), server_tasks.join_next()).await {
