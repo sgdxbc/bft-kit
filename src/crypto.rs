@@ -6,6 +6,7 @@ use sha2::Digest as _;
 use crate::common::{ReplicaId, fmt_bytes};
 
 pub mod cert;
+pub mod threshold;
 
 #[derive(Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Digest(pub Vec<u8>);
