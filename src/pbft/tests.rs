@@ -173,6 +173,11 @@ impl System {
         }
     }
 
+    fn invoke(&mut self, client_id: ClientId, op: Vec<u8>) -> StepResult {
+        let action = self.clients[client_id as usize].invoke(op);
+        self.handle_client_action(client_id, action)
+    }
+
     fn exhaust(&mut self, max_num_step: u32) {
         for _ in 0..max_num_step {
             if self.step().is_none() {
@@ -190,8 +195,7 @@ fn normal_1() {
         num_replica: 4,
     };
     let mut system = System::new(spec, 1);
-    let action = system.clients[0].invoke(b"hello".into());
-    system.handle_client_action(0, action);
+    system.invoke(0, b"hello".into());
     for i in 0.. {
         assert!(i < 100);
         if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
@@ -217,8 +221,7 @@ fn close_loop() {
     };
     let mut system = System::new(spec, 1);
     for round in 0..10 {
-        let action = system.clients[0].invoke(format!("hello#{round}").into());
-        system.handle_client_action(0, action);
+        system.invoke(0, format!("hello#{round}").into());
         for i in 0.. {
             assert!(i < 100);
             if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
@@ -245,8 +248,7 @@ fn concurrent_clients() {
     };
     let mut system = System::new(spec, 10);
     for i in 0..10 {
-        let action = system.clients[i].invoke(format!("hello@{i}").into());
-        system.handle_client_action(i as _, action);
+        system.invoke(i, format!("hello@{i}").into());
     }
     for _ in 0..10 {
         for i in 0.. {
@@ -277,8 +279,7 @@ fn batched() {
         replica.config.max_batch_size = 100
     }
     for i in 0..10 {
-        let action = system.clients[i].invoke(format!("hello@{i}").into());
-        system.handle_client_action(i as _, action);
+        system.invoke(i, format!("hello@{i}").into());
     }
     for _ in 0..10 {
         for i in 0.. {
@@ -310,8 +311,7 @@ fn concurrent_proposals(max_num_inflight: BlockNum, max_batch_size: usize) {
         replica.config.max_batch_size = max_batch_size
     }
     for i in 0..10 {
-        let action = system.clients[i].invoke(format!("hello@{i}").into());
-        system.handle_client_action(i as _, action);
+        system.invoke(i, format!("hello@{i}").into());
     }
     for num_replied in 0..10 {
         for i in 0.. {
@@ -351,8 +351,7 @@ fn drop_1(skip: impl Fn(&Event) -> bool, tick_client: bool, tick_replica0: bool)
         num_replica: 4,
     };
     let mut system = System::new(spec, 1);
-    let action = system.clients[0].invoke(b"hello".into());
-    system.handle_client_action(0, action);
+    system.invoke(0, b"hello".into());
     while !system.events.is_empty() {
         if skip(system.events.front().unwrap()) {
             let event = system.events.pop_front();
@@ -450,8 +449,7 @@ fn drop_replica3() {
         num_replica: 4,
     };
     let mut system = System::new(spec, 1);
-    let action = system.clients[0].invoke(b"hello".into());
-    system.handle_client_action(0, action);
+    system.invoke(0, b"hello".into());
     for i in 0.. {
         assert!(i < 100);
         if matches!(system.events.front(), Some(&Event::SendToReplica(id, _)) if id == 3) {
