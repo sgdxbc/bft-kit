@@ -6,7 +6,7 @@ use std::{
 use sha2::Digest as _;
 
 use crate::{
-    common::{ClientId, ReplicaId},
+    common::{ClientId, ReplicaId, RequestPool},
     crypto::{
         Digest, PublicKey, SecretKey, Sha256Hash as _, public_key, replica_secret_key, sign, verify,
     },
@@ -168,8 +168,7 @@ pub struct Replica {
     blocks: BTreeMap<BlockNum, message::PrePrepare>,
     prepare_votes: BTreeMap<BlockNum, Quorum>,
     commit_votes: BTreeMap<BlockNum, Quorum>,
-    requests: Vec<message::Request>,
-    request_clients: HashMap<ClientId, u32>,
+    request_pool: RequestPool,
     // only primary maintains. the last proposed block number
     propose_num: BlockNum,
     ticked_propose_num: BlockNum,
@@ -188,8 +187,7 @@ impl Replica {
             blocks: Default::default(),
             prepare_votes: Default::default(),
             commit_votes: Default::default(),
-            requests: Default::default(),
-            request_clients: Default::default(),
+            request_pool: Default::default(),
             propose_num: 0,
             ticked_propose_num: 0,
             commit_num: 0,
@@ -220,8 +218,7 @@ impl Replica {
     }
 
     fn can_propose(&mut self) -> bool {
-        !self.requests.is_empty()
-            && self.propose_num - self.commit_num < self.config.max_num_inflight
+        self.is_primary() && self.propose_num - self.commit_num < self.config.max_num_inflight
     }
 }
 
@@ -265,7 +262,10 @@ impl Replica {
     }
 
     fn receive_request(&mut self, request: message::Request) -> ReplicaAction {
-        if !self.is_primary() {
+        self.request_pool.push(request.clone());
+        if self.is_primary() {
+            self.propose_blocks()
+        } else {
             tracing::warn!(self.config.id, %request.client_id, request.seq, "forward broadcast request to primary");
             // TODO bookkeeping forwarded
             return ReplicaAction::SendToReplica(
@@ -273,68 +273,33 @@ impl Replica {
                 ToReplica::Request(request),
             );
         }
-        // preserve only the last request of each client
-        // for close loop clients this is almost same as deduplication
-        // however, when primary is late on committing the last request of a client, the
-        // client who is on a tight close loop may send the following (new last) request
-        // to primary before the old last one commits, and this condition allow
-        // overlapping of these two requests
-        // this state and structure unfortunately duplicates with at most once services,
-        // exactly whom BFT protocols probably drive
-        // the upside of this duplication is to decouple BFT with Reply messages, which
-        // results in more composable consensus facility and enable usage like DSLabs
-        // part 4
-        // anyway, serious at most once is not guaranteed by BFT protocols. they can
-        // legitimately finalize repeatedly requests, as long as in consistent order
-        let client_seq = self.request_clients.get(&request.client_id);
-        if client_seq < Some(&request.seq) {
-            if let Some(client_seq) = client_seq {
-                // frequently happens with low latency setting
-                tracing::debug!(
-                    self.config.id,
-                    %request.client_id,
-                    ongoing = client_seq,
-                    incoming = request.seq,
-                    "overlapping requests"
-                );
-            }
-            self.request_clients.insert(request.client_id, request.seq);
-            self.requests.push(request)
-        } else {
-            tracing::debug!(%request.client_id, request.seq, "discard duplicated request")
-        }
-        self.propose_blocks()
     }
 
     fn propose_blocks(&mut self) -> ReplicaAction {
-        assert!(self.is_primary());
         if !self.can_propose() {
-            ReplicaAction::Nop
-        } else {
-            let mut pre_prepares = Vec::new();
-            while {
-                self.propose_num += 1;
-                let requests = self
-                    .requests
-                    .drain(..self.config.max_batch_size.min(self.requests.len()))
-                    .collect::<Vec<_>>();
-                let mut pre_prepare = message::PrePrepare {
-                    view_num: self.view_num,
-                    block_num: self.propose_num,
-                    digest: block_digest(&requests),
-                    sig: Default::default(),
-                    requests,
-                };
-                pre_prepare.sig = sign(pre_prepare.sha256(), &self.config.secret_key);
-                let replaced = self
-                    .blocks
-                    .insert(pre_prepare.block_num, pre_prepare.clone());
-                assert!(replaced.is_none());
-                pre_prepares.push(pre_prepare);
-                self.can_propose()
-            } {}
-            ReplicaAction::Propose(pre_prepares)
+            return ReplicaAction::Nop;
+        };
+        let mut pre_prepares = Vec::new();
+        while let Some(requests) = self.request_pool.close_batch(self.config.max_batch_size) {
+            self.propose_num += 1;
+            let mut pre_prepare = message::PrePrepare {
+                view_num: self.view_num,
+                block_num: self.propose_num,
+                digest: block_digest(&requests),
+                sig: Default::default(),
+                requests,
+            };
+            pre_prepare.sig = sign(pre_prepare.sha256(), &self.config.secret_key);
+            let replaced = self
+                .blocks
+                .insert(pre_prepare.block_num, pre_prepare.clone());
+            assert!(replaced.is_none());
+            pre_prepares.push(pre_prepare);
+            if !self.can_propose() {
+                break;
+            }
         }
+        ReplicaAction::Propose(pre_prepares)
     }
 
     fn receive_pre_prepare(&mut self, pre_prepare: message::PrePrepare) -> ReplicaAction {
@@ -515,9 +480,7 @@ impl Replica {
             self.is_committed(self.commit_num + 1)
         } {}
         for request in &requests {
-            if self.request_clients.get(&request.client_id) == Some(&request.seq) {
-                self.request_clients.remove(&request.client_id);
-            } // otherwise overlapping later request is pending
+            self.request_pool.commit(request)
         }
         ReplicaAction::Finalize(requests)
     }

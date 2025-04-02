@@ -184,4 +184,10 @@ mod tests {
         };
         assert_eq!(request.client_id, ClientId(1))
     }
+
+    #[test]
+    fn commit_remote() {
+        let mut pool = RequestPool::new();
+        pool.commit(&request(1))
+    }
 }

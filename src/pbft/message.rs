@@ -1,18 +1,13 @@
 use bincode::{Decode, Encode};
 
 use crate::{
-    common::{ClientId, ReplicaId},
+    common::ReplicaId,
     crypto::{Digest, Sig, UpdateHash},
 };
 
 use super::{BlockNum, ViewNum};
 
-#[derive(Debug, Clone, Encode, Decode)]
-pub struct Request {
-    pub client_id: ClientId,
-    pub seq: u32,
-    pub op: Vec<u8>,
-}
+pub use crate::common::Request;
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Reply {
