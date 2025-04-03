@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Display};
 
-use bincode::{Decode, Encode};
+use bincode::{BorrowDecode, Decode, Encode, error::DecodeError};
 use sha2::Digest as _;
 
 use crate::common::{ReplicaId, fmt_bytes};
@@ -55,14 +55,13 @@ impl<T: UpdateHash<sha2::Sha256>> Sha256Hash for T {
 }
 
 // wire type for signature
-// erasing type for simple (de)serialization
-#[derive(Clone, Default, Encode, Decode)]
-pub struct Sig(pub Vec<u8>);
+#[derive(Clone)]
+pub struct Sig(secp256k1::ecdsa::Signature);
 
 impl Display for Sig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Sig")?;
-        fmt_bytes(&self.0, f)
+        fmt_bytes(&self.0.serialize_compact(), f)
     }
 }
 
@@ -72,9 +71,9 @@ impl Debug for Sig {
     }
 }
 
-impl AsRef<[u8]> for Sig {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
+impl Default for Sig {
+    fn default() -> Self {
+        Self(secp256k1::ecdsa::Signature::from_compact(&[0; 64]).unwrap())
     }
 }
 
@@ -85,10 +84,7 @@ thread_local!(static SECP: secp256k1::Secp256k1<secp256k1::All> = secp256k1::Sec
 
 pub fn sign(message: impl Into<[u8; 32]>, secret_key: &SecretKey) -> Sig {
     let message = secp256k1::Message::from_digest(message.into());
-    Sig(SECP
-        .with(|secp| secp.sign_ecdsa(&message, secret_key))
-        .serialize_compact()
-        .to_vec())
+    Sig(SECP.with(|secp| secp.sign_ecdsa(&message, secret_key)))
 }
 
 pub fn verify(
@@ -97,13 +93,7 @@ pub fn verify(
     Sig(sig): &Sig,
 ) -> anyhow::Result<()> {
     let message = secp256k1::Message::from_digest(message.into());
-    SECP.with(|secp| {
-        secp.verify_ecdsa(
-            &message,
-            &secp256k1::ecdsa::Signature::from_compact(sig)?,
-            public_key,
-        )
-    })?;
+    SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?;
     Ok(())
 }
 
@@ -117,4 +107,31 @@ pub fn replica_secret_key(replica_id: ReplicaId) -> SecretKey {
 
 pub fn public_key(secret_key: &SecretKey) -> PublicKey {
     SECP.with(|secp| secret_key.public_key(secp))
+}
+
+impl Encode for Sig {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        Encode::encode(&self.0.serialize_compact(), encoder)
+    }
+}
+
+impl<C> Decode<C> for Sig {
+    fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+        let bytes = <[u8; 64]>::decode(decoder)?;
+        match secp256k1::ecdsa::Signature::from_compact(&bytes) {
+            Ok(sig) => Ok(Self(sig)),
+            Err(err) => Err(DecodeError::OtherString(err.to_string())),
+        }
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for Sig {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, DecodeError> {
+        Decode::decode(decoder)
+    }
 }

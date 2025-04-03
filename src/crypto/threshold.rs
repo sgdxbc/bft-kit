@@ -168,11 +168,10 @@ impl<C> Decode<C> for ThresholdCryptoSig {
         // otherwise compile error
         // TODO report issue to clippy
         #[allow(clippy::needless_borrows_for_generic_args)]
-        let sig = match threshold_crypto::Signature::from_bytes(&Decode::decode(decoder)?) {
-            Ok(sig) => sig,
-            Err(err) => return Err(DecodeError::OtherString(err.to_string())),
-        };
-        Ok(Self(sig.into()))
+        match threshold_crypto::Signature::from_bytes(&Decode::decode(decoder)?) {
+            Ok(sig) => Ok(Self(sig.into())),
+            Err(err) => Err(DecodeError::OtherString(err.to_string())),
+        }
     }
 }
 
@@ -196,11 +195,10 @@ impl Encode for ThresholdCryptoSigShare {
 impl<C> Decode<C> for ThresholdCryptoSigShare {
     fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
         #[allow(clippy::needless_borrows_for_generic_args)]
-        let sig = match threshold_crypto::SignatureShare::from_bytes(&Decode::decode(decoder)?) {
-            Ok(sig) => sig,
-            Err(err) => return Err(DecodeError::OtherString(err.to_string())),
-        };
-        Ok(Self(sig.into()))
+        match threshold_crypto::SignatureShare::from_bytes(&Decode::decode(decoder)?) {
+            Ok(sig) => Ok(Self(sig.into())),
+            Err(err) => Err(DecodeError::OtherString(err.to_string())),
+        }
     }
 }
 
