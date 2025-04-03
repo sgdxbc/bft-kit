@@ -181,7 +181,7 @@ impl Replica {
             blocks: Default::default(),
             prepare_votes: Default::default(),
             commit_votes: Default::default(),
-            request_pool: Default::default(),
+            request_pool: RequestPool::close_loop(), // make it configurable if useful
             propose_num: 0,
             ticked_propose_num: 0,
             commit_num: 0,
