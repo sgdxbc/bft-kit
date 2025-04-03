@@ -159,7 +159,7 @@ pub struct Replica {
     config: ReplicaConfig,
     view_num: ViewNum,
     // use BTreeMap to efficiently (and simply) garbage collection with split_off
-    blocks: BTreeMap<BlockNum, message::PrePrepare>,
+    blocks: BTreeMap<BlockNum, Block>,
     prepare_votes: BTreeMap<BlockNum, Quorum>,
     commit_votes: BTreeMap<BlockNum, Quorum>,
     request_pool: RequestPool,
@@ -170,6 +170,9 @@ pub struct Replica {
     // but not checked yet
     commit_num: BlockNum,
 }
+
+// feels lazy, but seemingly not introducing unnecessary redundant state
+type Block = message::PrePrepare;
 
 type Quorum = HashMap<ReplicaId, message::Vote>;
 

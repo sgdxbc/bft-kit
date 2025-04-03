@@ -5,7 +5,7 @@ use crate::{
     crypto::{Digest, UpdateHash, threshold::PartialSig},
 };
 
-use super::Block;
+use super::{Block, QuorumCert};
 
 pub use crate::common::client::Request;
 
@@ -18,17 +18,28 @@ pub struct Reply {
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Generic {
-    pub(super) node: Block,
+    // pub view_num: ViewNum,
+    pub(super) node: Digest,
+    pub(super) justify: QuorumCert,
     pub replica_id: ReplicaId,
-    //
+    // the paper probably implies no signature is required for the messages
+    // themselves. although the event drive algorithm uses notation MSG_u(..) it
+    // seems not to be the conventional "signing" notation but simply
+    // differentiate messages produced by replica u itself and others
+    // in practice it is probably fine to send messages without signatures if the
+    // underlying transport is point to point authenticated. (even if using
+    // untrusted channels it seems ok for correctness, but that i'm not sure and
+    // also there will probably be problems with liveness)
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct VoteGeneric {
-    // echo back only the hash(generic.node) instead of the full Generic
+    // pub view_num: ViewNum,
     pub node: Digest,
-    pub replica_id: ReplicaId,
     pub partial_sig: PartialSig,
+    // our transport interface does not provide sender id by default, so bring it by
+    // ourselves
+    pub replica_id: ReplicaId,
 }
 
 impl<S: sha2::Digest> UpdateHash<S> for Block {
@@ -39,21 +50,8 @@ impl<S: sha2::Digest> UpdateHash<S> for Block {
             state.update(request.seq.to_le_bytes());
             state.update(&request.op)
         }
-        self.justify.update(state);
+        state.update(&self.justify.node);
+        // state.update(self.justify.view_num.to_le_bytes());
         state.update(self.height.to_le_bytes());
-    }
-}
-
-impl<S: sha2::Digest> UpdateHash<S> for super::QuorumCert {
-    fn update(&self, state: &mut S) {
-        state.update(&self.node);
-        // TODO
-    }
-}
-
-impl<S: sha2::Digest> UpdateHash<S> for Generic {
-    fn update(&self, state: &mut S) {
-        self.node.update(state);
-        state.update(self.replica_id.to_le_bytes());
     }
 }
