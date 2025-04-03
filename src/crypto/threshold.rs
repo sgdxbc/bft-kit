@@ -24,30 +24,34 @@ pub enum PartialSig {
     ThresholdCrypto(ThresholdCryptoSigShare),
 }
 
+#[derive(Debug)]
 pub enum PartialSigs {
     Vec(HashMap<Index, super::Sig>),
     ThresholdCrypto(HashMap<Index, threshold_crypto::SignatureShare>),
 }
 
-pub enum SecretKey {
+#[derive(Debug)]
+pub enum PartialSecretKey {
     Vec(super::SecretKey),
     ThresholdCrypto(threshold_crypto::SecretKeyShare),
 }
 
-// conventionally a PublicKey type is provided to verify a partial signature
+// conventionally a (Partial)PublicKey type is provided to verify a partial
+// signature
 // however, since we always need to verify partial signatures from every
 // participants, what's the difference between a public master key and a vector
-// of public keys?
+// of (partial) public keys?
 
+#[derive(Debug)]
 pub enum PublicMasterKey {
     Vec(Vec<super::PublicKey>, Index), // (keys, threshold)
     ThresholdCrypto(threshold_crypto::PublicKeySet),
 }
 
-pub fn sign(message: impl Into<[u8; 32]>, secret_key: &SecretKey) -> PartialSig {
+pub fn sign(message: impl Into<[u8; 32]>, secret_key: &PartialSecretKey) -> PartialSig {
     match secret_key {
-        SecretKey::Vec(secret_key) => PartialSig::Vec(super::sign(message, secret_key)),
-        SecretKey::ThresholdCrypto(secret_key_share) => PartialSig::ThresholdCrypto(
+        PartialSecretKey::Vec(secret_key) => PartialSig::Vec(super::sign(message, secret_key)),
+        PartialSecretKey::ThresholdCrypto(secret_key_share) => PartialSig::ThresholdCrypto(
             ThresholdCryptoSigShare(secret_key_share.sign(message.into()).into()),
         ),
     }

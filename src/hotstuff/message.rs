@@ -19,7 +19,7 @@ pub struct Reply {
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Generic {
     // pub view_num: ViewNum,
-    pub(super) node: Digest,
+    pub node: Digest,
     pub(super) justify: QuorumCert,
     pub replica_id: ReplicaId,
     // the paper probably implies no signature is required for the messages

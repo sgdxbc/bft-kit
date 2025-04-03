@@ -12,12 +12,12 @@ use crate::{
     },
 };
 
-pub mod message;
+mod message;
 pub mod parse;
 pub mod transport;
 
-pub type ViewNum = u32;
-pub type BlockNum = u32;
+type ViewNum = u32;
+type BlockNum = u32;
 
 #[derive(Debug, Clone)]
 pub struct Spec {
