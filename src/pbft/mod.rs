@@ -38,7 +38,7 @@ pub enum ToReplica {
     // this is kind of a secure bug: malformed replica can "repackage" a Prepare of
     // any other replica into a Commit to pretend that replica has sent Commit
     // can be easily addressed by e.g. adding a nonce in Commit messages
-    // intentionally left unresolved to remind this is a prototype implementation
+    // deliberately left unresolved to remind this is a prototype implementation
     Prepare(message::Vote),
     Commit(message::Vote),
 }
