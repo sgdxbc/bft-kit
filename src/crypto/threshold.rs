@@ -1,40 +1,55 @@
-use bincode::{Decode, Encode};
+use std::collections::HashMap;
+
+use bincode::{BorrowDecode, Decode, Encode, error::DecodeError};
 
 pub type Index = usize;
+
+#[derive(Debug, Clone)]
+// box to prevent imbalance enum size below
+// box here instead of in enum for better pattern matching ergonomics
+pub struct ThresholdCryptoSig(Box<threshold_crypto::Signature>);
+
+#[derive(Debug, Clone)]
+pub struct ThresholdCryptoSigShare(Box<threshold_crypto::SignatureShare>);
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum Sig {
     Vec(Vec<(Index, super::Sig)>),
-    Combined(super::Sig),
+    ThresholdCrypto(ThresholdCryptoSig),
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum PartialSig {
     Vec(super::Sig),
-    Combined(super::Sig),
+    ThresholdCrypto(ThresholdCryptoSigShare),
 }
 
 pub enum PartialSigs {
-    Vec(Vec<(Index, super::Sig)>),
-    Combined(Vec<(Index, threshold_crypto::SignatureShare)>),
+    Vec(HashMap<Index, super::Sig>),
+    ThresholdCrypto(HashMap<Index, threshold_crypto::SignatureShare>),
 }
 
 pub enum SecretKey {
     Vec(super::SecretKey),
-    Combined(threshold_crypto::SecretKeyShare),
+    ThresholdCrypto(threshold_crypto::SecretKeyShare),
 }
+
+// conventionally a PublicKey type is provided to verify a partial signature
+// however, since we always need to verify partial signatures from every
+// participants, what's the difference between a public master key and a vector
+// of public keys?
 
 pub enum PublicMasterKey {
     Vec(Vec<super::PublicKey>, Index), // (keys, threshold)
-    Combined(threshold_crypto::PublicKeySet),
+    ThresholdCrypto(threshold_crypto::PublicKeySet),
 }
 
 pub fn sign(message: impl Into<[u8; 32]>, secret_key: &SecretKey) -> PartialSig {
     match secret_key {
         SecretKey::Vec(secret_key) => PartialSig::Vec(super::sign(message, secret_key)),
-        SecretKey::Combined(secret_key) => PartialSig::Combined(super::Sig(
-            secret_key.sign(message.into()).to_bytes().to_vec(),
-        )),
+        SecretKey::ThresholdCrypto(secret_key_share) => PartialSig::ThresholdCrypto(
+            ThresholdCryptoSigShare(secret_key_share.sign(message.into()).into()),
+        ),
     }
 }
 
@@ -48,10 +63,13 @@ pub fn verify_partial(
         (PublicMasterKey::Vec(public_keys, _), PartialSig::Vec(sig)) => {
             super::verify(message, &public_keys[index], sig)?
         }
-        (PublicMasterKey::Combined(public_key_set), PartialSig::Combined(sig)) => {
+        (
+            PublicMasterKey::ThresholdCrypto(public_key_set),
+            PartialSig::ThresholdCrypto(ThresholdCryptoSigShare(sig_share)),
+        ) => {
             let valid = public_key_set
                 .public_key_share(index)
-                .verify(&decode_signature_share(sig)?, message.into());
+                .verify(sig_share, message.into());
             anyhow::ensure!(valid)
         }
         // TODO make exclusive error type
@@ -60,63 +78,49 @@ pub fn verify_partial(
     Ok(())
 }
 
-fn decode_signature_share(
-    super::Sig(sig): &super::Sig,
-) -> anyhow::Result<threshold_crypto::SignatureShare> {
-    let Ok(sig) = <[u8; threshold_crypto::SIG_SIZE]>::try_from(sig.clone()) else {
-        anyhow::bail!("incorrect signature size")
-    };
-    let sig = threshold_crypto::SignatureShare::from_bytes(sig)
-        .map_err(|err| anyhow::format_err!(err))?;
-    Ok(sig)
-}
-
 impl PartialSigs {
-    pub fn push(&mut self, index: Index, partial_sig: PartialSig) -> anyhow::Result<()> {
-        match (self, partial_sig) {
-            (Self::Vec(partial_sigs), PartialSig::Vec(partial_sig)) => {
-                partial_sigs.push((index, partial_sig))
+    pub fn add_partial(
+        &mut self,
+        index: Index,
+        partial_sig: PartialSig,
+        master_key: &PublicMasterKey,
+    ) -> anyhow::Result<Option<Sig>> {
+        Ok(match (self, partial_sig, master_key) {
+            (
+                Self::Vec(partial_sigs),
+                PartialSig::Vec(partial_sig),
+                PublicMasterKey::Vec(_, threshold),
+            ) => {
+                partial_sigs.insert(index, partial_sig);
+                if partial_sigs.len() <= *threshold {
+                    None
+                } else {
+                    Some(Sig::Vec(
+                        partial_sigs
+                            .iter()
+                            .map(|(&index, partial_sig)| (index, partial_sig.clone()))
+                            .collect(),
+                    ))
+                }
             }
-            (Self::Combined(partial_sigs), PartialSig::Combined(partial_sig)) => {
-                // a bit inefficient: any partial signature that get `push`ed is probably
-                // verified first, where it has always been decoded
-                partial_sigs.push((index, decode_signature_share(&partial_sig)?))
+            (
+                Self::ThresholdCrypto(sig_shares),
+                PartialSig::ThresholdCrypto(ThresholdCryptoSigShare(sig_share)),
+                PublicMasterKey::ThresholdCrypto(public_key_set),
+            ) => {
+                sig_shares.insert(index, *sig_share);
+                if sig_shares.len() <= public_key_set.threshold() {
+                    None
+                } else {
+                    let sig = public_key_set
+                        .combine_signatures(sig_shares.iter().map(|(&index, sig)| (index, sig)))
+                        .map_err(|err| anyhow::format_err!(err))?;
+                    Some(Sig::ThresholdCrypto(ThresholdCryptoSig(sig.into())))
+                }
             }
             _ => anyhow::bail!("unmatched public key and signature types"),
-        }
-        Ok(())
+        })
     }
-
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Vec(partial_sigs) => partial_sigs.len(),
-            Self::Combined(partial_sigs) => partial_sigs.len(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-pub fn combine(partial_sigs: &PartialSigs, master_key: &PublicMasterKey) -> anyhow::Result<Sig> {
-    Ok(match (partial_sigs, master_key) {
-        (PartialSigs::Vec(partial_sigs), PublicMasterKey::Vec(_, threshold)) => {
-            anyhow::ensure!(partial_sigs.len() >= threshold);
-            Sig::Vec(partial_sigs.clone())
-        }
-        (PartialSigs::Combined(partial_sigs), PublicMasterKey::Combined(master_key)) => {
-            let sig = master_key
-                .combine_signatures(
-                    partial_sigs
-                        .iter()
-                        .map(|(index, partial_sig)| (index, partial_sig)),
-                )
-                .map_err(|err| anyhow::format_err!(err))?;
-            Sig::Combined(super::Sig(sig.to_bytes().to_vec()))
-        }
-        _ => anyhow::bail!("unmatched public key and signature types"),
-    })
 }
 
 pub fn verify(
@@ -127,22 +131,83 @@ pub fn verify(
     let message = message.into();
     match (sig, master_key) {
         (Sig::Vec(sigs), PublicMasterKey::Vec(public_keys, threshold)) => {
-            let count = sigs
+            // deduplicate partial signatures by index
+            let sigs = sigs
                 .iter()
-                .filter(|(index, sig)| super::verify(message, &public_keys[*index], sig).is_ok())
+                .map(|(index, sig)| (*index, sig))
+                .collect::<HashMap<_, _>>();
+            let count = sigs
+                .into_iter()
+                .filter(|&(index, sig)| super::verify(message, &public_keys[index], sig).is_ok())
                 .take(*threshold)
                 .count();
             anyhow::ensure!(count == *threshold)
         }
-        (Sig::Combined(super::Sig(sig)), PublicMasterKey::Combined(public_key_set)) => {
-            let Ok(sig) = <[u8; threshold_crypto::SIG_SIZE]>::try_from(sig.clone()) else {
-                anyhow::bail!("incorrect signature size")
-            };
-            let sig = threshold_crypto::Signature::from_bytes(sig)
-                .map_err(|err| anyhow::format_err!(err))?;
-            anyhow::ensure!(public_key_set.public_key().verify(&sig, message))
+        (
+            Sig::ThresholdCrypto(ThresholdCryptoSig(sig)),
+            PublicMasterKey::ThresholdCrypto(public_key_set),
+        ) => {
+            anyhow::ensure!(public_key_set.public_key().verify(sig, message))
         }
         _ => anyhow::bail!("unmatched public key and signature types"),
     }
     Ok(())
+}
+
+impl Encode for ThresholdCryptoSig {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        Encode::encode(&self.0.to_bytes(), encoder)
+    }
+}
+
+impl<C> Decode<C> for ThresholdCryptoSig {
+    fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+        // otherwise compile error
+        // TODO report issue to clippy
+        #[allow(clippy::needless_borrows_for_generic_args)]
+        let sig = match threshold_crypto::Signature::from_bytes(&Decode::decode(decoder)?) {
+            Ok(sig) => sig,
+            Err(err) => return Err(DecodeError::OtherString(err.to_string())),
+        };
+        Ok(Self(sig.into()))
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for ThresholdCryptoSig {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, DecodeError> {
+        Decode::decode(decoder)
+    }
+}
+
+impl Encode for ThresholdCryptoSigShare {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        Encode::encode(&self.0.to_bytes(), encoder)
+    }
+}
+
+impl<C> Decode<C> for ThresholdCryptoSigShare {
+    fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+        #[allow(clippy::needless_borrows_for_generic_args)]
+        let sig = match threshold_crypto::SignatureShare::from_bytes(&Decode::decode(decoder)?) {
+            Ok(sig) => sig,
+            Err(err) => return Err(DecodeError::OtherString(err.to_string())),
+        };
+        Ok(Self(sig.into()))
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for ThresholdCryptoSigShare {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, DecodeError> {
+        Decode::decode(decoder)
+    }
 }
