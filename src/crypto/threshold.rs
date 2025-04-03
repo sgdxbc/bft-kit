@@ -7,10 +7,10 @@ pub type Index = usize;
 #[derive(Debug, Clone)]
 // box to prevent imbalance enum size below
 // box here instead of in enum for better pattern matching ergonomics
-pub struct ThresholdCryptoSig(Box<threshold_crypto::Signature>);
+pub struct ThresholdCryptoSig(pub Box<threshold_crypto::Signature>);
 
 #[derive(Debug, Clone)]
-pub struct ThresholdCryptoSigShare(Box<threshold_crypto::SignatureShare>);
+pub struct ThresholdCryptoSigShare(pub Box<threshold_crypto::SignatureShare>);
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum Sig {
@@ -59,11 +59,11 @@ pub fn sign(message: impl Into<[u8; 32]>, secret_key: &PartialSecretKey) -> Part
 
 pub fn verify_partial(
     message: impl Into<[u8; 32]>,
-    public_key_set: &PublicMasterKey,
+    master_key: &PublicMasterKey,
     index: usize,
     partial_sig: &PartialSig,
 ) -> anyhow::Result<()> {
-    match (public_key_set, partial_sig) {
+    match (master_key, partial_sig) {
         (PublicMasterKey::Vec(public_keys, _), PartialSig::Vec(sig)) => {
             super::verify(message, &public_keys[index], sig)?
         }
@@ -143,9 +143,9 @@ pub fn verify(
             let count = sigs
                 .into_iter()
                 .filter(|&(index, sig)| super::verify(message, &public_keys[index], sig).is_ok())
-                .take(*threshold)
+                .take(*threshold + 1)
                 .count();
-            anyhow::ensure!(count == *threshold)
+            anyhow::ensure!(count == *threshold + 1)
         }
         (
             Sig::ThresholdCrypto(ThresholdCryptoSig(sig)),
