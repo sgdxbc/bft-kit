@@ -11,24 +11,20 @@ use rand::random;
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("Sign");
-    group.bench_function("Vec", |b| {
-        let secret_key = loop {
-            if let Ok(secret_key) = SecretKey::from_byte_array(&random()) {
-                break secret_key;
-            }
-        };
+    group.bench_function("Secp256k1", |b| {
+        let secret_key = secp256k1_secret_key();
         let message = random::<[u8; 32]>();
         b.iter(|| black_box(sign(message, &secret_key)))
     });
     group.bench_function("ThresholdCrypto", |b| {
-        let secret_key = threshold::PartialSecretKey::ThresholdCrypto(rand07::random());
+        let secret_key = rand07::random::<threshold_crypto::SecretKey>();
         let message = random::<[u8; 32]>();
-        b.iter(|| black_box(threshold::sign(message, &secret_key)))
+        b.iter(|| black_box(secret_key.sign(message)))
     });
     group.finish();
 
     let mut group = c.benchmark_group("PartialVerify");
-    group.bench_function("Vec", |b| {
+    group.bench_function("Secp256k1", |b| {
         let secret_key = secp256k1_secret_key();
         let message = random::<[u8; 32]>();
         let sig = sign(message, &secret_key);
@@ -37,12 +33,17 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     });
     group.bench_function("ThresholdCrypto", |b| {
         let secret_key_set = threshold_crypto::SecretKeySet::random(2, &mut rand07::thread_rng());
-        let secret_key =
-            threshold::PartialSecretKey::ThresholdCrypto(secret_key_set.secret_key_share(0));
+        let secret_key_share = secret_key_set.secret_key_share(0);
         let message = random::<[u8; 32]>();
-        let sig = threshold::sign(message, &secret_key);
-        let public_key = threshold::PublicMasterKey::ThresholdCrypto(secret_key_set.public_keys());
-        b.iter(|| black_box(threshold::verify_partial(message, &public_key, 0, &sig).unwrap()))
+        let sig_share = secret_key_share.sign(message);
+        let public_key_set = secret_key_set.public_keys();
+        b.iter(|| {
+            black_box(assert!(
+                public_key_set
+                    .public_key_share(0)
+                    .verify(&sig_share, message)
+            ))
+        })
     });
     group.finish();
 

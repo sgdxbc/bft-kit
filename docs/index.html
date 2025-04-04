@@ -11,7 +11,12 @@
 <body class="libertinus">
     <div id="content" style="display: none;">
 # BFT Testbed
-$$BFT\ evaluations\ made\ simple$$
+$$BFT\ Evaluations\ Made\ Simple$$
+
+<div class="abstract"><h2>Abstract</h2>
+
+[View codebase](https://github.com/sgdxbc/bft-testbed).
+</div>
 
 The BFT Testbed effort provides the prototype implementations and evaluation scaffolds of a selective collection of distributed protocols that relate to tolerating Byzantine faults, most of which are replication protocols. <span style="color:gray">TODO: a listing of provided protocols and prototype status.</span>
 
@@ -40,6 +45,7 @@ We show various ways to run the same implementation of PBFT (`src/pbft/mod.rs`),
 to run all PBFT tests. You may want to pass environment variables `RUST_LOG` and `RUST_BACKTRACE` as well.
 
 The tests mostly check for liveness, so that as long as all tests are passed, if a protocol gets stuck in the real deployment, that is probably not the fault of the protocol implementation but rather the network transport. This testbed is not good at ensuring correctness; you may still want to look into approaches like model checking for that (maybe add it in the future). Also, the simulated transports may not deliver the messages in a realistic order. The simulated order is just a *reasonable* one that the protocol prototype should be able to work with.
+<span class="sidenote">Utilizing `proptest` for simulation is desirable, but I'm a little worried about whether the randomized order will be reasonable or how to enforce that.</span>
 
 **Loopback examples.** The `src/pbft/transport.rs` provides a network transport to run PBFT clients and replicas in asynchronous tasks (or coroutines). The `pbft` example runs multiple client and replica tasks in the same process with loopback network. The configurations are hardcoded in the example.
 
@@ -94,6 +100,18 @@ There's never "one code fits all". When the code does not fit, write (seemingly 
     <script type="module">
         import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
         document.addEventListener('DOMContentLoaded', () => {
+            for (const [i, sidenote] of document.querySelectorAll(".sidenote").entries()) {
+                const label = document.createElement('label');
+                label.htmlFor = `sn-${i}`;
+                label.classList.add('sidenote-toggle', 'sidenote-number');
+                sidenote.parentElement.insertBefore(label, sidenote);
+                const input = document.createElement('input');
+                input.type = 'checkbox';
+                input.id = label.htmlFor;
+                input.classList.add('sidenote-toggle');
+                sidenote.parentElement.insertBefore(input, sidenote);
+            }
+
             const content = document.querySelector('#content');
             content.innerHTML = marked.parse(content.innerHTML);
             content.style.display = 'inherit';
