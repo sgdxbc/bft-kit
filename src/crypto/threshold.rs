@@ -7,6 +7,16 @@ use bincode::{
     error::{DecodeError, EncodeError},
 };
 
+// note on threshold definition
+// threshold_crypto defines threshold as the maximum number of faulty
+// participants, and combine signature with threshold + 1 partial signatures
+// givre defines threshold as the minimum number of signing participants
+// (actually the actual number, as the signing participants are selected before
+// signing), and combine signature with threshold partial signatures
+// we follow the givre convention here because it's a bit consistent with the
+// targeted use case i.e. permissioned blockchain, and the threshold is set to
+// n - f as the same to a regular majority quorum size
+
 pub type Index = usize;
 
 #[derive(Debug, Clone)]
@@ -109,8 +119,11 @@ pub fn verify_partial(
                 .verify(sig_share, message.into());
             anyhow::ensure!(valid)
         }
+        // we don't implement for givre variant here as it does not support verification
+        // of signature shares (yet, as it claims)
+
         // TODO make exclusive error type
-        _ => anyhow::bail!("unmatched public key and signature types"),
+        _ => anyhow::bail!("unimplemented"),
     }
     Ok(())
 }
@@ -146,15 +159,10 @@ impl PartialSigs {
                 AggregateContext::Vec(threshold),
             ) => {
                 partial_sigs.insert(index, partial_sig);
-                if partial_sigs.len() <= threshold {
+                if partial_sigs.len() < threshold {
                     None
                 } else {
-                    Some(Sig::Vec(
-                        partial_sigs
-                            .iter()
-                            .map(|(&index, partial_sig)| (index, partial_sig.clone()))
-                            .collect(),
-                    ))
+                    Some(Sig::Vec(partial_sigs.drain().collect()))
                 }
             }
             (
@@ -221,7 +229,7 @@ pub fn verify(
                 .filter(|&(index, sig)| super::verify(message, &public_keys[index], sig).is_ok())
                 .take(*threshold + 1)
                 .count();
-            anyhow::ensure!(count == *threshold + 1)
+            anyhow::ensure!(count == *threshold)
         }
         (
             Sig::ThresholdCrypto(ThresholdCryptoSig(sig)),

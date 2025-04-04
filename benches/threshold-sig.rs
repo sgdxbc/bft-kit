@@ -95,7 +95,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("Verify");
     for f in [1, 10, 33] {
-        let threshold = 2 * f;
+        let threshold = 2 * f + 1;
         let message = random::<[u8; 32]>();
 
         let (partial_sigs, master_key) = prepare_combine_vec(threshold, message);
@@ -159,7 +159,7 @@ fn prepare_combine_vec(
 ) -> (Vec<threshold::PartialSig>, threshold::PublicMasterKey) {
     let secp = secp256k1::Secp256k1::new();
     let (sigs, public_keys) = repeat_with(secp256k1_secret_key)
-        .take(threshold + 1)
+        .take(threshold)
         .map(|secret_key| {
             let sig = sign(message, &secret_key);
             (
@@ -177,8 +177,8 @@ fn prepare_combine_threshold_crypto(
     message: [u8; 32],
 ) -> (Vec<threshold::PartialSig>, threshold_crypto::PublicKeySet) {
     let secret_key_set =
-        threshold_crypto::SecretKeySet::random(threshold, &mut rand07::thread_rng());
-    let sigs = (0..=threshold)
+        threshold_crypto::SecretKeySet::random(threshold - 1, &mut rand07::thread_rng());
+    let sigs = (0..threshold)
         .map(|i| {
             threshold::PartialSig::ThresholdCrypto(ThresholdCryptoSigShare(
                 secret_key_set.secret_key_share(i).sign(message).into(),
@@ -202,12 +202,12 @@ fn prepare_combine_givre(
     threshold::GivreKeyShare,
 ) {
     let key_shares = givre::trusted_dealer::builder(n)
-        .set_threshold(Some(threshold + 1))
+        .set_threshold(Some(threshold))
         .generate_shares(&mut rand08::thread_rng())
         .unwrap();
     let (secret_nonces, public_commitments) = key_shares
         .iter()
-        .take((threshold + 1) as _)
+        .take(threshold as _) // first `threshold` participants are joining
         .map(|key_share| {
             givre::signing::round1::commit::<threshold::GivreCiphersuite>(
                 &mut rand08::thread_rng(),

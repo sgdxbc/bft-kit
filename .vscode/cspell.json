@@ -11,6 +11,7 @@
         "hdrhistogram",
         "hotstuff",
         "pbft",
+        "permissioned",
         "Pkcs8",
         "pkill",
         "proptest",
