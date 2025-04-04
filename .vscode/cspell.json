@@ -4,8 +4,10 @@
     "dictionaryDefinitions": [],
     "dictionaries": [],
     "words": [
+        "ciphersuite",
         "Demikernel",
         "Deque",
+        "Givre",
         "hdrhistogram",
         "hotstuff",
         "pbft",

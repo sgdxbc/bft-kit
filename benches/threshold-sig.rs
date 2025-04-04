@@ -52,24 +52,24 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let threshold = 2 * f;
         let message = random::<[u8; 32]>();
 
-        let (sigs, master_key) = prepare_combine_vec(threshold, message);
+        let (sigs, _) = prepare_combine_vec(threshold, message);
         group.bench_function(BenchmarkId::new("Vec", threshold), |b| {
             b.iter(|| {
                 black_box(combine(
                     threshold::PartialSigs::Vec(Default::default()),
                     &sigs,
-                    &master_key,
+                    threshold::AggregateContext::Vec(threshold),
                 ))
             })
         });
 
-        let (sigs, master_key) = prepare_combine_threshold_crypto(threshold, message);
+        let (sigs, public_key_set) = prepare_combine_threshold_crypto(threshold, message);
         group.bench_function(BenchmarkId::new("ThresholdCrypto", threshold), |b| {
             b.iter(|| {
                 black_box(combine(
                     threshold::PartialSigs::ThresholdCrypto(Default::default()),
                     &sigs,
-                    &master_key,
+                    threshold::AggregateContext::ThresholdCrypto(&public_key_set),
                 ))
             })
         });
@@ -85,18 +85,19 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let sig = combine(
             threshold::PartialSigs::Vec(Default::default()),
             &sigs,
-            &master_key,
+            threshold::AggregateContext::Vec(threshold),
         );
         group.bench_function(BenchmarkId::new("Vec", threshold), |b| {
             b.iter(|| black_box(threshold::verify(message, &sig, &master_key).unwrap()))
         });
 
-        let (sigs, master_key) = prepare_combine_threshold_crypto(threshold, message);
+        let (sigs, public_key_set) = prepare_combine_threshold_crypto(threshold, message);
         let sig = combine(
             threshold::PartialSigs::ThresholdCrypto(Default::default()),
             &sigs,
-            &master_key,
+            threshold::AggregateContext::ThresholdCrypto(&public_key_set),
         );
+        let master_key = threshold::PublicMasterKey::ThresholdCrypto(public_key_set);
         group.bench_function(BenchmarkId::new("ThresholdCrypto", threshold), |b| {
             b.iter(|| black_box(threshold::verify(message, &sig, &master_key).unwrap()))
         });
@@ -106,13 +107,13 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 fn combine(
     mut partial_sigs: threshold::PartialSigs,
     sigs: &[threshold::PartialSig],
-    master_key: &threshold::PublicMasterKey,
+    context: threshold::AggregateContext<'_>,
 ) -> threshold::Sig {
     let mut sig = None;
     for (i, partial_sig) in sigs.iter().enumerate() {
         assert!(sig.is_none());
         sig = partial_sigs
-            .add_partial(i, partial_sig.clone(), master_key)
+            .add_partial(i, partial_sig.clone(), context)
             .unwrap()
     }
     sig.unwrap()
@@ -121,7 +122,7 @@ fn combine(
 fn prepare_combine_threshold_crypto(
     threshold: usize,
     message: [u8; 32],
-) -> (Vec<threshold::PartialSig>, threshold::PublicMasterKey) {
+) -> (Vec<threshold::PartialSig>, threshold_crypto::PublicKeySet) {
     let secret_key_set =
         threshold_crypto::SecretKeySet::random(threshold, &mut rand07::thread_rng());
     let sigs = (0..=threshold)
@@ -131,8 +132,7 @@ fn prepare_combine_threshold_crypto(
             ))
         })
         .collect::<Vec<_>>();
-    let master_key = threshold::PublicMasterKey::ThresholdCrypto(secret_key_set.public_keys());
-    (sigs, master_key)
+    (sigs, secret_key_set.public_keys())
 }
 
 fn prepare_combine_vec(
