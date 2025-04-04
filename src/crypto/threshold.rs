@@ -17,8 +17,8 @@ pub struct ThresholdCryptoSig(pub Box<threshold_crypto::Signature>);
 #[derive(Debug, Clone)]
 pub struct ThresholdCryptoSigShare(pub Box<threshold_crypto::SignatureShare>);
 
-type GivreCiphersuite = givre::ciphersuite::Secp256k1;
-type GivreCurve = <GivreCiphersuite as givre::Ciphersuite>::Curve;
+pub type GivreCiphersuite = givre::ciphersuite::Secp256k1;
+pub type GivreCurve = <GivreCiphersuite as givre::Ciphersuite>::Curve;
 
 #[derive(Debug, Clone)]
 pub struct GivreSig(pub Box<givre::signing::aggregate::Signature<GivreCiphersuite>>);
@@ -26,7 +26,7 @@ pub struct GivreSig(pub Box<givre::signing::aggregate::Signature<GivreCiphersuit
 #[derive(Debug, Clone)]
 pub struct GivreSigShare(pub givre::signing::round2::SigShare<GivreCurve>);
 
-type GivreKeyShare = givre::KeyShare<GivreCurve>;
+pub type GivreKeyShare = givre::KeyShare<GivreCurve>;
 
 type GivrePublicKey = givre::ciphersuite::NormalizedPoint<
     GivreCiphersuite,
@@ -125,7 +125,7 @@ pub enum AggregateContext<'a> {
 #[derive(Clone, Copy)]
 pub struct GivreAggregateContext<'a> {
     pub key_share: &'a GivreKeyShare,
-    pub public_commitments: &'a [(
+    pub signers: &'a [(
         givre::SignerIndex,
         givre::signing::round1::PublicCommitments<GivreCurve>,
     )],
@@ -182,7 +182,7 @@ impl PartialSigs {
                     None
                 } else {
                     let mut signers = Vec::new();
-                    for &(index, public_commitments) in context.public_commitments {
+                    for &(index, public_commitments) in context.signers {
                         let Some(sig_share) = sig_shares.remove(&(index as usize)) else {
                             anyhow::bail!("missing signature share for index {index}")
                         };

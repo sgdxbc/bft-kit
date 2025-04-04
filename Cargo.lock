@@ -154,6 +154,7 @@ dependencies = [
  "hdrhistogram",
  "quinn",
  "rand 0.7.3",
+ "rand 0.8.5",
  "rand 0.9.0",
  "rcgen",
  "secp256k1",
