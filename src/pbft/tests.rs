@@ -291,12 +291,10 @@ fn batched() {
         }
     }
     system.exhaust(100);
-    let batch_proposal = system.servers.iter().all(|(replica, _)| {
-        replica
-            .blocks
-            .values()
-            .any(|block| block.requests.len() > 1)
-    });
+    let batch_proposal = system
+        .servers
+        .iter()
+        .all(|(replica, _)| replica.blocks.values().any(|block| block.1.len() > 1));
     assert!(batch_proposal)
 }
 
@@ -413,7 +411,7 @@ fn drop_reply() {
 #[test]
 fn drop_pre_prepare() {
     drop_1(
-        |event| matches!(event, Event::SendToReplica(_, ToReplica::PrePrepare(_))),
+        |event| matches!(event, Event::SendToReplica(_, ToReplica::PrePrepare(..))),
         false,
         true,
     );

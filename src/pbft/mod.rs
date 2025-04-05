@@ -34,7 +34,7 @@ impl Spec {
 #[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub enum ToReplica {
     Request(message::Request),
-    PrePrepare(message::PrePrepare),
+    PrePrepare(message::PrePrepare, Vec<message::Request>),
     // this is kind of a secure bug: malformed replica can "repackage" a Prepare of
     // any other replica into a Commit to pretend that replica has sent Commit
     // can be easily addressed by e.g. adding a nonce in Commit messages
@@ -127,6 +127,52 @@ impl Client {
     }
 }
 
+// #[derive(Debug)]
+// pub struct ReplicaCoreConfig {
+//     pub spec: Spec,
+//     pub id: ReplicaId,
+//     pub max_num_inflight: BlockNum,
+//     pub max_batch_size: usize,
+// }
+
+// pub struct ReplicaCore {
+//     config: ReplicaCoreConfig,
+//     view_num: ViewNum,
+//     pool: RequestPool,
+//     blocks: Vec<Block>,
+//     propose_num: BlockNum,
+//     commit_num: BlockNum,
+// }
+
+// pub struct Block {
+//     requests: Vec<message::Request>,
+//     primary_sig: Sig
+//     prepare_quorum: Option<Quorum>,
+//     commit_quorum: Option<Quorum>,
+// }
+
+// pub enum ReplicaCoreAction {
+//     Nop,
+//     Propose(BlockNum),
+// }
+
+// impl ReplicaCore {
+//     fn is_primary(&self) -> bool {
+//         self.config.spec.primary(self.view_num) == self.config.id
+//     }
+
+//     pub fn init(&mut self) -> ReplicaCoreAction {
+//         if self.is_primary() {
+//             self.propose_num += 1;
+//             ReplicaCoreAction::Propose(self.propose_num)
+//         } else {
+//             ReplicaCoreAction::Nop
+//         }
+//     }
+
+//     pub fn on_proposal(&mut self, )
+// }
+
 #[derive(Debug)]
 pub struct ReplicaConfig {
     pub spec: Spec,
@@ -159,7 +205,7 @@ pub struct Replica {
     config: ReplicaConfig,
     view_num: ViewNum,
     // use BTreeMap to efficiently (and simply) garbage collection with split_off
-    blocks: BTreeMap<BlockNum, Block>,
+    blocks: BTreeMap<BlockNum, (message::PrePrepare, Vec<message::Request>)>,
     prepare_votes: BTreeMap<BlockNum, Quorum>,
     commit_votes: BTreeMap<BlockNum, Quorum>,
     request_pool: RequestPool,
@@ -170,9 +216,6 @@ pub struct Replica {
     // but not checked yet
     commit_num: BlockNum,
 }
-
-// feels lazy, but seemingly not introducing unnecessary redundant state
-type Block = message::PrePrepare;
 
 type Quorum = HashMap<ReplicaId, message::Vote>;
 
@@ -239,7 +282,9 @@ impl Replica {
         }
         match message {
             ToReplica::Request(request) => self.receive_request(request, actions),
-            ToReplica::PrePrepare(pre_prepare) => self.receive_pre_prepare(pre_prepare, actions),
+            ToReplica::PrePrepare(pre_prepare, requests) => {
+                self.receive_pre_prepare(pre_prepare, requests, actions)
+            }
             ToReplica::Prepare(vote) => self.receive_prepare(vote, actions),
             ToReplica::Commit(vote) => self.receive_commit(vote, actions),
         }
@@ -270,15 +315,16 @@ impl Replica {
                 block_num: self.propose_num,
                 digest: block_digest(&requests),
                 sig: Default::default(),
-                requests,
             };
             pre_prepare.sig = sign(pre_prepare.sha256(), &self.config.secret_key);
-            let replaced = self
-                .blocks
-                .insert(pre_prepare.block_num, pre_prepare.clone());
+            let replaced = self.blocks.insert(
+                pre_prepare.block_num,
+                (pre_prepare.clone(), requests.clone()),
+            );
             assert!(replaced.is_none());
             actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
                 pre_prepare,
+                requests,
             )));
             if !self.can_propose() {
                 break;
@@ -289,6 +335,7 @@ impl Replica {
     fn receive_pre_prepare(
         &mut self,
         pre_prepare: message::PrePrepare,
+        requests: Vec<message::Request>,
         actions: &mut ReplicaActions,
     ) {
         if pre_prepare.view_num < self.view_num {
@@ -301,11 +348,15 @@ impl Replica {
             tracing::warn!(%err, "malformed PrePrepare");
             return;
         }
+        if pre_prepare.digest != block_digest(&requests) {
+            tracing::warn!("malformed PrePrepare (digest mismatch)");
+            return;
+        }
         // TODO enter view
         assert!(!self.is_primary());
         let block_num = pre_prepare.block_num;
         let digest = pre_prepare.digest.clone();
-        if let Some(block) = self.blocks.get(&block_num) {
+        if let Some((block, _)) = self.blocks.get(&block_num) {
             if digest != block.digest {
                 tracing::warn!(
                     self.config.id,
@@ -339,7 +390,9 @@ impl Replica {
             return;
         }
 
-        let replaced = self.blocks.insert(pre_prepare.block_num, pre_prepare);
+        let replaced = self
+            .blocks
+            .insert(pre_prepare.block_num, (pre_prepare, requests));
         assert!(replaced.is_none());
         // delayed Prepare vote pruning
         if let Some(votes) = self.prepare_votes.get_mut(&block_num) {
@@ -375,7 +428,7 @@ impl Replica {
             return;
         }
         // TODO enter view
-        if let Some(block) = self.blocks.get(&prepare.block_num) {
+        if let Some((block, _)) = self.blocks.get(&prepare.block_num) {
             if prepare.digest != block.digest {
                 tracing::warn!(
                     prepare.block_num,
@@ -435,7 +488,7 @@ impl Replica {
             return;
         }
         // TODO enter view
-        if let Some(block) = self.blocks.get(&commit.block_num) {
+        if let Some((block, _)) = self.blocks.get(&commit.block_num) {
             if commit.digest != block.digest {
                 tracing::warn!(
                     commit.block_num,
@@ -478,7 +531,7 @@ impl Replica {
         while {
             self.commit_num += 1;
             tracing::trace!(self.config.id, self.commit_num, "committed");
-            let requests = self.blocks[&self.commit_num].requests.clone();
+            let requests = self.blocks[&self.commit_num].1.clone();
             for request in &requests {
                 self.request_pool.commit(request)
             }
@@ -514,8 +567,10 @@ impl Replica {
                     }
                 }
                 for block_num in block_range {
+                    let (pre_prepare, requests) = self.blocks[&block_num].clone();
                     actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
-                        self.blocks[&block_num].clone(),
+                        pre_prepare,
+                        requests,
                     )))
                 }
             }

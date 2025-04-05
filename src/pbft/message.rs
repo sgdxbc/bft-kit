@@ -23,7 +23,6 @@ pub struct PrePrepare {
     pub block_num: BlockNum,
     pub digest: Digest,
     pub sig: Sig,
-    pub requests: Vec<Request>,
 }
 
 // shared definition for Prepare and Commit

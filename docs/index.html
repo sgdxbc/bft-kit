@@ -8,7 +8,8 @@
     <link rel="stylesheet" href="https://latex.vercel.app/style.css">
 </head>
 
-<body class="libertinus">
+<!-- latex.css's default max-width is a bit too narrow, opt to Jekyll's minima choice -->
+<body class="libertinus", style="max-width: calc(800px - (30px * 2));">
     <div id="content" style="display: none;">
 # BFT Testbed
 $$BFT\ Evaluations\ Made\ Simple$$
@@ -83,6 +84,8 @@ to shutdown current running replicas.
 However, this is not the optimal solution at least for *simplicity*. In particular of Rust, cyclic (mutable) references between receivers and runtime cannot be elegantly expressed. If we don't want to involve `dyn` (omit the inconveniences caused by it for brevity), the receiver and runtime types will lock into each other through generic parameters. The root cause of these troubles is to interleave code of protocol logic and calling runtime context methods.
 
 Sans I/O has been the preferred practice to implement protocol recently. Different from its original proposed setup where protocols interact with outside world with receiving and sending binary buffers, in this testbed we would like to design a rather higher level interface e.g. for better testing ergonomics. The receiving buffer is replaced by calling into two methods `receive_message` and `tick`, and the sending buffer is replaced by an "action" buffer where actions are like "send a message to each one of these replicas", etc.
+
+In the PBFT case it may looks like simply applying command design pattern to realize *inversion of control*. Other protocols generalize the idea with more customized actions.
 
 The downside of this approach is the mandatory copying for the message sending out, comparing to the runtime context approach where protocols can pass to the context the reference to some data they own. The copying should not be a heavy hitter of performance in most expected cases, and even if we implement some protocols dealing with bulk data in the future, swallow copy achieved by e.g. utilizing `bytes` is straightforward. On the other hand, the runtime usually cannot finish sending messages in place, such as the simulated runtime and the asynchronous runtime (and we probably don't want to color our protocols with `async`), then a copying becomes unavoidable.
 
