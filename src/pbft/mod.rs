@@ -127,51 +127,184 @@ impl Client {
     }
 }
 
-// #[derive(Debug)]
-// pub struct ReplicaCoreConfig {
-//     pub spec: Spec,
-//     pub id: ReplicaId,
-//     pub max_num_inflight: BlockNum,
-//     pub max_batch_size: usize,
-// }
+#[derive(Debug)]
+pub struct ReplicaCoreConfig {
+    pub spec: Spec,
+    pub id: ReplicaId,
+    pub max_num_inflight: BlockNum,
+    pub max_batch_size: usize,
+}
 
-// pub struct ReplicaCore {
-//     config: ReplicaCoreConfig,
-//     view_num: ViewNum,
-//     pool: RequestPool,
-//     blocks: Vec<Block>,
-//     propose_num: BlockNum,
-//     commit_num: BlockNum,
-// }
+pub struct ReplicaCore {
+    config: ReplicaCoreConfig,
+    view_num: ViewNum,
+    pool: RequestPool,
+    blocks: BTreeMap<BlockNum, Block>,
+    propose_num: BlockNum,
+    commit_num: BlockNum,
+}
 
-// pub struct Block {
-//     requests: Vec<message::Request>,
-//     primary_sig: Sig
-//     prepare_quorum: Option<Quorum>,
-//     commit_quorum: Option<Quorum>,
-// }
+use crate::crypto::Sig;
 
-// pub enum ReplicaCoreAction {
-//     Nop,
-//     Propose(BlockNum),
-// }
+#[derive(Debug, Clone)]
+pub struct Block {
+    requests: Vec<message::Request>,
+    digest: Digest,
+    pre_prepare: (ViewNum, Sig),
+    prepare_quorum: Option<Quorum<Sig>>,
+    commit_quorum: Option<Quorum<Sig>>,
+}
 
-// impl ReplicaCore {
-//     fn is_primary(&self) -> bool {
-//         self.config.spec.primary(self.view_num) == self.config.id
-//     }
+pub enum ReplicaCoreEvent {
+    // main path: Request -> Propose -> Proposal (-> Prepare) -> PrepareQuorum
+    // -> Commit -> CommitQuorum -> Finalize
+    Request(message::Request),
+    Proposal(BlockNum, Block),
+    PrepareQuorum(BlockNum, Quorum<Sig>),
+    CommitQuorum(BlockNum, Quorum<Sig>),
+    // recover path: (Request ->) Forward -> ViewExpired -> ViewChange
+    // -> ViewChangeQuorum -> NewView -> EnterView
+    ViewExpired,
+    ViewChangeQuorum(ViewNum, Quorum<BTreeMap<BlockNum, Block>>),
+    EnterView(
+        ViewNum,
+        Quorum<BTreeMap<BlockNum, Block>>,
+        BTreeMap<BlockNum, Block>,
+    ),
+}
 
-//     pub fn init(&mut self) -> ReplicaCoreAction {
-//         if self.is_primary() {
-//             self.propose_num += 1;
-//             ReplicaCoreAction::Propose(self.propose_num)
-//         } else {
-//             ReplicaCoreAction::Nop
-//         }
-//     }
+pub enum ReplicaCoreAction {
+    // main path
+    Propose(BlockNum, Vec<message::Request>),
+    Prepare(BlockNum, Digest),
+    Commit(BlockNum, Digest),
+    Finalize(Vec<message::Request>),
+    // recover path
+    Forward(ReplicaId, message::Request),
+    ViewChange(ViewNum, BTreeMap<BlockNum, Block>),
+    NewView(
+        ViewNum,
+        HashMap<ReplicaId, BTreeMap<BlockNum, Block>>,
+        BTreeMap<BlockNum, Vec<message::Request>>,
+    ),
+}
 
-//     pub fn on_proposal(&mut self, )
-// }
+pub type ReplicaCoreActions = Vec<ReplicaCoreAction>;
+
+impl ReplicaCore {
+    fn is_primary_of(&self, view_num: ViewNum) -> bool {
+        self.config.spec.primary(view_num) == self.config.id
+    }
+
+    fn is_primary(&self) -> bool {
+        self.is_primary_of(self.view_num)
+    }
+
+    fn can_propose(&self) -> bool {
+        self.is_primary() && self.propose_num - self.commit_num < self.config.max_num_inflight
+    }
+
+    pub fn handle(&mut self, event: ReplicaCoreEvent, actions: &mut ReplicaCoreActions) {
+        match event {
+            ReplicaCoreEvent::Request(request) => {
+                self.pool.push(request.clone());
+                if !self.is_primary() {
+                    actions.push(ReplicaCoreAction::Forward(
+                        self.config.spec.primary(self.view_num),
+                        request,
+                    ));
+                    return;
+                }
+                self.propose(actions)
+            }
+            ReplicaCoreEvent::Proposal(block_num, block) => {
+                if self.blocks.contains_key(&block_num) {
+                    return;
+                }
+                let digest = block.digest.clone();
+                self.blocks.insert(block_num, block);
+                if !self.is_primary() {
+                    actions.push(ReplicaCoreAction::Prepare(block_num, digest))
+                }
+            }
+            ReplicaCoreEvent::PrepareQuorum(block_num, prepare_quorum) => {
+                let block = self.blocks.get_mut(&block_num).unwrap();
+                let replaced = block.prepare_quorum.replace(prepare_quorum);
+                assert!(replaced.is_none());
+                actions.push(ReplicaCoreAction::Commit(block_num, block.digest.clone()))
+            }
+            ReplicaCoreEvent::CommitQuorum(block_num, commit_quorum) => {
+                let block = self.blocks.get_mut(&block_num).unwrap();
+                let replaced = block.commit_quorum.replace(commit_quorum);
+                assert!(replaced.is_none());
+                let mut block;
+                while {
+                    block = self.blocks.get(&(self.commit_num + 1));
+                    block.is_some_and(|block| {
+                        block.prepare_quorum.is_some() && block.commit_quorum.is_some()
+                    })
+                } {
+                    self.commit_num += 1;
+                    actions.push(ReplicaCoreAction::Finalize(block.unwrap().requests.clone()))
+                }
+                self.propose(actions)
+            }
+            ReplicaCoreEvent::ViewExpired => {
+                // TODO checkpoint
+                actions.push(ReplicaCoreAction::ViewChange(
+                    self.view_num + 1,
+                    self.blocks.clone(),
+                ))
+            }
+            ReplicaCoreEvent::ViewChangeQuorum(view_num, quorum) => {
+                if !self.is_primary_of(view_num) {
+                    return;
+                }
+                let proposals = Self::view_change_proposals(&quorum);
+                actions.push(ReplicaCoreAction::NewView(view_num, quorum, proposals))
+            }
+            ReplicaCoreEvent::EnterView(view_num, quorum, proposals) => {
+                if !self.is_primary_of(view_num) {
+                    for ((block_num, block), (other_block_num, requests)) in
+                        proposals.iter().zip(&Self::view_change_proposals(&quorum))
+                    {
+                        if block_num != other_block_num || block.digest != block_digest(&requests) {
+                            return;
+                        }
+                    }
+                }
+                self.view_num = view_num;
+                let Some((&min_num, _)) = proposals.first_key_value() else {
+                    return;
+                };
+                self.blocks.split_off(&min_num);
+                for (block_num, block) in proposals {
+                    actions.push(ReplicaCoreAction::Prepare(block_num, block.digest.clone()));
+                    self.blocks.insert(block_num, block);
+                }
+            }
+        }
+    }
+
+    fn propose(&mut self, actions: &mut ReplicaCoreActions) {
+        loop {
+            if !self.can_propose() {
+                return;
+            }
+            let Some(requests) = self.pool.close_batch(self.config.max_batch_size) else {
+                return;
+            };
+            self.propose_num += 1;
+            actions.push(ReplicaCoreAction::Propose(self.propose_num, requests))
+        }
+    }
+
+    fn view_change_proposals(
+        quorum: &Quorum<BTreeMap<BlockNum, Block>>,
+    ) -> BTreeMap<BlockNum, Vec<message::Request>> {
+        Default::default() // TODO
+    }
+}
 
 #[derive(Debug)]
 pub struct ReplicaConfig {
@@ -206,8 +339,8 @@ pub struct Replica {
     view_num: ViewNum,
     // use BTreeMap to efficiently (and simply) garbage collection with split_off
     blocks: BTreeMap<BlockNum, (message::PrePrepare, Vec<message::Request>)>,
-    prepare_votes: BTreeMap<BlockNum, Quorum>,
-    commit_votes: BTreeMap<BlockNum, Quorum>,
+    prepare_votes: BTreeMap<BlockNum, Quorum<message::Vote>>,
+    commit_votes: BTreeMap<BlockNum, Quorum<message::Vote>>,
     request_pool: RequestPool,
     // only primary maintains. the last proposed block number
     propose_num: BlockNum,
@@ -217,7 +350,7 @@ pub struct Replica {
     commit_num: BlockNum,
 }
 
-type Quorum = HashMap<ReplicaId, message::Vote>;
+type Quorum<T> = HashMap<ReplicaId, T>;
 
 impl Replica {
     pub fn new(config: ReplicaConfig) -> Self {
