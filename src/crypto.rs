@@ -82,34 +82,24 @@ pub type PublicKey = secp256k1::PublicKey;
 
 thread_local!(static SECP: secp256k1::Secp256k1<secp256k1::All> = secp256k1::Secp256k1::new());
 
-#[cfg(not(test))]
 pub fn sign(message: impl Into<[u8; 32]>, secret_key: &SecretKey) -> Sig {
-    let message = secp256k1::Message::from_digest(message.into());
-    Sig(SECP.with(|secp| secp.sign_ecdsa(&message, secret_key)))
+    if cfg!(test) {
+        Default::default()
+    } else {
+        let message = secp256k1::Message::from_digest(message.into());
+        Sig(SECP.with(|secp| secp.sign_ecdsa(&message, secret_key)))
+    }
 }
 
-#[cfg(test)]
-pub fn sign(_message: impl Into<[u8; 32]>, _secret_key: &SecretKey) -> Sig {
-    Default::default()
-}
-
-#[cfg(not(test))]
 pub fn verify(
     message: impl Into<[u8; 32]>,
     public_key: &PublicKey,
     Sig(sig): &Sig,
 ) -> anyhow::Result<()> {
-    let message = secp256k1::Message::from_digest(message.into());
-    SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?;
-    Ok(())
-}
-
-#[cfg(test)]
-pub fn verify(
-    _message: impl Into<[u8; 32]>,
-    _public_key: &PublicKey,
-    Sig(_sig): &Sig,
-) -> anyhow::Result<()> {
+    if !cfg!(test) {
+        let message = secp256k1::Message::from_digest(message.into());
+        SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?;
+    }
     Ok(())
 }
 

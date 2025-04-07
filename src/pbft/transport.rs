@@ -124,9 +124,7 @@ impl ClientTask {
     pub async fn invoke(&mut self, op: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         let mut action = self.client.invoke(op);
         loop {
-            if tracing::enabled!(tracing::Level::TRACE) {
-                tracing::trace!(?action);
-            }
+            tracing::trace!(?action);
             match action {
                 ClientAction::Nop => {}
                 ClientAction::SendToReplica(replica_id, message) => {
@@ -310,7 +308,7 @@ where
                     finalize_sender
                         .send(Finalize {
                             requests,
-                            view_num: replica.view_num,
+                            view_num: replica.core.view_num,
                         })
                         .await?
                 }

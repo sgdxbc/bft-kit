@@ -38,7 +38,7 @@ impl Service {
         let result = request.op; // echo back
         let reply = message::Reply {
             seq: request.seq,
-            view_num: replica.view_num,
+            view_num: replica.core.view_num,
             result,
             replica_id: replica.core.config.id,
         };

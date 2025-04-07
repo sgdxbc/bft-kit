@@ -226,7 +226,7 @@ pub enum ReplicaCoreAction {
         Quorum<BTreeMap<BlockNum, Block>>,
         BTreeMap<BlockNum, Vec<message::Request>>,
     ),
-    EnterView(ViewNum),
+    EnterView,
 }
 
 pub type ReplicaCoreActions = Vec<ReplicaCoreAction>;
@@ -311,21 +311,21 @@ impl ReplicaCore {
                 if !self.is_primary_of(view_num) {
                     return;
                 }
+                self.view_num = view_num;
                 let proposals = Self::view_change_proposals(&quorum);
                 actions.push(ReplicaCoreAction::NewView(view_num, quorum, proposals))
             }
             ReplicaCoreEvent::EnterView(view_num, quorum, proposals) => {
-                if !self.is_primary_of(view_num) {
-                    for ((block_num, block), (other_block_num, requests)) in
-                        proposals.iter().zip(&Self::view_change_proposals(&quorum))
-                    {
-                        if block_num != other_block_num || block.digest != block_digest(requests) {
-                            return;
-                        }
+                assert!(!self.is_primary_of(view_num));
+                for ((block_num, block), (other_block_num, requests)) in
+                    proposals.iter().zip(&Self::view_change_proposals(&quorum))
+                {
+                    if block_num != other_block_num || block.digest != block_digest(requests) {
+                        return;
                     }
                 }
                 self.view_num = view_num;
-                actions.push(ReplicaCoreAction::EnterView(self.view_num));
+                actions.push(ReplicaCoreAction::EnterView);
                 let Some((&min_num, _)) = proposals.first_key_value() else {
                     return;
                 };
@@ -339,10 +339,7 @@ impl ReplicaCore {
     }
 
     fn propose(&mut self, actions: &mut ReplicaCoreActions) {
-        loop {
-            if !self.can_propose() {
-                return;
-            }
+        while self.can_propose() {
             let Some(requests) = self.pool.close_batch(self.config.max_batch_size) else {
                 return;
             };
@@ -364,8 +361,6 @@ pub struct Replica {
     core_actions: ReplicaCoreActions,
     crypto_config: crypto::ReplicaConfig,
     block_scratches: BTreeMap<BlockNum, BlockScratch>,
-    view_num: ViewNum,
-    finalize_num: BlockNum,
     ticked_scratch_num: BlockNum,
 }
 
@@ -387,8 +382,6 @@ impl Replica {
             core: ReplicaCore::new(core_config),
             core_actions: Default::default(),
             block_scratches: Default::default(),
-            view_num: 0,
-            finalize_num: 0,
             ticked_scratch_num: 0,
         }
     }
@@ -415,12 +408,32 @@ impl Replica {
                 .core
                 .handle(ReplicaCoreEvent::Request(request), &mut self.core_actions),
             ToReplica::PrePrepare(pre_prepare, requests) => {
-                if pre_prepare.view_num != self.view_num {
+                if pre_prepare.view_num != self.core.view_num
+                    || pre_prepare.block_num <= self.core.finalize_num
+                {
                     return;
                 }
                 if let Some(scratch) = self.block_scratches.get(&pre_prepare.block_num) {
                     if scratch.prepare_digest.as_ref() == Some(&pre_prepare.digest) {
-                        // TODO re-ack
+                        let mut vote = message::Vote {
+                            view_num: self.core.view_num,
+                            block_num: pre_prepare.block_num,
+                            digest: pre_prepare.digest,
+                            replica_id: self.core.config.id,
+                            sig: Default::default(),
+                        };
+                        vote.sig = sign(vote.sha256(), &self.crypto_config.secret_key);
+                        let replica_id = self.core.config.spec.primary(self.core.view_num);
+                        actions.push(ReplicaAction::SendToReplica(
+                            replica_id,
+                            ToReplica::Prepare(vote.clone()),
+                        ));
+                        if scratch.prepared {
+                            actions.push(ReplicaAction::SendToReplica(
+                                replica_id,
+                                ToReplica::Commit(vote.clone()),
+                            ));
+                        }
                     }
                     return;
                 }
@@ -450,66 +463,72 @@ impl Replica {
                     &mut self.core_actions,
                 )
             }
-            ToReplica::Prepare(vote) => {
-                if vote.view_num != self.view_num || vote.block_num <= self.finalize_num {
+            ToReplica::Prepare(prepare) => {
+                if prepare.view_num != self.core.view_num
+                    || prepare.block_num <= self.core.finalize_num
+                {
                     return;
                 }
-                let scratch = self.block_scratches.entry(vote.block_num).or_default();
+                let scratch = self.block_scratches.entry(prepare.block_num).or_default();
                 if scratch.prepared {
                     return;
                 }
                 if let Err(err) = verify(
-                    vote.sha256(),
-                    &self.crypto_config.public_keys[vote.replica_id as usize],
-                    &vote.sig,
+                    prepare.sha256(),
+                    &self.crypto_config.public_keys[prepare.replica_id as usize],
+                    &prepare.sig,
                 ) {
                     tracing::warn!(%err, "malformed Prepare");
                     return;
                 }
                 if let Some(digest) = &scratch.prepare_digest {
-                    if &vote.digest != digest {
+                    if &prepare.digest != digest {
                         return;
                     }
-                    scratch.prepare_quorum.insert(vote.replica_id, vote.sig);
+                    scratch
+                        .prepare_quorum
+                        .insert(prepare.replica_id, prepare.sig);
                     Self::check_prepare_quorum(
-                        vote.block_num,
+                        prepare.block_num,
                         scratch,
                         &mut self.core,
                         &mut self.core_actions,
                     )
                 } else {
-                    scratch.prepare_votes.push(vote)
+                    scratch.prepare_votes.push(prepare)
                 }
             }
-            ToReplica::Commit(vote) => {
-                if vote.view_num != self.view_num || vote.block_num <= self.finalize_num {
+            ToReplica::Commit(commit) => {
+                if commit.view_num != self.core.view_num
+                    || commit.block_num <= self.core.finalize_num
+                {
                     return;
                 }
-                let scratch = self.block_scratches.entry(vote.block_num).or_default();
+                let scratch = self.block_scratches.entry(commit.block_num).or_default();
                 if scratch.committed {
                     return;
                 }
                 if let Err(err) = verify(
-                    vote.sha256(),
-                    &self.crypto_config.public_keys[vote.replica_id as usize],
-                    &vote.sig,
+                    commit.sha256(),
+                    &self.crypto_config.public_keys[commit.replica_id as usize],
+                    &commit.sig,
                 ) {
                     tracing::warn!(%err, "malformed Commit");
                     return;
                 }
                 if let Some(digest) = &scratch.prepare_digest {
-                    if &vote.digest != digest {
+                    if &commit.digest != digest {
                         return;
                     }
-                    scratch.commit_quorum.insert(vote.replica_id, vote.sig);
+                    scratch.commit_quorum.insert(commit.replica_id, commit.sig);
                     Self::check_commit_quorum(
-                        vote.block_num,
+                        commit.block_num,
                         scratch,
                         &mut self.core,
                         &mut self.core_actions,
                     )
                 } else {
-                    scratch.commit_votes.push(vote)
+                    scratch.commit_votes.push(commit)
                 }
             }
         }
@@ -527,7 +546,7 @@ impl Replica {
                     assert!(replaced.is_none());
 
                     let mut pre_prepare = message::PrePrepare {
-                        view_num: self.view_num,
+                        view_num: self.core.view_num,
                         block_num,
                         digest: digest.clone(),
                         sig: Default::default(),
@@ -553,18 +572,25 @@ impl Replica {
                     let scratch = self.block_scratches.entry(block_num).or_default();
                     let replaced = scratch.prepare_digest.replace(digest.clone());
                     assert!(replaced.is_none());
-                    for vote in take(&mut scratch.prepare_votes) {
+                    let matching_vote = |vote: message::Vote| {
                         if vote.digest == digest {
-                            scratch.prepare_quorum.insert(vote.replica_id, vote.sig);
+                            Some((vote.replica_id, vote.sig))
+                        } else {
+                            None
                         }
-                    }
-                    for vote in take(&mut scratch.commit_votes) {
-                        if vote.digest == digest {
-                            scratch.commit_quorum.insert(vote.replica_id, vote.sig);
-                        }
-                    }
+                    };
+                    scratch.prepare_quorum.extend(
+                        take(&mut scratch.prepare_votes)
+                            .into_iter()
+                            .filter_map(matching_vote),
+                    );
+                    scratch.commit_quorum.extend(
+                        take(&mut scratch.commit_votes)
+                            .into_iter()
+                            .filter_map(matching_vote),
+                    );
                     let mut prepare = message::Vote {
-                        view_num: self.view_num,
+                        view_num: self.core.view_num,
                         block_num,
                         digest,
                         replica_id: self.core.config.id,
@@ -591,7 +617,7 @@ impl Replica {
                 ReplicaCoreAction::Commit(block_num) => {
                     let scratch = self.block_scratches.get_mut(&block_num).unwrap();
                     let mut commit = message::Vote {
-                        view_num: self.view_num,
+                        view_num: self.core.view_num,
                         block_num,
                         digest: scratch.prepare_digest.clone().unwrap(),
                         replica_id: self.core.config.id,
@@ -627,14 +653,10 @@ impl Replica {
                 ReplicaCoreAction::ViewChange(view_num, blocks) => todo!(),
                 #[allow(unused)]
                 ReplicaCoreAction::NewView(view_num, view_changes, proposals) => {
-                    self.view_num = view_num;
                     self.block_scratches.clear();
                     todo!()
                 }
-                ReplicaCoreAction::EnterView(view_num) => {
-                    self.view_num = view_num;
-                    self.block_scratches.clear();
-                }
+                ReplicaCoreAction::EnterView => self.block_scratches.clear(),
             }
         }
     }
@@ -695,7 +717,7 @@ impl Replica {
                 continue;
             }
             let mut pre_prepare = message::PrePrepare {
-                view_num: self.view_num,
+                view_num: self.core.view_num,
                 block_num,
                 digest: scratch.prepare_digest.clone().unwrap(),
                 sig: Default::default(),
