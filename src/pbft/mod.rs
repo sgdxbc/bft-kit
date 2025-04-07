@@ -354,6 +354,19 @@ impl ReplicaCore {
     ) -> BTreeMap<BlockNum, Vec<message::Request>> {
         Default::default() // TODO
     }
+
+    fn is_prepared(&self, block_num: BlockNum) -> bool {
+        block_num < self.finalize_num
+            || self
+                .blocks
+                .get(&block_num)
+                .is_some_and(|block| block.prepare_quorum.is_some())
+    }
+
+    fn is_committed(&self, block_num: BlockNum) -> bool {
+        block_num < self.finalize_num
+            || self.is_prepared(block_num) && self.blocks[&block_num].commit_quorum.is_some()
+    }
 }
 
 pub struct Replica {
@@ -369,10 +382,8 @@ struct BlockScratch {
     prepare_digest: Option<Digest>, // block_digest(&requests), cached
     prepare_votes: Vec<message::Vote>,
     prepare_quorum: Quorum<Sig>,
-    prepared: bool,
     commit_votes: Vec<message::Vote>,
     commit_quorum: Quorum<Sig>,
-    committed: bool,
 }
 
 impl Replica {
@@ -408,13 +419,15 @@ impl Replica {
                 .core
                 .handle(ReplicaCoreEvent::Request(request), &mut self.core_actions),
             ToReplica::PrePrepare(pre_prepare, requests) => {
-                if pre_prepare.view_num != self.core.view_num
-                    || pre_prepare.block_num <= self.core.finalize_num
-                {
+                if pre_prepare.view_num != self.core.view_num {
                     return;
                 }
-                if let Some(scratch) = self.block_scratches.get(&pre_prepare.block_num) {
-                    if scratch.prepare_digest.as_ref() == Some(&pre_prepare.digest) {
+                if let Some(block) = self.core.blocks.get(&pre_prepare.block_num) {
+                    if block.digest == pre_prepare.digest {
+                        // liveness measurement of primary: duplicated PrePrepare
+                        // (re)send whatever we have to best effort progress the primary
+                        // note that only primary is progressed by this path, so client progress is
+                        // not guaranteed (solely) by this
                         let mut vote = message::Vote {
                             view_num: self.core.view_num,
                             block_num: pre_prepare.block_num,
@@ -428,7 +441,7 @@ impl Replica {
                             replica_id,
                             ToReplica::Prepare(vote.clone()),
                         ));
-                        if scratch.prepared {
+                        if block.prepare_quorum.is_some() {
                             actions.push(ReplicaAction::SendToReplica(
                                 replica_id,
                                 ToReplica::Commit(vote.clone()),
@@ -465,12 +478,8 @@ impl Replica {
             }
             ToReplica::Prepare(prepare) => {
                 if prepare.view_num != self.core.view_num
-                    || prepare.block_num <= self.core.finalize_num
+                    || self.core.is_prepared(prepare.block_num)
                 {
-                    return;
-                }
-                let scratch = self.block_scratches.entry(prepare.block_num).or_default();
-                if scratch.prepared {
                     return;
                 }
                 if let Err(err) = verify(
@@ -481,6 +490,7 @@ impl Replica {
                     tracing::warn!(%err, "malformed Prepare");
                     return;
                 }
+                let scratch = self.block_scratches.entry(prepare.block_num).or_default();
                 if let Some(digest) = &scratch.prepare_digest {
                     if &prepare.digest != digest {
                         return;
@@ -499,13 +509,8 @@ impl Replica {
                 }
             }
             ToReplica::Commit(commit) => {
-                if commit.view_num != self.core.view_num
-                    || commit.block_num <= self.core.finalize_num
+                if commit.view_num != self.core.view_num || self.core.is_committed(commit.block_num)
                 {
-                    return;
-                }
-                let scratch = self.block_scratches.entry(commit.block_num).or_default();
-                if scratch.committed {
                     return;
                 }
                 if let Err(err) = verify(
@@ -516,6 +521,7 @@ impl Replica {
                     tracing::warn!(%err, "malformed Commit");
                     return;
                 }
+                let scratch = self.block_scratches.entry(commit.block_num).or_default();
                 if let Some(digest) = &scratch.prepare_digest {
                     if &commit.digest != digest {
                         return;
@@ -671,7 +677,6 @@ impl Replica {
         if scratch.prepare_quorum.len() as ReplicaId + 1
             >= core.config.spec.num_replica - core.config.spec.num_faulty
         {
-            scratch.prepared = true;
             core.handle(
                 ReplicaCoreEvent::PrepareQuorum(block_num, take(&mut scratch.prepare_quorum)),
                 core_actions,
@@ -685,11 +690,10 @@ impl Replica {
         core: &mut ReplicaCore,
         core_actions: &mut ReplicaCoreActions,
     ) {
-        if scratch.prepared
+        if core.is_prepared(block_num)
             && scratch.commit_quorum.len() as ReplicaId
                 >= core.config.spec.num_replica - core.config.spec.num_faulty
         {
-            scratch.committed = true;
             core.handle(
                 ReplicaCoreEvent::CommitQuorum(block_num, take(&mut scratch.commit_quorum)),
                 core_actions,
@@ -713,7 +717,7 @@ impl Replica {
             if block_num > ticked2_scratch_num {
                 break;
             }
-            if scratch.committed {
+            if self.core.is_committed(block_num) {
                 continue;
             }
             let mut pre_prepare = message::PrePrepare {
