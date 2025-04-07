@@ -145,7 +145,7 @@ impl ReplicaCoreConfig {
     }
 }
 
-pub struct ReplicaCore {
+struct ReplicaCore {
     config: ReplicaCoreConfig,
     view_num: ViewNum,
     pool: RequestPool,
@@ -157,7 +157,7 @@ pub struct ReplicaCore {
 use crate::crypto::Sig;
 
 #[derive(Debug, Clone)]
-pub struct Block {
+struct Block {
     requests: Vec<message::Request>,
     digest: Digest, // block_digest(&requests), cached
     #[allow(unused)]
@@ -168,17 +168,21 @@ pub struct Block {
 
 type Quorum<T> = HashMap<ReplicaId, T>;
 
-pub enum ReplicaCoreEvent {
+enum ReplicaCoreEvent {
     // main path: Request -> Propose -> Proposal (-> Prepare) -> PrepareQuorum
     // -> Commit -> CommitQuorum -> Finalize
     Request(message::Request),
     Proposal(BlockNum, Block), // the `requests` are saved for later Finalize action
     PrepareQuorum(BlockNum, Quorum<Sig>),
     CommitQuorum(BlockNum, Quorum<Sig>),
+
     // recover path: (Request ->) Forward -> ViewExpired -> ViewChange
     // -> ViewChangeQuorum -> NewView -> EnterView (event) -> EnterView (action)
+    #[allow(unused)]
     ViewExpired,
+    #[allow(unused)]
     ViewChangeQuorum(ViewNum, Quorum<BTreeMap<BlockNum, Block>>),
+    #[allow(unused)]
     EnterView(
         ViewNum,
         Quorum<BTreeMap<BlockNum, Block>>,
@@ -187,7 +191,7 @@ pub enum ReplicaCoreEvent {
 }
 
 #[derive(Debug)]
-pub enum ReplicaCoreAction {
+enum ReplicaCoreAction {
     // main path
 
     // should package the requests into a Block, package block digest into a
@@ -229,10 +233,10 @@ pub enum ReplicaCoreAction {
     EnterView,
 }
 
-pub type ReplicaCoreActions = Vec<ReplicaCoreAction>;
+type ReplicaCoreActions = Vec<ReplicaCoreAction>;
 
 impl ReplicaCore {
-    pub fn new(config: ReplicaCoreConfig) -> Self {
+    fn new(config: ReplicaCoreConfig) -> Self {
         Self {
             config,
             view_num: 0,
@@ -255,7 +259,7 @@ impl ReplicaCore {
         self.is_primary() && self.propose_num - self.finalize_num < self.config.max_num_inflight
     }
 
-    pub fn handle(&mut self, event: ReplicaCoreEvent, actions: &mut ReplicaCoreActions) {
+    fn handle(&mut self, event: ReplicaCoreEvent, actions: &mut ReplicaCoreActions) {
         match event {
             ReplicaCoreEvent::Request(request) => {
                 self.pool.push(request.clone());
@@ -296,6 +300,9 @@ impl ReplicaCore {
                     })
                 } {
                     self.finalize_num += 1;
+                    for request in &self.blocks[&self.finalize_num].requests {
+                        self.pool.commit(request)
+                    }
                     actions.push(ReplicaCoreAction::Finalize(self.finalize_num))
                 }
                 self.propose(actions)
