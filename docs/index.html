@@ -11,7 +11,7 @@
 <!-- latex.css's default max-width is a bit too narrow, opt to Jekyll's minima choice -->
 <body class="libertinus", style="max-width: calc(800px - (30px * 2));">
     <div id="content" style="display: none;">
-# BFT Testbed
+# Cowsay's BFT Testbed
 $$BFT\ Evaluations\ Made\ Simple$$
 
 <div class="abstract"><h2>Abstract</h2>
@@ -19,21 +19,24 @@ $$BFT\ Evaluations\ Made\ Simple$$
 [View codebase](https://github.com/sgdxbc/bft-testbed).
 </div>
 
-The BFT Testbed effort provides the prototype implementations and evaluation scaffolds of a selective collection of distributed protocols that relate to tolerating Byzantine faults, most of which are replication protocols. <span style="color:gray">TODO: a listing of provided protocols and prototype status.</span>
+## Introduction
+
+The Cowsay's BFT Testbed effort provides the prototype implementations and evaluation scaffolds of a selective collection of distributed protocols that relate to tolerating Byzantine faults, most of which are replication protocols. <span style="color:gray">TODO: a listing of provided protocols and prototype status.</span>
 
 The prototypes prioritize *intuitive* and *comprehensive*. We don't introduce obscurity (or simply more lines of code) for extreme performance e.g. minimal data copies. The goal is to be easy to reason about and easy to "manageably" mess around by applying experimental modifications upon the reference implementations.
 
-## Features
+### Features
 
-One codebase for all protocols. Just need to suffer the pains of setting up development environment once (which is probably not very painful) and everything you need is available. Having all implementations sharing the same set of peripherals (e.g. programming language, network stack, etc.) enables perfect apple to apple comparison.
+One codebase for all protocols. Just need to suffer the pains of setting up development environment once (which is probably not very painful) and everything you need is up and just working. Having all implementations sharing the same set of peripherals (e.g. programming language, network stack, etc.) enables perfect apple to apple comparison.
 
-Ergonomics for rapid development and evaluation iteration.
+Ergonomics for rapid development and evaluation iteration. Include useful building blocks for benchmarking protocol performance under various conditions, featuring solutions for orchestrating configurable concurrent clients to perform RPCs and aggregate SLO metrics, in close loop and open loop (planned) fashions.
 
 Thorough and consistent logging. Annotate on all slow path entrances with `WARN` logs. All fast path logs have `TRACE` level.
 
-Network transport with QUIC. The testbed provides out of the box server certification by embedding a self-signed private key (and its certificate) into compiled artifacts. The private key is stored (deliberately) in clear text at `src/crypto/cert/key_pair.pem`. Do not use it in production (like everything else in the codebase). If you would like to use another private key, run `rotate-cert` example in project root folder to override it.
+Network transport with QUIC. The testbed provides out of the box server certification by embedding a self-signed private key (and its certificate) into compiled artifacts. 
+<span class="sidenote">The private key is stored (deliberately) in clear text at `src/crypto/cert/key_pair.pem`. Do not use it in production (like everything else in the codebase). If you would like to use another private key, run `rotate-cert` example in project root folder to override it.</span>
 
-**Technology Stack.** The testbed uses `tokio` for IO transport and timers, `quinn` for QUIC network layer, `bincode` for serialization/deserialization, `sha2` and `secp256k1` (`threshold_crypto`) for hashing and (threshold) digital signatures, and `tracing` and `tracing-subscriber` for logging.
+**Technology Stack.** Build with the greatest from the ecosystem. The testbed uses `tokio` for IO transport and timers, `quinn` for QUIC network layer, `bincode` for serialization/deserialization, `sha2` and `secp256k1` (`threshold_crypto` and `givre`) for hashing and (threshold) digital signatures, `tracing` and `tracing-subscriber` for logging, and `hdrhistogram` for metrics statistics.
 
 ## Quick Start: Ways to Run PBFT
 

@@ -159,7 +159,7 @@ pub enum ReplicaCoreEvent {
     // main path: Request -> Propose -> Proposal (-> Prepare) -> PrepareQuorum
     // -> Commit -> CommitQuorum -> Finalize
     Request(message::Request),
-    Proposal(BlockNum, Block),
+    Proposal(BlockNum, Block), // the `requests` are saved for later Finalize action
     PrepareQuorum(BlockNum, Quorum<Sig>),
     CommitQuorum(BlockNum, Quorum<Sig>),
     // recover path: (Request ->) Forward -> ViewExpired -> ViewChange
@@ -175,16 +175,39 @@ pub enum ReplicaCoreEvent {
 
 pub enum ReplicaCoreAction {
     // main path
+
+    // should package the requests into a Block, package block digest into a
+    // PrePrepare and disseminate to all replicas including the proposer itself
+    // the requests should be saved for later Finalize action
     Propose(BlockNum, Vec<message::Request>),
+    // invariants on main path
+    // * Finalize with strict increasing block numbers without gap. Prepare and
+    //   Commit may be out of order regarding block numbers
+    // * every `Finalize`d block is out of the concern of the protocol, so any
+    //   related bookkeeping should be garbage collected
+    // * Prepare and Commit may happen on the same block number for multiple times
+    //   (for same or different blocks), but never after the block number has been
+    //   `Finalize`d. furthermore, a block is only `Commit`-ed for a block number
+    //   after it is `Prepare`d for the same block number, and only `Finalize`d
+    //   after it is `Commit`-ed. so Commit and Finalize are without mentioning the
+    //   block (Digest): the convention is to Commit and Finalize the currently
+    //   `Prepare`-ing block (Digest)
+
+    // should package the Digest into a Prepare, disseminate to all replicas and
+    // start to collect a Prepare quorum for Digest
     Prepare(BlockNum, Digest),
-    Commit(BlockNum, Digest),
-    Finalize(Vec<message::Request>),
+    // should package the `Prepare`-ing Digest into a Commit, disseminate to all
+    // replicas and start to collect a Commit quorum for the Digest
+    Commit(BlockNum),
+    // should produce a Finalize action to the requests of the block
+    Finalize(BlockNum),
+
     // recover path
     Forward(ReplicaId, message::Request),
     ViewChange(ViewNum, BTreeMap<BlockNum, Block>),
     NewView(
         ViewNum,
-        HashMap<ReplicaId, BTreeMap<BlockNum, Block>>,
+        Quorum<BTreeMap<BlockNum, Block>>,
         BTreeMap<BlockNum, Vec<message::Request>>,
     ),
 }
@@ -231,7 +254,7 @@ impl ReplicaCore {
                 let block = self.blocks.get_mut(&block_num).unwrap();
                 let replaced = block.prepare_quorum.replace(prepare_quorum);
                 assert!(replaced.is_none());
-                actions.push(ReplicaCoreAction::Commit(block_num, block.digest.clone()))
+                actions.push(ReplicaCoreAction::Commit(block_num))
             }
             ReplicaCoreEvent::CommitQuorum(block_num, commit_quorum) => {
                 let block = self.blocks.get_mut(&block_num).unwrap();
@@ -245,7 +268,7 @@ impl ReplicaCore {
                     })
                 } {
                     self.commit_num += 1;
-                    actions.push(ReplicaCoreAction::Finalize(block.unwrap().requests.clone()))
+                    actions.push(ReplicaCoreAction::Finalize(self.commit_num))
                 }
                 self.propose(actions)
             }
