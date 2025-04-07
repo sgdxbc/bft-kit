@@ -11,6 +11,8 @@
         "Givre",
         "hdrhistogram",
         "hotstuff",
+        "libhotstuff",
+        "Niko",
         "pbft",
         "permissioned",
         "Pkcs8",
