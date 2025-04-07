@@ -379,7 +379,6 @@ pub struct Replica {
 
 #[derive(Default)]
 struct BlockScratch {
-    prepare_digest: Option<Digest>, // block_digest(&requests), cached
     prepare_votes: Vec<message::Vote>,
     prepare_quorum: Quorum<Sig>,
     commit_votes: Vec<message::Vote>,
@@ -491,7 +490,12 @@ impl Replica {
                     return;
                 }
                 let scratch = self.block_scratches.entry(prepare.block_num).or_default();
-                if let Some(digest) = &scratch.prepare_digest {
+                if let Some(digest) = self
+                    .core
+                    .blocks
+                    .get(&prepare.block_num)
+                    .map(|block| &block.digest)
+                {
                     if &prepare.digest != digest {
                         return;
                     }
@@ -522,7 +526,12 @@ impl Replica {
                     return;
                 }
                 let scratch = self.block_scratches.entry(commit.block_num).or_default();
-                if let Some(digest) = &scratch.prepare_digest {
+                if let Some(digest) = self
+                    .core
+                    .blocks
+                    .get(&commit.block_num)
+                    .map(|block| &block.digest)
+                {
                     if &commit.digest != digest {
                         return;
                     }
@@ -544,13 +553,6 @@ impl Replica {
             match action {
                 ReplicaCoreAction::Propose(block_num, requests) => {
                     let digest = block_digest(&requests);
-                    let scratch = BlockScratch {
-                        prepare_digest: Some(digest.clone()),
-                        ..Default::default()
-                    };
-                    let replaced = self.block_scratches.insert(block_num, scratch);
-                    assert!(replaced.is_none());
-
                     let mut pre_prepare = message::PrePrepare {
                         view_num: self.core.view_num,
                         block_num,
@@ -576,8 +578,6 @@ impl Replica {
                 }
                 ReplicaCoreAction::Prepare(block_num, digest) => {
                     let scratch = self.block_scratches.entry(block_num).or_default();
-                    let replaced = scratch.prepare_digest.replace(digest.clone());
-                    assert!(replaced.is_none());
                     let matching_vote = |vote: message::Vote| {
                         if vote.digest == digest {
                             Some((vote.replica_id, vote.sig))
@@ -625,7 +625,7 @@ impl Replica {
                     let mut commit = message::Vote {
                         view_num: self.core.view_num,
                         block_num,
-                        digest: scratch.prepare_digest.clone().unwrap(),
+                        digest: self.core.blocks[&block_num].digest.clone(),
                         replica_id: self.core.config.id,
                         sig: Default::default(),
                     };
@@ -702,34 +702,26 @@ impl Replica {
     }
 
     pub fn tick(&mut self, actions: &mut ReplicaActions) {
-        let ticked2_scratch_num = replace(
-            &mut self.ticked_scratch_num,
-            self.block_scratches
-                .last_key_value()
-                .map(|(&block_num, _)| block_num)
-                .unwrap_or_default(),
-        );
+        let ticked2_scratch_num = replace(&mut self.ticked_scratch_num, self.core.propose_num);
         if !self.core.is_primary() {
             // TODO tick view expiration
             return;
         }
-        for (&block_num, scratch) in &self.block_scratches {
-            if block_num > ticked2_scratch_num {
-                break;
-            }
+        for block_num in self.core.finalize_num + 1..=ticked2_scratch_num {
             if self.core.is_committed(block_num) {
                 continue;
             }
+            let block = &self.core.blocks[&block_num];
             let mut pre_prepare = message::PrePrepare {
                 view_num: self.core.view_num,
                 block_num,
-                digest: scratch.prepare_digest.clone().unwrap(),
+                digest: block.digest.clone(),
                 sig: Default::default(),
             };
             pre_prepare.sig = sign(pre_prepare.sha256(), &self.crypto_config.secret_key);
             actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
                 pre_prepare,
-                self.core.blocks[&block_num].requests.clone(),
+                block.requests.clone(),
             )))
         }
     }
