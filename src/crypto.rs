@@ -125,6 +125,21 @@ pub fn public_key(secret_key: &SecretKey) -> PublicKey {
     SECP.with(|secp| secret_key.public_key(secp))
 }
 
+pub struct ReplicaConfig {
+    pub secret_key: SecretKey,
+    pub public_keys: Vec<PublicKey>,
+}
+
+impl ReplicaConfig {
+    pub fn new(replica_id: ReplicaId, num_replica: ReplicaId) -> Self {
+        let secret_keys = (0..num_replica).map(replica_secret_key).collect::<Vec<_>>();
+        Self {
+            public_keys: secret_keys.iter().map(public_key).collect(),
+            secret_key: secret_keys[replica_id as usize],
+        }
+    }
+}
+
 impl Encode for Sig {
     fn encode<E: bincode::enc::Encoder>(
         &self,

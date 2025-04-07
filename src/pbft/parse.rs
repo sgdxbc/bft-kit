@@ -105,11 +105,11 @@ impl TryFrom<Options> for super::Spec {
     }
 }
 
-impl TryFrom<Options> for super::ReplicaConfig {
+impl TryFrom<Options> for super::ReplicaCoreConfig {
     type Error = anyhow::Error; // TODO
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
-        let mut config = super::ReplicaConfig::new_basic(
+        let mut config = super::ReplicaCoreConfig::new_basic(
             options.clone().try_into()?,
             options
                 .replica_id

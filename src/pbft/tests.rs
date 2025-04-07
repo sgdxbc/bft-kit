@@ -40,7 +40,7 @@ impl Service {
             seq: request.seq,
             view_num: replica.view_num,
             result,
-            replica_id: replica.config.id,
+            replica_id: replica.core.config.id,
         };
         let replaced = self.replies.insert(request.client_id, reply.clone());
         assert!(replaced.map(|reply| reply.seq) < Some(request.seq)); // None < Some(..)
@@ -74,7 +74,7 @@ impl System {
             .collect();
         let servers = (0..spec.num_replica)
             .map(|i| {
-                let config = ReplicaConfig::new_basic(spec.clone(), i);
+                let config = ReplicaCoreConfig::new_basic(spec.clone(), i);
                 (
                     Replica::new(config),
                     Service {
@@ -208,7 +208,7 @@ fn normal_1() {
     let num_committed = system
         .servers
         .iter()
-        .filter(|(replica, _)| replica.is_committed(0))
+        .filter(|(replica, _)| replica.core.finalize_num == 1)
         .count();
     assert!(num_committed >= 3)
 }
@@ -235,7 +235,7 @@ fn close_loop() {
     let num_committed = system
         .servers
         .iter()
-        .filter(|(replica, _)| replica.is_committed(10))
+        .filter(|(replica, _)| replica.core.finalize_num == 10)
         .count();
     assert!(num_committed >= 3)
 }
@@ -263,7 +263,7 @@ fn concurrent_clients() {
     let num_committed = system
         .servers
         .iter()
-        .filter(|(replica, _)| replica.is_committed(10))
+        .filter(|(replica, _)| replica.core.finalize_num == 10)
         .count();
     assert!(num_committed >= 3)
 }
@@ -276,7 +276,7 @@ fn batched() {
     };
     let mut system = System::new(spec, 10);
     for (replica, _) in &mut system.servers {
-        replica.config.max_batch_size = 100
+        replica.core.config.max_batch_size = 100
     }
     for i in 0..10 {
         system.invoke(i, format!("hello@{i}").into());
@@ -291,10 +291,13 @@ fn batched() {
         }
     }
     system.exhaust(100);
-    let batch_proposal = system
-        .servers
-        .iter()
-        .all(|(replica, _)| replica.blocks.values().any(|block| block.1.len() > 1));
+    let batch_proposal = system.servers.iter().all(|(replica, _)| {
+        replica
+            .core
+            .blocks
+            .values()
+            .any(|block| block.requests.len() > 1)
+    });
     assert!(batch_proposal)
 }
 
@@ -305,8 +308,8 @@ fn concurrent_proposals(max_num_inflight: BlockNum, max_batch_size: usize) {
     };
     let mut system = System::new(spec, 10);
     for (replica, _) in &mut system.servers {
-        replica.config.max_num_inflight = max_num_inflight;
-        replica.config.max_batch_size = max_batch_size
+        replica.core.config.max_num_inflight = max_num_inflight;
+        replica.core.config.max_batch_size = max_batch_size
     }
     for i in 0..10 {
         system.invoke(i, format!("hello@{i}").into());
@@ -404,7 +407,7 @@ fn drop_reply() {
         system
             .servers
             .iter()
-            .all(|(replica, _)| replica.blocks.len() <= 1)
+            .all(|(replica, _)| replica.core.blocks.len() <= 1)
     );
 }
 

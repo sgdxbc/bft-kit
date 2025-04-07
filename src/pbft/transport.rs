@@ -250,14 +250,14 @@ where
 {
     let (read_sender, mut read_receiver) = mpsc::channel(100);
     let (mut read_tasks, mut replica_egresses) =
-        S::boot_server(replica.config.id, config.clone(), read_sender.clone()).await?;
+        S::boot_server(replica.core.config.id, config.clone(), read_sender.clone()).await?;
     tracing::info!("replica ready");
 
     // a bit terrible to abuse read_sender, which suppose to directly connect to
     // read tasks in the original design
     let submit_sender = read_sender;
     let (finalize_sender, finalize_receiver) = mpsc::channel(16);
-    let replica_id = replica.config.id;
+    let replica_id = replica.core.config.id;
     let mut service_task = pin!(S::service_task(
         replica_id,
         config.clone(),

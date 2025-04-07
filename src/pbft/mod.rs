@@ -1,15 +1,13 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    mem::replace,
+    mem::{replace, take},
 };
 
 use sha2::Digest as _;
 
 use crate::{
     common::{ClientId, ReplicaId, RequestPool, client},
-    crypto::{
-        Digest, PublicKey, SecretKey, Sha256Hash as _, public_key, replica_secret_key, sign, verify,
-    },
+    crypto::{self, Digest, Sha256Hash, sign, verify},
 };
 
 mod message;
@@ -41,6 +39,7 @@ pub enum ToReplica {
     // deliberately left unresolved to remind this is a prototype implementation
     Prepare(message::Vote),
     Commit(message::Vote),
+    // TODO recover path messages
 }
 
 #[derive(Debug)]
@@ -135,13 +134,24 @@ pub struct ReplicaCoreConfig {
     pub max_batch_size: usize,
 }
 
+impl ReplicaCoreConfig {
+    pub fn new_basic(spec: Spec, id: ReplicaId) -> Self {
+        Self {
+            spec,
+            id,
+            max_num_inflight: 1,
+            max_batch_size: 1,
+        }
+    }
+}
+
 pub struct ReplicaCore {
     config: ReplicaCoreConfig,
     view_num: ViewNum,
     pool: RequestPool,
     blocks: BTreeMap<BlockNum, Block>,
     propose_num: BlockNum,
-    commit_num: BlockNum,
+    finalize_num: BlockNum,
 }
 
 use crate::crypto::Sig;
@@ -149,11 +159,14 @@ use crate::crypto::Sig;
 #[derive(Debug, Clone)]
 pub struct Block {
     requests: Vec<message::Request>,
-    digest: Digest,
+    digest: Digest, // block_digest(&requests), cached
+    #[allow(unused)]
     pre_prepare: (ViewNum, Sig),
     prepare_quorum: Option<Quorum<Sig>>,
     commit_quorum: Option<Quorum<Sig>>,
 }
+
+type Quorum<T> = HashMap<ReplicaId, T>;
 
 pub enum ReplicaCoreEvent {
     // main path: Request -> Propose -> Proposal (-> Prepare) -> PrepareQuorum
@@ -163,7 +176,7 @@ pub enum ReplicaCoreEvent {
     PrepareQuorum(BlockNum, Quorum<Sig>),
     CommitQuorum(BlockNum, Quorum<Sig>),
     // recover path: (Request ->) Forward -> ViewExpired -> ViewChange
-    // -> ViewChangeQuorum -> NewView -> EnterView
+    // -> ViewChangeQuorum -> NewView -> EnterView (event) -> EnterView (action)
     ViewExpired,
     ViewChangeQuorum(ViewNum, Quorum<BTreeMap<BlockNum, Block>>),
     EnterView(
@@ -173,12 +186,13 @@ pub enum ReplicaCoreEvent {
     ),
 }
 
+#[derive(Debug)]
 pub enum ReplicaCoreAction {
     // main path
 
     // should package the requests into a Block, package block digest into a
     // PrePrepare and disseminate to all replicas including the proposer itself
-    // the requests should be saved for later Finalize action
+    // and start to collect a Prepare quorum for the block
     Propose(BlockNum, Vec<message::Request>),
     // invariants on main path
     // * Finalize with strict increasing block numbers without gap. Prepare and
@@ -186,12 +200,14 @@ pub enum ReplicaCoreAction {
     // * every `Finalize`d block is out of the concern of the protocol, so any
     //   related bookkeeping should be garbage collected
     // * Prepare and Commit may happen on the same block number for multiple times
-    //   (for same or different blocks), but never after the block number has been
+    //   (for same or different blocks), but at most once per view (i.e. must first
+    //   NewView then Prepare again), and never after the block number has been
     //   `Finalize`d. furthermore, a block is only `Commit`-ed for a block number
     //   after it is `Prepare`d for the same block number, and only `Finalize`d
     //   after it is `Commit`-ed. so Commit and Finalize are without mentioning the
     //   block (Digest): the convention is to Commit and Finalize the currently
     //   `Prepare`-ing block (Digest)
+    // * (Prepare becomes Propose on primary replica)
 
     // should package the Digest into a Prepare, disseminate to all replicas and
     // start to collect a Prepare quorum for Digest
@@ -210,11 +226,23 @@ pub enum ReplicaCoreAction {
         Quorum<BTreeMap<BlockNum, Block>>,
         BTreeMap<BlockNum, Vec<message::Request>>,
     ),
+    EnterView(ViewNum),
 }
 
 pub type ReplicaCoreActions = Vec<ReplicaCoreAction>;
 
 impl ReplicaCore {
+    pub fn new(config: ReplicaCoreConfig) -> Self {
+        Self {
+            config,
+            view_num: 0,
+            pool: RequestPool::close_loop(), // TODO configurable?
+            blocks: Default::default(),
+            propose_num: 0,
+            finalize_num: 0,
+        }
+    }
+
     fn is_primary_of(&self, view_num: ViewNum) -> bool {
         self.config.spec.primary(view_num) == self.config.id
     }
@@ -224,7 +252,7 @@ impl ReplicaCore {
     }
 
     fn can_propose(&self) -> bool {
-        self.is_primary() && self.propose_num - self.commit_num < self.config.max_num_inflight
+        self.is_primary() && self.propose_num - self.finalize_num < self.config.max_num_inflight
     }
 
     pub fn handle(&mut self, event: ReplicaCoreEvent, actions: &mut ReplicaCoreActions) {
@@ -262,13 +290,13 @@ impl ReplicaCore {
                 assert!(replaced.is_none());
                 let mut block;
                 while {
-                    block = self.blocks.get(&(self.commit_num + 1));
+                    block = self.blocks.get(&(self.finalize_num + 1));
                     block.is_some_and(|block| {
                         block.prepare_quorum.is_some() && block.commit_quorum.is_some()
                     })
                 } {
-                    self.commit_num += 1;
-                    actions.push(ReplicaCoreAction::Finalize(self.commit_num))
+                    self.finalize_num += 1;
+                    actions.push(ReplicaCoreAction::Finalize(self.finalize_num))
                 }
                 self.propose(actions)
             }
@@ -291,12 +319,13 @@ impl ReplicaCore {
                     for ((block_num, block), (other_block_num, requests)) in
                         proposals.iter().zip(&Self::view_change_proposals(&quorum))
                     {
-                        if block_num != other_block_num || block.digest != block_digest(&requests) {
+                        if block_num != other_block_num || block.digest != block_digest(requests) {
                             return;
                         }
                     }
                 }
                 self.view_num = view_num;
+                actions.push(ReplicaCoreAction::EnterView(self.view_num));
                 let Some((&min_num, _)) = proposals.first_key_value() else {
                     return;
                 };
@@ -322,6 +351,7 @@ impl ReplicaCore {
         }
     }
 
+    #[allow(unused)]
     fn view_change_proposals(
         quorum: &Quorum<BTreeMap<BlockNum, Block>>,
     ) -> BTreeMap<BlockNum, Vec<message::Request>> {
@@ -329,92 +359,38 @@ impl ReplicaCore {
     }
 }
 
-#[derive(Debug)]
-pub struct ReplicaConfig {
-    pub spec: Spec,
-    pub id: ReplicaId,
-
-    pub secret_key: SecretKey,
-    pub public_keys: Vec<PublicKey>,
-
-    pub max_num_inflight: BlockNum,
-    pub max_batch_size: usize,
-}
-
-impl ReplicaConfig {
-    pub fn new_basic(spec: Spec, id: ReplicaId) -> Self {
-        let public_keys = (0..spec.num_replica)
-            .map(|id| public_key(&replica_secret_key(id)))
-            .collect();
-        Self {
-            spec,
-            id,
-            secret_key: replica_secret_key(id),
-            public_keys,
-            max_num_inflight: 1,
-            max_batch_size: 1,
-        }
-    }
-}
-
 pub struct Replica {
-    config: ReplicaConfig,
+    core: ReplicaCore,
+    core_actions: ReplicaCoreActions,
+    crypto_config: crypto::ReplicaConfig,
+    block_scratches: BTreeMap<BlockNum, BlockScratch>,
     view_num: ViewNum,
-    // use BTreeMap to efficiently (and simply) garbage collection with split_off
-    blocks: BTreeMap<BlockNum, (message::PrePrepare, Vec<message::Request>)>,
-    prepare_votes: BTreeMap<BlockNum, Quorum<message::Vote>>,
-    commit_votes: BTreeMap<BlockNum, Quorum<message::Vote>>,
-    request_pool: RequestPool,
-    // only primary maintains. the last proposed block number
-    propose_num: BlockNum,
-    ticked_propose_num: BlockNum,
-    // every block up to commit_num is committed. blocks above may also commit-able
-    // but not checked yet
-    commit_num: BlockNum,
+    finalize_num: BlockNum,
+    ticked_scratch_num: BlockNum,
 }
 
-type Quorum<T> = HashMap<ReplicaId, T>;
+#[derive(Default)]
+struct BlockScratch {
+    prepare_digest: Option<Digest>, // block_digest(&requests), cached
+    prepare_votes: Vec<message::Vote>,
+    prepare_quorum: Quorum<Sig>,
+    prepared: bool,
+    commit_votes: Vec<message::Vote>,
+    commit_quorum: Quorum<Sig>,
+    committed: bool,
+}
 
 impl Replica {
-    pub fn new(config: ReplicaConfig) -> Self {
+    pub fn new(core_config: ReplicaCoreConfig) -> Self {
         Self {
-            config,
+            crypto_config: crypto::ReplicaConfig::new(core_config.id, core_config.spec.num_replica),
+            core: ReplicaCore::new(core_config),
+            core_actions: Default::default(),
+            block_scratches: Default::default(),
             view_num: 0,
-            blocks: Default::default(),
-            prepare_votes: Default::default(),
-            commit_votes: Default::default(),
-            request_pool: RequestPool::close_loop(), // make it configurable if useful
-            propose_num: 0,
-            ticked_propose_num: 0,
-            commit_num: 0,
+            finalize_num: 0,
+            ticked_scratch_num: 0,
         }
-    }
-
-    fn is_primary(&self) -> bool {
-        self.config.spec.primary(self.view_num) == self.config.id
-    }
-
-    fn is_prepared(&self, block_num: BlockNum) -> bool {
-        self.commit_num >= block_num
-            || self.blocks.contains_key(&block_num)
-                && self.prepare_votes.get(&block_num).is_some_and(|votes| {
-                    votes.len() as ReplicaId + 1
-                        >= self.config.spec.num_replica - self.config.spec.num_faulty
-                })
-    }
-
-    // `can_commit`?
-    fn is_committed(&self, block_num: BlockNum) -> bool {
-        self.commit_num >= block_num
-            || self.is_prepared(block_num)
-                && self.commit_votes.get(&block_num).is_some_and(|votes| {
-                    votes.len() as ReplicaId
-                        >= self.config.spec.num_replica - self.config.spec.num_faulty
-                })
-    }
-
-    fn can_propose(&mut self) -> bool {
-        self.is_primary() && self.propose_num - self.commit_num < self.config.max_num_inflight
     }
 }
 
@@ -433,303 +409,302 @@ type ReplicaActions = Vec<ReplicaAction>;
 
 impl Replica {
     pub fn receive(&mut self, message: ToReplica, actions: &mut ReplicaActions) {
-        if tracing::enabled!(tracing::Level::TRACE) {
-            tracing::trace!(?message)
-        }
+        tracing::trace!(?message);
         match message {
-            ToReplica::Request(request) => self.receive_request(request, actions),
+            ToReplica::Request(request) => self
+                .core
+                .handle(ReplicaCoreEvent::Request(request), &mut self.core_actions),
             ToReplica::PrePrepare(pre_prepare, requests) => {
-                self.receive_pre_prepare(pre_prepare, requests, actions)
+                if pre_prepare.view_num != self.view_num {
+                    return;
+                }
+                if let Some(scratch) = self.block_scratches.get(&pre_prepare.block_num) {
+                    if scratch.prepare_digest.as_ref() == Some(&pre_prepare.digest) {
+                        // TODO re-ack
+                    }
+                    return;
+                }
+                if let Err(err) = verify(
+                    pre_prepare.sha256(),
+                    &self.crypto_config.public_keys
+                        [self.core.config.spec.primary(pre_prepare.view_num) as usize],
+                    &pre_prepare.sig,
+                ) {
+                    tracing::warn!(%err, ?pre_prepare, "malformed PrePrepare");
+                    return;
+                }
+                let digest = block_digest(&requests);
+                if pre_prepare.digest != digest {
+                    tracing::warn!(?pre_prepare, "malformed PrePrepare (digest mismatch)");
+                    return;
+                }
+                let block = Block {
+                    requests: requests.clone(),
+                    digest,
+                    pre_prepare: (pre_prepare.view_num, pre_prepare.sig),
+                    prepare_quorum: None,
+                    commit_quorum: None,
+                };
+                self.core.handle(
+                    ReplicaCoreEvent::Proposal(pre_prepare.block_num, block),
+                    &mut self.core_actions,
+                )
             }
-            ToReplica::Prepare(vote) => self.receive_prepare(vote, actions),
-            ToReplica::Commit(vote) => self.receive_commit(vote, actions),
-        }
-    }
-
-    fn receive_request(&mut self, request: message::Request, actions: &mut ReplicaActions) {
-        self.request_pool.push(request.clone());
-        if self.is_primary() {
-            self.propose_blocks(actions)
-        } else {
-            tracing::warn!(self.config.id, %request.client_id, request.seq, "forward broadcast request to primary");
-            // TODO bookkeeping forwarded
-            actions.push(ReplicaAction::SendToReplica(
-                self.config.spec.primary(self.view_num),
-                ToReplica::Request(request),
-            ))
-        }
-    }
-
-    fn propose_blocks(&mut self, actions: &mut ReplicaActions) {
-        if !self.can_propose() {
-            return;
-        };
-        while let Some(requests) = self.request_pool.close_batch(self.config.max_batch_size) {
-            self.propose_num += 1;
-            let mut pre_prepare = message::PrePrepare {
-                view_num: self.view_num,
-                block_num: self.propose_num,
-                digest: block_digest(&requests),
-                sig: Default::default(),
-            };
-            pre_prepare.sig = sign(pre_prepare.sha256(), &self.config.secret_key);
-            let replaced = self.blocks.insert(
-                pre_prepare.block_num,
-                (pre_prepare.clone(), requests.clone()),
-            );
-            assert!(replaced.is_none());
-            actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
-                pre_prepare,
-                requests,
-            )));
-            if !self.can_propose() {
-                break;
-            }
-        }
-    }
-
-    fn receive_pre_prepare(
-        &mut self,
-        pre_prepare: message::PrePrepare,
-        requests: Vec<message::Request>,
-        actions: &mut ReplicaActions,
-    ) {
-        if pre_prepare.view_num < self.view_num {
-            return;
-        }
-        // TODO ignore PrePrepare with anomaly block number
-        let public_key =
-            &self.config.public_keys[self.config.spec.primary(pre_prepare.view_num) as usize];
-        if let Err(err) = verify(pre_prepare.sha256(), public_key, &pre_prepare.sig) {
-            tracing::warn!(%err, "malformed PrePrepare");
-            return;
-        }
-        if pre_prepare.digest != block_digest(&requests) {
-            tracing::warn!("malformed PrePrepare (digest mismatch)");
-            return;
-        }
-        // TODO enter view
-        assert!(!self.is_primary());
-        let block_num = pre_prepare.block_num;
-        let digest = pre_prepare.digest.clone();
-        if let Some((block, _)) = self.blocks.get(&block_num) {
-            if digest != block.digest {
-                tracing::warn!(
-                    self.config.id,
-                    block_num,
-                    preparing = %block.digest,
-                    incoming = %digest,
-                    "multiple proposals",
-                );
-            } else {
-                tracing::warn!(
-                    self.config.id,
-                    block_num,
-                    "resend vote for duplicated proposal"
-                );
-                let vote = self.prepare_votes[&block_num][&self.config.id].clone();
-                actions.push(ReplicaAction::SendToReplica(
-                    self.config.spec.primary(self.view_num),
-                    ToReplica::Prepare(vote),
-                ));
-                if let Some(vote) = self
-                    .commit_votes
-                    .get(&block_num)
-                    .and_then(|votes| votes.get(&self.config.id))
-                {
-                    actions.push(ReplicaAction::SendToReplica(
-                        self.config.spec.primary(self.view_num),
-                        ToReplica::Commit(vote.clone()),
-                    ))
+            ToReplica::Prepare(vote) => {
+                if vote.view_num != self.view_num || vote.block_num <= self.finalize_num {
+                    return;
+                }
+                let scratch = self.block_scratches.entry(vote.block_num).or_default();
+                if scratch.prepared {
+                    return;
+                }
+                if let Err(err) = verify(
+                    vote.sha256(),
+                    &self.crypto_config.public_keys[vote.replica_id as usize],
+                    &vote.sig,
+                ) {
+                    tracing::warn!(%err, "malformed Prepare");
+                    return;
+                }
+                if let Some(digest) = &scratch.prepare_digest {
+                    if &vote.digest != digest {
+                        return;
+                    }
+                    scratch.prepare_quorum.insert(vote.replica_id, vote.sig);
+                    Self::check_prepare_quorum(
+                        vote.block_num,
+                        scratch,
+                        &mut self.core,
+                        &mut self.core_actions,
+                    )
+                } else {
+                    scratch.prepare_votes.push(vote)
                 }
             }
-            return;
-        }
-
-        let replaced = self
-            .blocks
-            .insert(pre_prepare.block_num, (pre_prepare, requests));
-        assert!(replaced.is_none());
-        // delayed Prepare vote pruning
-        if let Some(votes) = self.prepare_votes.get_mut(&block_num) {
-            votes.retain(|_, vote| vote.digest == digest);
-        }
-        if let Some(votes) = self.commit_votes.get_mut(&block_num) {
-            votes.retain(|_, vote| vote.digest == digest);
-        }
-        let mut vote = message::Vote {
-            view_num: self.view_num,
-            block_num,
-            digest,
-            replica_id: self.config.id,
-            sig: Default::default(),
-        };
-        vote.sig = sign(vote.sha256(), &self.config.secret_key);
-        actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Prepare(
-            vote.clone(),
-        )));
-        self.insert_prepare(vote, actions)
-    }
-
-    fn receive_prepare(&mut self, prepare: message::Vote, actions: &mut ReplicaActions) {
-        if prepare.view_num < self.view_num || self.is_prepared(prepare.block_num) {
-            return;
-        }
-        if let Err(err) = verify(
-            prepare.sha256(),
-            &self.config.public_keys[prepare.replica_id as usize],
-            &prepare.sig,
-        ) {
-            tracing::warn!(%err, "malformed Prepare");
-            return;
-        }
-        // TODO enter view
-        if let Some((block, _)) = self.blocks.get(&prepare.block_num) {
-            if prepare.digest != block.digest {
-                tracing::warn!(
-                    prepare.block_num,
-                    prepare.replica_id,
-                    "Prepare digest mismatch"
-                );
-                return;
+            ToReplica::Commit(vote) => {
+                if vote.view_num != self.view_num || vote.block_num <= self.finalize_num {
+                    return;
+                }
+                let scratch = self.block_scratches.entry(vote.block_num).or_default();
+                if scratch.committed {
+                    return;
+                }
+                if let Err(err) = verify(
+                    vote.sha256(),
+                    &self.crypto_config.public_keys[vote.replica_id as usize],
+                    &vote.sig,
+                ) {
+                    tracing::warn!(%err, "malformed Commit");
+                    return;
+                }
+                if let Some(digest) = &scratch.prepare_digest {
+                    if &vote.digest != digest {
+                        return;
+                    }
+                    scratch.commit_quorum.insert(vote.replica_id, vote.sig);
+                    Self::check_commit_quorum(
+                        vote.block_num,
+                        scratch,
+                        &mut self.core,
+                        &mut self.core_actions,
+                    )
+                } else {
+                    scratch.commit_votes.push(vote)
+                }
             }
-        } else {
-            // frequently happens with single machine setting
-            tracing::debug!(
-                self.config.id,
-                prepare.block_num,
-                prepare.replica_id,
-                "receive Prepare before PrePrepare"
-            )
-            // the vote pruning is delayed until the late PrePrepare arrives
         }
-        self.insert_prepare(prepare, actions)
-    }
+        // would like to drain but need to use self.core_actions in the loop
+        for action in take(&mut self.core_actions) {
+            tracing::trace!(?action);
+            match action {
+                ReplicaCoreAction::Propose(block_num, requests) => {
+                    let digest = block_digest(&requests);
+                    let scratch = BlockScratch {
+                        prepare_digest: Some(digest.clone()),
+                        ..Default::default()
+                    };
+                    let replaced = self.block_scratches.insert(block_num, scratch);
+                    assert!(replaced.is_none());
 
-    pub fn insert_prepare(&mut self, prepare: message::Vote, actions: &mut ReplicaActions) {
-        let block_num = prepare.block_num;
-        let digest = prepare.digest.clone();
-        self.prepare_votes
-            .entry(prepare.block_num)
-            .or_default()
-            .insert(prepare.replica_id, prepare);
-        if !self.is_prepared(block_num) {
-            return;
-        }
-        tracing::trace!(self.config.id, block_num, "prepared");
-        let mut vote = message::Vote {
-            view_num: self.view_num,
-            block_num,
-            digest,
-            replica_id: self.config.id,
-            sig: Default::default(),
-        };
-        vote.sig = sign(vote.sha256(), &self.config.secret_key);
-        actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Commit(
-            vote.clone(),
-        )));
-        self.insert_commit(vote, actions)
-    }
-
-    fn receive_commit(&mut self, commit: message::Vote, actions: &mut ReplicaActions) {
-        if commit.view_num < self.view_num || self.is_committed(commit.block_num) {
-            return;
-        }
-        if let Err(err) = verify(
-            commit.sha256(),
-            &self.config.public_keys[commit.replica_id as usize],
-            &commit.sig,
-        ) {
-            tracing::warn!(%err, "malformed Commit");
-            return;
-        }
-        // TODO enter view
-        if let Some((block, _)) = self.blocks.get(&commit.block_num) {
-            if commit.digest != block.digest {
-                tracing::warn!(
-                    commit.block_num,
-                    commit.replica_id,
-                    "Commit digest mismatch"
-                );
-                return;
+                    let mut pre_prepare = message::PrePrepare {
+                        view_num: self.view_num,
+                        block_num,
+                        digest: digest.clone(),
+                        sig: Default::default(),
+                    };
+                    pre_prepare.sig = sign(pre_prepare.sha256(), &self.crypto_config.secret_key);
+                    let block = Block {
+                        requests: requests.clone(),
+                        digest,
+                        pre_prepare: (pre_prepare.view_num, pre_prepare.sig.clone()),
+                        prepare_quorum: None,
+                        commit_quorum: None,
+                    };
+                    actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
+                        pre_prepare,
+                        requests,
+                    )));
+                    self.core.handle(
+                        ReplicaCoreEvent::Proposal(block_num, block),
+                        &mut self.core_actions,
+                    )
+                }
+                ReplicaCoreAction::Prepare(block_num, digest) => {
+                    let scratch = self.block_scratches.entry(block_num).or_default();
+                    let replaced = scratch.prepare_digest.replace(digest.clone());
+                    assert!(replaced.is_none());
+                    for vote in take(&mut scratch.prepare_votes) {
+                        if vote.digest == digest {
+                            scratch.prepare_quorum.insert(vote.replica_id, vote.sig);
+                        }
+                    }
+                    for vote in take(&mut scratch.commit_votes) {
+                        if vote.digest == digest {
+                            scratch.commit_quorum.insert(vote.replica_id, vote.sig);
+                        }
+                    }
+                    let mut prepare = message::Vote {
+                        view_num: self.view_num,
+                        block_num,
+                        digest,
+                        replica_id: self.core.config.id,
+                        sig: Default::default(),
+                    };
+                    prepare.sig = sign(prepare.sha256(), &self.crypto_config.secret_key);
+                    scratch
+                        .prepare_quorum
+                        .insert(prepare.replica_id, prepare.sig.clone());
+                    actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Prepare(
+                        prepare,
+                    )));
+                    Self::check_prepare_quorum(
+                        block_num,
+                        scratch,
+                        &mut self.core,
+                        &mut self.core_actions,
+                    )
+                    // the PrepareQuorum event will trigger a Commit action and we will check for
+                    // commit quorum when performing that Commit nevertheless. not check here to
+                    // avoid duplicated CommitQuorum event
+                    // this is really coupled with ReplicaCore...
+                }
+                ReplicaCoreAction::Commit(block_num) => {
+                    let scratch = self.block_scratches.get_mut(&block_num).unwrap();
+                    let mut commit = message::Vote {
+                        view_num: self.view_num,
+                        block_num,
+                        digest: scratch.prepare_digest.clone().unwrap(),
+                        replica_id: self.core.config.id,
+                        sig: Default::default(),
+                    };
+                    commit.sig = sign(commit.sha256(), &self.crypto_config.secret_key);
+                    scratch
+                        .commit_quorum
+                        .insert(commit.replica_id, commit.sig.clone());
+                    actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Commit(commit)));
+                    Self::check_commit_quorum(
+                        block_num,
+                        scratch,
+                        &mut self.core,
+                        &mut self.core_actions,
+                    )
+                }
+                ReplicaCoreAction::Finalize(block_num) => {
+                    let removed = self.block_scratches.remove(&block_num);
+                    assert!(removed.is_some()); // really?
+                    actions.push(ReplicaAction::Finalize(
+                        self.core.blocks[&block_num].requests.clone(),
+                    ));
+                }
+                ReplicaCoreAction::Forward(replica_id, request) => {
+                    actions.push(ReplicaAction::SendToReplica(
+                        replica_id,
+                        ToReplica::Request(request),
+                    ));
+                    // TODO view expiration timer
+                }
+                #[allow(unused)]
+                ReplicaCoreAction::ViewChange(view_num, blocks) => todo!(),
+                #[allow(unused)]
+                ReplicaCoreAction::NewView(view_num, view_changes, proposals) => {
+                    self.view_num = view_num;
+                    self.block_scratches.clear();
+                    todo!()
+                }
+                ReplicaCoreAction::EnterView(view_num) => {
+                    self.view_num = view_num;
+                    self.block_scratches.clear();
+                }
             }
-        } else {
-            tracing::debug!(
-                self.config.id,
-                commit.block_num,
-                commit.replica_id,
-                "receive Commit before PrePrepare"
-            )
-            // the vote pruning is delayed until the late PrePrepare arrives
         }
-        self.insert_commit(commit, actions)
     }
 
-    pub fn insert_commit(&mut self, commit: message::Vote, actions: &mut ReplicaActions) {
-        let block_num = commit.block_num;
-        let replica_id = commit.replica_id;
-        let replaced = self
-            .commit_votes
-            .entry(commit.block_num)
-            .or_default()
-            .insert(commit.replica_id, commit);
-        if replaced.is_none() && block_num <= self.ticked_propose_num {
-            tracing::warn!(
-                self.config.id,
-                block_num,
-                replica_id,
-                "receive slow Commit for ticked proposal"
-            )
+    fn check_prepare_quorum(
+        block_num: u32,
+        scratch: &mut BlockScratch,
+        core: &mut ReplicaCore,
+        core_actions: &mut ReplicaCoreActions,
+    ) {
+        // if prepare quorum is not empty, PrePrepare must present
+        if scratch.prepare_quorum.len() as ReplicaId + 1
+            >= core.config.spec.num_replica - core.config.spec.num_faulty
+        {
+            scratch.prepared = true;
+            core.handle(
+                ReplicaCoreEvent::PrepareQuorum(block_num, take(&mut scratch.prepare_quorum)),
+                core_actions,
+            );
         }
-        if !self.is_committed(self.commit_num + 1) {
-            return;
-        }
-        while {
-            self.commit_num += 1;
-            tracing::trace!(self.config.id, self.commit_num, "committed");
-            let requests = self.blocks[&self.commit_num].1.clone();
-            for request in &requests {
-                self.request_pool.commit(request)
-            }
-            actions.push(ReplicaAction::Finalize(requests));
-            self.is_committed(self.commit_num + 1)
-        } {}
-        self.on_finalize(actions)
     }
 
-    pub fn on_finalize(&mut self, actions: &mut ReplicaActions) {
-        if self.is_primary() {
-            self.propose_blocks(actions)
+    fn check_commit_quorum(
+        block_num: u32,
+        scratch: &mut BlockScratch,
+        core: &mut ReplicaCore,
+        core_actions: &mut ReplicaCoreActions,
+    ) {
+        if scratch.prepared
+            && scratch.commit_quorum.len() as ReplicaId
+                >= core.config.spec.num_replica - core.config.spec.num_faulty
+        {
+            scratch.committed = true;
+            core.handle(
+                ReplicaCoreEvent::CommitQuorum(block_num, take(&mut scratch.commit_quorum)),
+                core_actions,
+            );
         }
     }
 
     pub fn tick(&mut self, actions: &mut ReplicaActions) {
-        if self.is_primary() {
-            let ticked_propose_num = replace(&mut self.ticked_propose_num, self.propose_num);
-            let block_range = self.commit_num + 1..=ticked_propose_num;
-            if !block_range.is_empty() {
-                tracing::warn!(self.config.id, block_range = ?block_range, "resend PrePrepare(s)");
-                if tracing::enabled!(tracing::Level::DEBUG) {
-                    for block_num in block_range.clone() {
-                        let prepare_votes = self
-                            .prepare_votes
-                            .get(&block_num)
-                            .map(|votes| votes.keys().collect::<Vec<_>>());
-                        let commit_votes = self
-                            .commit_votes
-                            .get(&block_num)
-                            .map(|votes| votes.keys().collect::<Vec<_>>());
-                        tracing::debug!(block_num, ?prepare_votes, ?commit_votes);
-                    }
-                }
-                for block_num in block_range {
-                    let (pre_prepare, requests) = self.blocks[&block_num].clone();
-                    actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
-                        pre_prepare,
-                        requests,
-                    )))
-                }
+        let ticked2_scratch_num = replace(
+            &mut self.ticked_scratch_num,
+            self.block_scratches
+                .last_key_value()
+                .map(|(&block_num, _)| block_num)
+                .unwrap_or_default(),
+        );
+        if !self.core.is_primary() {
+            // TODO tick view expiration
+            return;
+        }
+        for (&block_num, scratch) in &self.block_scratches {
+            if block_num > ticked2_scratch_num {
+                break;
             }
+            if scratch.committed {
+                continue;
+            }
+            let mut pre_prepare = message::PrePrepare {
+                view_num: self.view_num,
+                block_num,
+                digest: scratch.prepare_digest.clone().unwrap(),
+                sig: Default::default(),
+            };
+            pre_prepare.sig = sign(pre_prepare.sha256(), &self.crypto_config.secret_key);
+            actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
+                pre_prepare,
+                self.core.blocks[&block_num].requests.clone(),
+            )))
         }
     }
 }

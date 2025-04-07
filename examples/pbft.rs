@@ -4,7 +4,7 @@ use bft_testbed::{
     common::ClientId,
     init_logging,
     pbft::{
-        Client, ClientConfig, Replica, ReplicaConfig, Spec,
+        Client, ClientConfig, Replica, ReplicaCoreConfig, Spec,
         transport::{ClientTask, Server, TaskConfig, server_task, tcp},
     },
 };
@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let mut server_tasks = JoinSet::new();
     for i in 0..spec.num_replica {
-        let config = ReplicaConfig::new_basic(spec.clone(), i);
+        let config = ReplicaCoreConfig::new_basic(spec.clone(), i);
         let replica = Replica::new(config);
         server_tasks.spawn(if !use_tcp {
             server_task::<Server>(replica, task_config.clone()).left_future()
