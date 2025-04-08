@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, hash::Hash};
 
 use bincode::{
     BorrowDecode, Decode, Encode,
-    de::BorrowDecoder,
+    de::{BorrowDecoder, Decoder},
     enc::Encoder,
     error::{DecodeError, EncodeError},
 };
@@ -29,6 +29,10 @@ pub struct ThresholdCryptoSigShare(pub Box<threshold_crypto::SignatureShare>);
 
 pub type GivreCiphersuite = givre::ciphersuite::Secp256k1;
 pub type GivreCurve = <GivreCiphersuite as givre::Ciphersuite>::Curve;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GivrePublicCommitments(pub givre::signing::round1::PublicCommitments<GivreCurve>);
+pub type GivreSecretNonces = givre::signing::round1::SecretNonces<GivreCurve>;
 
 #[derive(Debug, Clone)]
 pub struct GivreSig(pub Box<givre::signing::aggregate::Signature<GivreCiphersuite>>);
@@ -138,10 +142,7 @@ pub enum AggregateContext<'a> {
 #[derive(Clone, Copy)]
 pub struct GivreAggregateContext<'a> {
     pub key_share: &'a GivreKeyShare,
-    pub signers: &'a [(
-        givre::SignerIndex,
-        givre::signing::round1::PublicCommitments<GivreCurve>,
-    )],
+    pub signers: &'a [(givre::SignerIndex, GivrePublicCommitments)],
     pub message: &'a [u8],
 }
 
@@ -190,7 +191,7 @@ impl PartialSigs {
                     None
                 } else {
                     let mut signers = Vec::new();
-                    for &(index, public_commitments) in context.signers {
+                    for &(index, GivrePublicCommitments(public_commitments)) in context.signers {
                         let Some(sig_share) = sig_shares.remove(&(index as usize)) else {
                             anyhow::bail!("missing signature share for index {index}")
                         };
@@ -245,6 +246,10 @@ pub fn verify(
     Ok(())
 }
 
+fn into_decode(err: impl ToString) -> DecodeError {
+    DecodeError::OtherString(err.to_string())
+}
+
 impl Encode for ThresholdCryptoSig {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
         Encode::encode(&self.0.to_bytes(), encoder)
@@ -252,14 +257,15 @@ impl Encode for ThresholdCryptoSig {
 }
 
 impl<C> Decode<C> for ThresholdCryptoSig {
-    fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+    fn decode<D: Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
         // otherwise compile error
         // TODO report issue to clippy
+        let bytes = Decode::decode(decoder)?;
         #[allow(clippy::needless_borrows_for_generic_args)]
-        match threshold_crypto::Signature::from_bytes(&Decode::decode(decoder)?) {
-            Ok(sig) => Ok(Self(sig.into())),
-            Err(err) => Err(DecodeError::OtherString(err.to_string())),
-        }
+        threshold_crypto::Signature::from_bytes(&bytes)
+            .map(Into::into)
+            .map(Self)
+            .map_err(into_decode)
     }
 }
 
@@ -278,12 +284,12 @@ impl Encode for ThresholdCryptoSigShare {
 }
 
 impl<C> Decode<C> for ThresholdCryptoSigShare {
-    fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+    fn decode<D: Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
         #[allow(clippy::needless_borrows_for_generic_args)]
-        match threshold_crypto::SignatureShare::from_bytes(&Decode::decode(decoder)?) {
-            Ok(sig) => Ok(Self(sig.into())),
-            Err(err) => Err(DecodeError::OtherString(err.to_string())),
-        }
+        threshold_crypto::SignatureShare::from_bytes(&Decode::decode(decoder)?)
+            .map(Into::into)
+            .map(Self)
+            .map_err(into_decode)
     }
 }
 
@@ -305,12 +311,13 @@ impl Encode for GivreSig {
 }
 
 impl<C> Decode<C> for GivreSig {
-    fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+    fn decode<D: Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
         let bytes = <Vec<_>>::decode(decoder)?;
-        match givre::signing::aggregate::Signature::<GivreCiphersuite>::read_from_slice(&bytes) {
-            Some(sig) => Ok(Self(sig.into())),
-            None => Err(DecodeError::Other("invalid signature")),
-        }
+        givre::signing::aggregate::Signature::<GivreCiphersuite>::read_from_slice(&bytes)
+            .map(Into::into)
+            .map(Self)
+            .ok_or("invalid signature")
+            .map_err(into_decode)
     }
 }
 
@@ -332,12 +339,12 @@ impl Encode for GivreSigShare {
 }
 
 impl<C> Decode<C> for GivreSigShare {
-    fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+    fn decode<D: Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
         let bytes = <Vec<_>>::decode(decoder)?;
-        match <GivreCiphersuite as givre::Ciphersuite>::deserialize_scalar(&bytes) {
-            Ok(scalar) => Ok(Self(givre::signing::round2::SigShare(scalar))),
-            Err(err) => Err(DecodeError::OtherString(err.to_string())),
-        }
+        <GivreCiphersuite as givre::Ciphersuite>::deserialize_scalar(&bytes)
+            .map(givre::signing::round2::SigShare)
+            .map(Self)
+            .map_err(into_decode)
     }
 }
 
@@ -346,5 +353,41 @@ impl<'de, C> BorrowDecode<'de, C> for GivreSigShare {
         decoder: &mut D,
     ) -> Result<Self, DecodeError> {
         Decode::decode(decoder)
+    }
+}
+
+impl Encode for GivrePublicCommitments {
+    fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        let serialize = <GivreCiphersuite as givre::Ciphersuite>::serialize_point;
+        Encode::encode(&serialize(&self.0.hiding_comm).to_vec(), encoder)?;
+        Encode::encode(&serialize(&self.0.binding_comm).to_vec(), encoder)?;
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for GivrePublicCommitments {
+    fn decode<D: Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+        let deserialize = <GivreCiphersuite as givre::Ciphersuite>::deserialize_point;
+        let hiding_comm = deserialize(&<Vec<_>>::decode(decoder)?).map_err(into_decode)?;
+        let binding_comm = deserialize(&<Vec<_>>::decode(decoder)?).map_err(into_decode)?;
+        Ok(Self(givre::signing::round1::PublicCommitments {
+            hiding_comm,
+            binding_comm,
+        }))
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for GivrePublicCommitments {
+    fn borrow_decode<D: BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, DecodeError> {
+        Decode::decode(decoder)
+    }
+}
+
+impl Hash for GivrePublicCommitments {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hiding_comm.hash(state);
+        self.0.binding_comm.hash(state);
     }
 }

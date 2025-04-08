@@ -4,7 +4,7 @@ use crate::{
     common::ReplicaId,
     crypto::{
         Digest, UpdateHash,
-        threshold::{PartialSig, Sig},
+        threshold::{GivrePublicCommitments, PartialSig, Sig},
     },
 };
 
@@ -21,6 +21,7 @@ pub struct Reply {
 pub struct Generic {
     // pub view_num: ViewNum,
     pub block: Digest,
+    pub public_commitments_vec: Vec<(givre::SignerIndex, GivrePublicCommitments)>,
     // the paper probably implies no signature is required for the messages
     // themselves. although the event drive algorithm uses notation MSG_u(..) it
     // seems not to be the conventional "signing" notation but simply

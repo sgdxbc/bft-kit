@@ -9,7 +9,7 @@ pub mod cert;
 pub mod threshold;
 
 #[derive(Clone, PartialEq, Eq, Hash, Encode, Decode)]
-pub struct Digest(pub Vec<u8>);
+pub struct Digest(pub [u8; 32]);
 
 impl Display for Digest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -34,7 +34,13 @@ pub type Sha256Output = sha2::digest::Output<sha2::Sha256>;
 
 impl From<Sha256Output> for Digest {
     fn from(value: Sha256Output) -> Self {
-        Digest(value.to_vec())
+        Digest(value.into())
+    }
+}
+
+impl From<Digest> for [u8; 32] {
+    fn from(Digest(bytes): Digest) -> Self {
+        bytes
     }
 }
 

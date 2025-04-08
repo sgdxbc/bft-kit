@@ -1,12 +1,22 @@
 #![allow(unused)]
-use std::{collections::HashMap, mem::replace};
+use std::{
+    collections::HashMap,
+    iter::repeat_with,
+    mem::{replace, take},
+};
 
 use bincode::{Decode, Encode};
 use slab::Slab;
 
 use crate::{
     common::{ClientId, CommandPool, ReplicaId, client},
-    crypto::{Digest, Sha256Hash, threshold::Sig},
+    crypto::{
+        Digest, Sha256Hash,
+        threshold::{
+            GivreCiphersuite, GivreKeyShare, GivrePublicCommitments, GivreSecretNonces,
+            PartialSigs, PublicMasterKey, Sig, verify,
+        },
+    },
 };
 
 mod message;
@@ -343,15 +353,181 @@ impl ReplicaCore {
     fn on_commit(&mut self, block: NodeKey, actions: &mut ReplicaCoreActions) {
         if self.nodes[self.block_execute].height < self.nodes[block].height {
             self.on_commit(self.nodes[block].parent, actions);
+            for command in &self.nodes[block].commands {
+                self.pool.commit(command)
+            }
             actions.push(ReplicaCoreAction::Finalize(block))
         }
     }
 }
 
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum ToReplica {
     Request(Command),
     // latency optimization: inline dissemination of block content for new blocks
     Generic(message::Generic, message::Block),
     VoteGeneric(message::VoteGeneric),
-    // TODO dedicated missing block fetching
+    // TODO targeted fetch for missing block
+
+    // background periodical message required by givre
+    PublicCommitmentsSupply(givre::SignerIndex, Vec<GivrePublicCommitments>),
+}
+
+pub struct CryptoConfig {
+    pub key_share: GivreKeyShare,
+    pub num_supply_commit: usize,
+}
+
+pub struct Replica {
+    core: ReplicaCore,
+    core_actions: ReplicaCoreActions,
+
+    crypto_config: CryptoConfig,
+
+    // block.sha256() of b is pending for => b
+    pending_blocks: HashMap<Digest, Vec<(message::Generic, message::Block)>>,
+    // primary
+    proposal_votes: HashMap<Digest, PartialSigs>,
+    public_commitments_pool: HashMap<givre::SignerIndex, Vec<GivrePublicCommitments>>,
+    // all replicas
+    nonces: HashMap<GivrePublicCommitments, GivreSecretNonces>,
+}
+
+pub type ReplicaAction = crate::common::ReplicaAction<ToReplica>;
+pub type ReplicaActions = Vec<ReplicaAction>;
+
+impl Replica {
+    pub fn new(core_config: ReplicaCoreConfig, crypto_config: CryptoConfig) -> Self {
+        Self {
+            core: ReplicaCore::new(core_config),
+            core_actions: Default::default(),
+            crypto_config,
+            pending_blocks: Default::default(),
+            proposal_votes: Default::default(),
+            public_commitments_pool: Default::default(),
+            nonces: Default::default(),
+        }
+    }
+
+    fn signer_index(&self) -> givre::SignerIndex {
+        self.core.config.id as _
+    }
+
+    fn is_primary(&self) -> bool {
+        self.core.get_leader() == self.core.config.id
+    }
+
+    pub fn init(&mut self, actions: &mut ReplicaActions) {
+        self.nonces.extend(
+            repeat_with(|| {
+                let (secret_nones, public_commitments) =
+                    givre::signing::round1::commit::<GivreCiphersuite>(
+                        &mut rand08::thread_rng(),
+                        &self.crypto_config.key_share,
+                    );
+                (GivrePublicCommitments(public_commitments), secret_nones)
+            })
+            .take(self.crypto_config.num_supply_commit),
+        );
+        let public_commitments = self.nonces.keys().copied().collect();
+        if self.is_primary() {
+            self.public_commitments_pool
+                .insert(self.signer_index(), public_commitments);
+        } else {
+            actions.push(ReplicaAction::SendToReplica(
+                self.core.get_leader(),
+                ToReplica::PublicCommitmentsSupply(self.signer_index(), public_commitments),
+            ))
+        }
+    }
+
+    pub fn receive(&mut self, message: ToReplica, actions: &mut ReplicaActions) {
+        match message {
+            ToReplica::Request(command) => self
+                .core
+                .handle(ReplicaCoreEvent::Request(command), &mut self.core_actions),
+            ToReplica::Generic(generic, block) => {
+                if self.core.node_index.contains_key(&generic.block) {
+                    return;
+                }
+                if Digest::from(block.sha256()) != generic.block {
+                    return;
+                }
+                if !self
+                    .core
+                    .quorum_cert_index
+                    .contains_key(&block.justify.node)
+                {
+                    if let Err(err) = verify(
+                        block.justify.node.clone(),
+                        &block.justify.sig,
+                        &PublicMasterKey::givre(&self.crypto_config.key_share),
+                    ) {
+                        tracing::warn!(%err, "malformed QuorumCert in Generic");
+                        return;
+                    }
+                }
+
+                if !self.core.node_index.contains_key(&block.parent) {
+                    self.pending_blocks
+                        .entry(block.parent.clone())
+                        .or_default()
+                        .push((generic, block));
+                    return;
+                }
+                let mut pending = vec![(generic, block)];
+                while let Some((generic, block)) = pending.pop() {
+                    if !self.core.node_index.contains_key(&block.justify.node) {
+                        self.pending_blocks
+                            .entry(block.justify.node.clone())
+                            .or_default()
+                            .push((generic, block));
+                        continue;
+                    }
+                    if let Some(other_pending) = self.pending_blocks.remove(&generic.block) {
+                        pending.extend(other_pending);
+                    }
+                    self.core.handle(
+                        ReplicaCoreEvent::Proposal(generic, block),
+                        &mut self.core_actions,
+                    )
+                }
+            }
+            ToReplica::VoteGeneric(vote_generic) => todo!(),
+            ToReplica::PublicCommitmentsSupply(_, items) => todo!(),
+        }
+
+        for action in take(&mut self.core_actions) {
+            match action {
+                ReplicaCoreAction::Propose(node) => {
+                    let mut justify = message::QuorumCert {
+                        node: Digest(Default::default()), // TODO
+                        sig: self.core.quorum_certs[node.justify].sig.clone(),
+                    };
+                    let block = message::Block {
+                        parent: Digest(Default::default()), // TODO
+                        commands: node.commands,
+                        justify,
+                        height: node.height,
+                    };
+                    let generic = message::Generic {
+                        block: block.sha256().into(),
+                        public_commitments_vec: Default::default(), // TODO
+                    };
+                    actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Generic(
+                        generic.clone(),
+                        block.clone(),
+                    )));
+                    self.core.handle(
+                        ReplicaCoreEvent::Proposal(generic, block),
+                        &mut self.core_actions,
+                    )
+                }
+                ReplicaCoreAction::Vote(block) => todo!(),
+                ReplicaCoreAction::Finalize(block) => actions.push(ReplicaAction::Finalize(
+                    self.core.nodes[block].commands.clone(),
+                )),
+            }
+        }
+    }
 }

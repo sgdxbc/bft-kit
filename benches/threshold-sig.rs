@@ -195,10 +195,7 @@ fn prepare_combine_givre(
     message: [u8; 32],
 ) -> (
     Vec<threshold::PartialSig>,
-    Vec<(
-        u16,
-        givre::signing::round1::PublicCommitments<threshold::GivreCurve>,
-    )>,
+    Vec<(u16, threshold::GivrePublicCommitments)>,
     threshold::GivreKeyShare,
 ) {
     let key_shares = givre::trusted_dealer::builder(n)
@@ -234,6 +231,12 @@ fn prepare_combine_givre(
                 )
                 .unwrap(),
             ))
+        })
+        .collect();
+    let signers = signers
+        .into_iter()
+        .map(|(index, public_commitments)| {
+            (index, threshold::GivrePublicCommitments(public_commitments))
         })
         .collect();
     (sig_shares, signers, key_shares.into_iter().next().unwrap())
