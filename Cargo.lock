@@ -159,6 +159,7 @@ dependencies = [
  "rcgen",
  "secp256k1",
  "sha2",
+ "slab",
  "test-log",
  "threshold_crypto",
  "tokio",
