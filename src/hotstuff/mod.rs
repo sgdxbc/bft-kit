@@ -1,8 +1,9 @@
 #![allow(unused)]
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     iter::repeat_with,
     mem::{replace, take},
+    ops::Deref,
 };
 
 use bincode::{Decode, Encode};
@@ -126,7 +127,7 @@ type QuorumCertKey = usize;
 // it has been using "node" in all the text but using `b` or `b_{something}`
 // (presumably for block) to name the node variables throughout the pseudocode
 // so i will just naively follow this convention
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone)]
 pub struct Node {
     parent: NodeKey,
     commands: Vec<Command>, // `cmd`
@@ -134,7 +135,7 @@ pub struct Node {
     height: BlockHeight,
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone)]
 struct QuorumCert {
     // view_num: ViewNum,
     node: NodeKey,
@@ -152,11 +153,28 @@ struct ReplicaCore {
     quorum_cert_high: QuorumCertKey, // qc_{high}
 
     pool: CommandPool,
-    nodes: Slab<Node>,
+    nodes: Slab<StoredNode>,
     node_index: HashMap<Digest, NodeKey>, // node.sha256() => node
     quorum_certs: Slab<QuorumCert>,
     quorum_cert_index: HashMap<Digest, QuorumCertKey>, // quorum_cert.node.sha256() => quorum_cert
     num_extra_round: u32,
+}
+
+#[derive(Debug)]
+struct StoredNode(Digest, Node); // lack of a better name
+
+impl StoredNode {
+    fn digest(&self) -> &Digest {
+        &self.0
+    }
+}
+
+impl Deref for StoredNode {
+    type Target = Node;
+
+    fn deref(&self) -> &Self::Target {
+        &self.1
+    }
 }
 
 #[derive(Debug)]
@@ -176,18 +194,22 @@ type ReplicaCoreActions = Vec<ReplicaCoreAction>;
 
 impl ReplicaCore {
     fn new(config: ReplicaCoreConfig) -> Self {
+        let genesis_digest = Digest(Default::default());
         let mut nodes = Slab::new();
         let genesis_key = nodes.vacant_key();
         let mut quorum_certs = Slab::new();
         let genesis_justify_key = quorum_certs.vacant_key();
-        nodes.insert(Node {
-            // a more canonical design may be point to "void" instead of itself
-            // not bother too much for now
-            parent: genesis_key,
-            commands: Default::default(),
-            justify: genesis_justify_key,
-            height: 0,
-        });
+        nodes.insert(StoredNode(
+            genesis_digest.clone(),
+            Node {
+                // a more canonical design may be point to "void" instead of itself
+                // not bother too much for now
+                parent: genesis_key,
+                commands: Default::default(),
+                justify: genesis_justify_key,
+                height: 0,
+            },
+        ));
         quorum_certs.insert(QuorumCert {
             node: genesis_key,
             sig: Sig::Vec(Default::default()),
@@ -201,12 +223,9 @@ impl ReplicaCore {
             quorum_cert_high: genesis_justify_key,
             pool: CommandPool::close_loop(), // TODO configurable
             nodes,
-            // genesis block and its justify are not indexed, as genesis block does not have
-            // a real Block representation and doesn't have a Digest (only a NodeKey)
-            // it is not expected to be transferred around anyway
-            node_index: Default::default(),
+            node_index: [(genesis_digest.clone(), genesis_key)].into(),
             quorum_certs,
-            quorum_cert_index: Default::default(),
+            quorum_cert_index: [(genesis_digest, genesis_justify_key)].into(),
             num_extra_round: 0,
         }
     }
@@ -285,12 +304,15 @@ impl ReplicaCore {
                         })
                     });
                 let block_height = block.height;
-                let block = self.nodes.insert(Node {
-                    parent: self.node_index[&block.parent],
-                    commands: block.commands,
-                    justify,
-                    height: block_height,
-                });
+                let block = self.nodes.insert(StoredNode(
+                    generic.block.clone(),
+                    Node {
+                        parent: self.node_index[&block.parent],
+                        commands: block.commands,
+                        justify,
+                        height: block_height,
+                    },
+                ));
                 let replaced = self.node_index.insert(generic.block, block);
                 assert!(replaced.is_none());
                 if block_height > self.vote_height
@@ -385,10 +407,14 @@ pub struct Replica {
     crypto_config: CryptoConfig,
 
     // block.sha256() of b is pending for => b
-    pending_blocks: HashMap<Digest, Vec<(message::Generic, message::Block)>>,
+    reordering_blocks: HashMap<Digest, Vec<(message::Generic, message::Block)>>,
     // primary
     proposal_votes: HashMap<Digest, PartialSigs>,
-    public_commitments_pool: HashMap<givre::SignerIndex, Vec<GivrePublicCommitments>>,
+    // require ordered keys to ensure consistently reach out the first 2f + 1
+    // replicas for signing. round robin signing could have better performance, but
+    // that would be _really_ strong assumption on fast path i.e. all replicas are
+    // not byzantine
+    public_commitments_pool: BTreeMap<givre::SignerIndex, Vec<GivrePublicCommitments>>,
     // all replicas
     nonces: HashMap<GivrePublicCommitments, GivreSecretNonces>,
 }
@@ -402,7 +428,7 @@ impl Replica {
             core: ReplicaCore::new(core_config),
             core_actions: Default::default(),
             crypto_config,
-            pending_blocks: Default::default(),
+            reordering_blocks: Default::default(),
             proposal_votes: Default::default(),
             public_commitments_pool: Default::default(),
             nonces: Default::default(),
@@ -469,7 +495,7 @@ impl Replica {
                 }
 
                 if !self.core.node_index.contains_key(&block.parent) {
-                    self.pending_blocks
+                    self.reordering_blocks
                         .entry(block.parent.clone())
                         .or_default()
                         .push((generic, block));
@@ -478,13 +504,13 @@ impl Replica {
                 let mut pending = vec![(generic, block)];
                 while let Some((generic, block)) = pending.pop() {
                     if !self.core.node_index.contains_key(&block.justify.node) {
-                        self.pending_blocks
+                        self.reordering_blocks
                             .entry(block.justify.node.clone())
                             .or_default()
                             .push((generic, block));
                         continue;
                     }
-                    if let Some(other_pending) = self.pending_blocks.remove(&generic.block) {
+                    if let Some(other_pending) = self.reordering_blocks.remove(&generic.block) {
                         pending.extend(other_pending);
                     }
                     self.core.handle(
@@ -494,25 +520,43 @@ impl Replica {
                 }
             }
             ToReplica::VoteGeneric(vote_generic) => todo!(),
-            ToReplica::PublicCommitmentsSupply(_, items) => todo!(),
+            ToReplica::PublicCommitmentsSupply(index, supply) => self
+                .public_commitments_pool
+                .entry(index)
+                .or_default()
+                .extend(supply),
         }
 
         for action in take(&mut self.core_actions) {
             match action {
                 ReplicaCoreAction::Propose(node) => {
                     let mut justify = message::QuorumCert {
-                        node: Digest(Default::default()), // TODO
+                        node: self.core.nodes[self.core.quorum_certs[node.justify].node]
+                            .digest()
+                            .clone(),
                         sig: self.core.quorum_certs[node.justify].sig.clone(),
                     };
                     let block = message::Block {
-                        parent: Digest(Default::default()), // TODO
+                        parent: self.core.nodes[node.parent].digest().clone(),
                         commands: node.commands,
                         justify,
                         height: node.height,
                     };
+                    let num_signer =
+                        (self.core.config.spec.num_replica - self.core.config.spec.num_faulty) as _;
+                    let mut signers = self
+                        .public_commitments_pool
+                        .iter_mut()
+                        .filter_map(|(&index, supply)| {
+                            let public_commitments = supply.pop()?;
+                            Some((index, public_commitments))
+                        })
+                        .take(num_signer)
+                        .collect::<Vec<_>>();
+                    assert!(signers.len() == num_signer); // TODO support fallback to vec scheme
                     let generic = message::Generic {
                         block: block.sha256().into(),
-                        public_commitments_vec: Default::default(), // TODO
+                        signers,
                     };
                     actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Generic(
                         generic.clone(),
