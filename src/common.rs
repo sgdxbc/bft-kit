@@ -1,12 +1,12 @@
 use std::fmt::{self, Formatter, Write as _};
 
-pub mod request_pool;
-pub use request_pool::RequestPool;
+use bincode::{Decode, Encode};
+
+pub mod command_pool;
+pub use command_pool::CommandPool;
 
 pub mod client {
     use std::fmt::{self, Formatter};
-
-    use bincode::{Decode, Encode};
 
     #[derive(
         Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bincode::Encode, bincode::Decode,
@@ -50,18 +50,18 @@ pub mod client {
     }
 
     pub type Seq = u32;
-
-    #[derive(Debug, Clone, Encode, Decode)]
-    pub struct Request {
-        pub client_id: Id,
-        pub seq: Seq,
-        pub op: Vec<u8>,
-    }
 }
 
 // pub type ClientId = u32;
 pub use client::Id as ClientId;
 pub use client::Seq as ClientSeq;
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct Command {
+    pub client_id: ClientId,
+    pub seq: ClientSeq,
+    pub op: Vec<u8>,
+}
 
 pub type ReplicaId = u8;
 
@@ -69,7 +69,7 @@ pub type ReplicaId = u8;
 pub enum ReplicaAction<M> {
     SendToReplica(ReplicaId, M),
     SendToAllReplicas(M), // except loopback
-    Finalize(Vec<client::Request>),
+    Finalize(Vec<Command>),
 }
 
 pub fn fmt_bytes(bytes: &[u8], f: &mut Formatter<'_>) -> fmt::Result {

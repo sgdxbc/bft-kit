@@ -7,8 +7,6 @@ use crate::{
 
 use super::{BlockNum, ViewNum};
 
-pub use crate::common::client::Request;
-
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Reply {
     pub seq: u32,

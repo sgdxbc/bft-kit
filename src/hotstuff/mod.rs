@@ -5,12 +5,13 @@ use bincode::{Decode, Encode};
 use slab::Slab;
 
 use crate::{
-    common::{ClientId, ReplicaId, RequestPool, client},
+    common::{ClientId, CommandPool, ReplicaId, client},
     crypto::{Digest, Sha256Hash, threshold::Sig},
 };
 
 mod message;
 
+pub use crate::common::Command;
 pub use message::Reply as ToClient;
 
 #[derive(Debug, Clone)]
@@ -50,12 +51,12 @@ impl Client {
         assert!(self.op.is_none());
         self.op = Some(op.clone());
         self.seq += 1;
-        let request = message::Request {
+        let command = Command {
             client_id: self.config.id,
             seq: self.seq,
             op,
         };
-        ClientAction::SendToAllReplicas(ToReplica::Request(request))
+        ClientAction::SendToAllReplicas(ToReplica::Request(command))
     }
 
     pub fn tick(&mut self) -> ClientAction {
@@ -66,12 +67,12 @@ impl Client {
             return ClientAction::Nop;
         };
         tracing::warn!(%self.config.id, self.seq, "resend request");
-        let request = message::Request {
+        let command = Command {
             client_id: self.config.id,
             seq: self.seq,
             op,
         };
-        ClientAction::SendToAllReplicas(ToReplica::Request(request))
+        ClientAction::SendToAllReplicas(ToReplica::Request(command))
     }
 
     pub fn receive(&mut self, reply: message::Reply) -> ClientAction {
@@ -118,7 +119,7 @@ type QuorumCertKey = usize;
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Node {
     parent: NodeKey,
-    requests: Vec<message::Request>, // `cmd` in paper
+    commands: Vec<Command>, // `cmd`
     justify: QuorumCertKey,
     height: BlockHeight,
 }
@@ -140,7 +141,7 @@ struct ReplicaCore {
     block_leaf: NodeKey,             // b_{leaf}
     quorum_cert_high: QuorumCertKey, // qc_{high}
 
-    pool: RequestPool,
+    pool: CommandPool,
     nodes: Slab<Node>,
     node_index: HashMap<Digest, NodeKey>, // node.sha256() => node
     quorum_certs: Slab<QuorumCert>,
@@ -150,7 +151,7 @@ struct ReplicaCore {
 
 #[derive(Debug)]
 enum ReplicaCoreEvent {
-    Request(message::Request),                  // onBeat (kind of)
+    Request(Command),                           // onBeat (kind of)
     Proposal(message::Generic, message::Block), // onReceiveProposal
     QuorumCert(QuorumCert),                     // onReceiveVote (bottom half)
 }
@@ -173,7 +174,7 @@ impl ReplicaCore {
             // a more canonical design may be point to "void" instead of itself
             // not bother too much for now
             parent: genesis_key,
-            requests: Default::default(),
+            commands: Default::default(),
             justify: genesis_justify_key,
             height: 0,
         });
@@ -188,7 +189,7 @@ impl ReplicaCore {
             block_execute: genesis_key,
             block_leaf: genesis_key,
             quorum_cert_high: genesis_justify_key,
-            pool: RequestPool::close_loop(), // TODO configurable
+            pool: CommandPool::close_loop(), // TODO configurable
             nodes,
             // genesis block and its justify are not indexed, as genesis block does not have
             // a real Block representation and doesn't have a Digest (only a NodeKey)
@@ -226,18 +227,18 @@ impl ReplicaCore {
     }
 
     // in this implementation pool.close_batch(..) makes side effect, so fetch the
-    // requests inside
+    // commands inside (inlined) onPropose
     fn on_beat(&mut self, actions: &mut ReplicaCoreActions) {
         if self.config.id == self.get_leader() {
             // inlined onPropose
-            let requests = self.pool.close_batch(1); // TODO
+            let commands = self.pool.close_batch(1); // TODO
             // ensure liveness of close loop clients: keep proposing (even empty nodes) as
             // long as there exists (nonempty) node that is not deep enough to be committed
             // the PMRoundRobinProposer seems to have similar consideration with
             // `do_new_consensus` although the code is obscure and i'm not sure
-            if requests.is_some() || self.num_extra_round > 0 {
-                let requests = requests.unwrap_or_default();
-                self.num_extra_round = if requests.is_empty() {
+            if commands.is_some() || self.num_extra_round > 0 {
+                let commands = commands.unwrap_or_default();
+                self.num_extra_round = if commands.is_empty() {
                     self.num_extra_round - 1
                 } else {
                     3
@@ -245,7 +246,7 @@ impl ReplicaCore {
                 // inlined createLeaf
                 let block = Node {
                     parent: self.block_leaf,
-                    requests,
+                    commands,
                     justify: self.quorum_cert_high,
                     height: self.nodes[self.block_leaf].height + 1,
                 };
@@ -276,7 +277,7 @@ impl ReplicaCore {
                 let block_height = block.height;
                 let block = self.nodes.insert(Node {
                     parent: self.node_index[&block.parent],
-                    requests: block.requests,
+                    commands: block.commands,
                     justify,
                     height: block_height,
                 });
@@ -348,7 +349,7 @@ impl ReplicaCore {
 }
 
 pub enum ToReplica {
-    Request(message::Request),
+    Request(Command),
     // latency optimization: inline dissemination of block content for new blocks
     Generic(message::Generic, message::Block),
     VoteGeneric(message::VoteGeneric),

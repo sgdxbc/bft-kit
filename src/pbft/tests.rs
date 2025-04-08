@@ -19,32 +19,32 @@ struct Service {
 
 enum ServiceAction {
     Nop,
-    Submit(message::Request),
+    Submit(Command),
     SendToClient(ClientId, message::Reply),
 }
 
 impl Service {
-    fn receive(&self, request: message::Request) -> ServiceAction {
-        match self.replies.get(&request.client_id) {
-            Some(reply) if reply.seq > request.seq => ServiceAction::Nop,
-            Some(reply) if reply.seq == request.seq => {
-                ServiceAction::SendToClient(request.client_id.0, reply.clone())
+    fn receive(&self, command: Command) -> ServiceAction {
+        match self.replies.get(&command.client_id) {
+            Some(reply) if reply.seq > command.seq => ServiceAction::Nop,
+            Some(reply) if reply.seq == command.seq => {
+                ServiceAction::SendToClient(command.client_id.0, reply.clone())
             }
-            _ => ServiceAction::Submit(request),
+            _ => ServiceAction::Submit(command),
         }
     }
 
-    fn commit(&mut self, request: message::Request, replica: &Replica) -> ServiceAction {
-        let result = request.op; // echo back
+    fn commit(&mut self, command: Command, replica: &Replica) -> ServiceAction {
+        let result = command.op; // echo back
         let reply = message::Reply {
-            seq: request.seq,
+            seq: command.seq,
             view_num: replica.core.view_num,
             result,
             replica_id: replica.core.config.id,
         };
-        let replaced = self.replies.insert(request.client_id, reply.clone());
-        assert!(replaced.map(|reply| reply.seq) < Some(request.seq)); // None < Some(..)
-        ServiceAction::SendToClient(request.client_id.0, reply)
+        let replaced = self.replies.insert(command.client_id, reply.clone());
+        assert!(replaced.map(|reply| reply.seq) < Some(command.seq)); // None < Some(..)
+        ServiceAction::SendToClient(command.client_id.0, reply)
     }
 }
 
@@ -101,14 +101,14 @@ impl System {
                 }
                 Event::SendToReplica(replica_id, mut message) => {
                     let (replica, service) = &mut self.servers[replica_id as usize];
-                    if let ToReplica::Request(request) = message {
-                        match service.receive(request) {
+                    if let ToReplica::Request(command) = message {
+                        match service.receive(command) {
                             ServiceAction::Nop => break 'result StepResult::ServerProgress,
                             ServiceAction::SendToClient(client_id, reply) => {
                                 self.events.push_back(Event::SendToClient(client_id, reply));
                                 break 'result StepResult::ServerProgress;
                             }
-                            ServiceAction::Submit(request) => message = ToReplica::Request(request),
+                            ServiceAction::Submit(command) => message = ToReplica::Request(command),
                         }
                     }
                     let mut actions = Vec::new();
@@ -144,10 +144,10 @@ impl System {
             ReplicaAction::SendToAllReplicas(message) => {
                 self.send_to_all_replica(message, Some(replica_id))
             }
-            ReplicaAction::Finalize(requests) => {
+            ReplicaAction::Finalize(commands) => {
                 let (replica, service) = &mut self.servers[replica_id as usize];
-                for request in requests {
-                    match service.commit(request, replica) {
+                for command in commands {
+                    match service.commit(command, replica) {
                         ServiceAction::Nop => {}
                         ServiceAction::SendToClient(client_id, reply) => {
                             self.events.push_back(Event::SendToClient(client_id, reply))
@@ -296,7 +296,7 @@ fn batched() {
             .core
             .blocks
             .values()
-            .any(|block| block.requests.len() > 1)
+            .any(|block| block.commands.len() > 1)
     });
     assert!(batch_proposal)
 }

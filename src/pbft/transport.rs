@@ -304,10 +304,10 @@ where
                 ReplicaAction::SendToAllReplicas(message) => {
                     write_message(message, replica_egresses.values_mut(), &mut encode_bytes).await?
                 }
-                ReplicaAction::Finalize(requests) => {
+                ReplicaAction::Finalize(commands) => {
                     finalize_sender
                         .send(Finalize {
-                            requests,
+                            commands,
                             view_num: replica.core.view_num,
                         })
                         .await?
@@ -389,7 +389,7 @@ async fn boot_server(
 }
 
 pub struct Finalize {
-    requests: Vec<message::Request>,
+    commands: Vec<super::Command>,
     view_num: ViewNum,
 }
 
@@ -447,21 +447,21 @@ async fn service_task(
                 anyhow::ensure!(replaced.is_none());
             }
             Read(message) => {
-                let Some(ToReplica::Request(request)) = message else {
+                let Some(ToReplica::Request(command)) = message else {
                     unimplemented!()
                 };
-                match replies.get(&request.client_id) {
-                    Some(reply) if reply.seq > request.seq => {}
-                    Some(reply) if reply.seq == request.seq => {
-                        let egress = client_egresses.get_mut(&request.client_id).ok_or(
+                match replies.get(&command.client_id) {
+                    Some(reply) if reply.seq > command.seq => {}
+                    Some(reply) if reply.seq == command.seq => {
+                        let egress = client_egresses.get_mut(&command.client_id).ok_or(
                             anyhow::format_err!(
                                 "send to unexpected client id {}",
-                                request.client_id
+                                command.client_id
                             ),
                         )?;
                         write_message(reply.clone(), [egress], &mut encode_bytes).await?
                     }
-                    _ => submit_sender.send(ToReplica::Request(request)).await?,
+                    _ => submit_sender.send(ToReplica::Request(command)).await?,
                 }
             }
             Select::Finalize(finalize) => 'finalize: {
@@ -469,22 +469,22 @@ async fn service_task(
                     tracing::warn!("finalize channel closed");
                     break 'finalize;
                 };
-                for request in finalize.requests {
+                for command in finalize.commands {
                     let reply = message::Reply {
-                        seq: request.seq,
+                        seq: command.seq,
                         view_num: finalize.view_num,
                         // a 0/0 service, extend to support arbitrary state machine later
                         result: Default::default(),
                         replica_id,
                     };
-                    let replaced = replies.insert(request.client_id, reply.clone());
+                    let replaced = replies.insert(command.client_id, reply.clone());
                     assert!(replaced.map(|reply| reply.seq) < Some(reply.seq));
                     let egress =
                         client_egresses
-                            .get_mut(&request.client_id)
+                            .get_mut(&command.client_id)
                             .ok_or(anyhow::format_err!(
                                 "send to unexpected client {}",
-                                request.client_id
+                                command.client_id
                             ))?;
                     if let Err(err) = write_message(reply, [egress], &mut encode_bytes).await {
                         // TODO only suppress certain errors e.g. BrokenPipe and ApplicationClose

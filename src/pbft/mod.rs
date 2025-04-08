@@ -6,7 +6,10 @@ use std::{
 use sha2::Digest as _;
 
 use crate::{
-    common::{ClientId, ReplicaId, RequestPool, client},
+    common::{
+        ClientId, CommandPool, ReplicaId,
+        client::{self},
+    },
     crypto::{self, Digest, Sha256Hash, sign, verify},
 };
 
@@ -29,10 +32,12 @@ impl Spec {
     }
 }
 
+pub use crate::common::Command;
+
 #[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub enum ToReplica {
-    Request(message::Request),
-    PrePrepare(message::PrePrepare, Vec<message::Request>),
+    Request(Command),
+    PrePrepare(message::PrePrepare, Vec<Command>),
     // this is kind of a secure bug: malformed replica can "repackage" a Prepare of
     // any other replica into a Commit to pretend that replica has sent Commit
     // can be easily addressed by e.g. adding a nonce in Commit messages
@@ -75,14 +80,14 @@ impl Client {
         assert!(self.op.is_none());
         self.op = Some(op.clone());
         self.seq += 1;
-        let request = message::Request {
+        let command = Command {
             client_id: self.config.id,
             seq: self.seq,
             op,
         };
         ClientAction::SendToReplica(
             self.config.spec.primary(self.view_num),
-            ToReplica::Request(request),
+            ToReplica::Request(command),
         )
     }
 
@@ -94,12 +99,12 @@ impl Client {
             return ClientAction::Nop;
         };
         tracing::warn!(%self.config.id, self.seq, "resend request");
-        let request = message::Request {
+        let command = Command {
             client_id: self.config.id,
             seq: self.seq,
             op,
         };
-        ClientAction::SendToAllReplicas(ToReplica::Request(request))
+        ClientAction::SendToAllReplicas(ToReplica::Request(command))
     }
 
     pub fn receive(&mut self, reply: message::Reply) -> ClientAction {
@@ -148,7 +153,7 @@ impl ReplicaCoreConfig {
 struct ReplicaCore {
     config: ReplicaCoreConfig,
     view_num: ViewNum,
-    pool: RequestPool,
+    pool: CommandPool,
     blocks: BTreeMap<BlockNum, Block>,
     propose_num: BlockNum,
     finalize_num: BlockNum,
@@ -158,8 +163,8 @@ use crate::crypto::Sig;
 
 #[derive(Debug, Clone)]
 struct Block {
-    requests: Vec<message::Request>,
-    digest: Digest, // block_digest(&requests), cached
+    commands: Vec<Command>,
+    digest: Digest, // block_digest(&commands), cached
     #[allow(unused)]
     pre_prepare: (ViewNum, Sig),
     prepare_quorum: Option<Quorum<Sig>>,
@@ -171,7 +176,7 @@ type Quorum<T> = HashMap<ReplicaId, T>;
 enum ReplicaCoreEvent {
     // main path: Request -> Propose -> Proposal (-> Prepare) -> PrepareQuorum
     // -> Commit -> CommitQuorum -> Finalize
-    Request(message::Request),
+    Request(Command),
     Proposal(BlockNum, Block), // the `requests` are saved for later Finalize action
     PrepareQuorum(BlockNum, Quorum<Sig>),
     CommitQuorum(BlockNum, Quorum<Sig>),
@@ -194,10 +199,10 @@ enum ReplicaCoreEvent {
 enum ReplicaCoreAction {
     // main path
 
-    // should package the requests into a Block, package block digest into a
+    // should package the commands into a Block, package block digest into a
     // PrePrepare and disseminate to all replicas including the proposer itself
     // and start to collect a Prepare quorum for the block
-    Propose(BlockNum, Vec<message::Request>),
+    Propose(BlockNum, Vec<Command>),
     // invariants on main path
     // * Finalize with strict increasing block numbers without gap. Prepare and
     //   Commit may be out of order regarding block numbers
@@ -219,16 +224,16 @@ enum ReplicaCoreAction {
     // should package the `Prepare`-ing Digest into a Commit, disseminate to all
     // replicas and start to collect a Commit quorum for the Digest
     Commit(BlockNum),
-    // should produce a Finalize action to the requests of the block
+    // should produce a Finalize action on the commands of the block
     Finalize(BlockNum),
 
     // recover path
-    Forward(ReplicaId, message::Request),
+    Forward(ReplicaId, Command),
     ViewChange(ViewNum, BTreeMap<BlockNum, Block>),
     NewView(
         ViewNum,
         Quorum<BTreeMap<BlockNum, Block>>,
-        BTreeMap<BlockNum, Vec<message::Request>>,
+        BTreeMap<BlockNum, Vec<Command>>,
     ),
     EnterView,
 }
@@ -240,7 +245,7 @@ impl ReplicaCore {
         Self {
             config,
             view_num: 0,
-            pool: RequestPool::close_loop(), // TODO configurable?
+            pool: CommandPool::close_loop(), // TODO configurable?
             blocks: Default::default(),
             propose_num: 0,
             finalize_num: 0,
@@ -261,12 +266,12 @@ impl ReplicaCore {
 
     fn handle(&mut self, event: ReplicaCoreEvent, actions: &mut ReplicaCoreActions) {
         match event {
-            ReplicaCoreEvent::Request(request) => {
-                self.pool.push(request.clone());
+            ReplicaCoreEvent::Request(command) => {
+                self.pool.push(command.clone());
                 if !self.is_primary() {
                     actions.push(ReplicaCoreAction::Forward(
                         self.config.spec.primary(self.view_num),
-                        request,
+                        command,
                     ));
                     return;
                 }
@@ -300,8 +305,8 @@ impl ReplicaCore {
                     })
                 } {
                     self.finalize_num += 1;
-                    for request in &self.blocks[&self.finalize_num].requests {
-                        self.pool.commit(request)
+                    for command in &self.blocks[&self.finalize_num].commands {
+                        self.pool.commit(command)
                     }
                     actions.push(ReplicaCoreAction::Finalize(self.finalize_num))
                 }
@@ -324,10 +329,10 @@ impl ReplicaCore {
             }
             ReplicaCoreEvent::EnterView(view_num, quorum, proposals) => {
                 assert!(!self.is_primary_of(view_num));
-                for ((block_num, block), (other_block_num, requests)) in
+                for ((block_num, block), (other_block_num, commands)) in
                     proposals.iter().zip(&Self::view_change_proposals(&quorum))
                 {
-                    if block_num != other_block_num || block.digest != block_digest(requests) {
+                    if block_num != other_block_num || block.digest != block_digest(commands) {
                         return;
                     }
                 }
@@ -347,18 +352,18 @@ impl ReplicaCore {
 
     fn propose(&mut self, actions: &mut ReplicaCoreActions) {
         while self.can_propose() {
-            let Some(requests) = self.pool.close_batch(self.config.max_batch_size) else {
+            let Some(commands) = self.pool.close_batch(self.config.max_batch_size) else {
                 return;
             };
             self.propose_num += 1;
-            actions.push(ReplicaCoreAction::Propose(self.propose_num, requests))
+            actions.push(ReplicaCoreAction::Propose(self.propose_num, commands))
         }
     }
 
     #[allow(unused)]
     fn view_change_proposals(
         quorum: &Quorum<BTreeMap<BlockNum, Block>>,
-    ) -> BTreeMap<BlockNum, Vec<message::Request>> {
+    ) -> BTreeMap<BlockNum, Vec<Command>> {
         Default::default() // TODO
     }
 
@@ -404,12 +409,12 @@ impl Replica {
     }
 }
 
-fn block_digest(requests: &[message::Request]) -> Digest {
+fn block_digest(commands: &[Command]) -> Digest {
     let mut state = sha2::Sha256::new();
-    for request in requests {
-        state.update(request.client_id.to_le_bytes());
-        state.update(request.seq.to_le_bytes());
-        state.update(&request.op)
+    for command in commands {
+        state.update(command.client_id.to_le_bytes());
+        state.update(command.seq.to_le_bytes());
+        state.update(&command.op)
     }
     state.finalize().into()
 }
@@ -421,10 +426,10 @@ impl Replica {
     pub fn receive(&mut self, message: ToReplica, actions: &mut ReplicaActions) {
         tracing::trace!(?message);
         match message {
-            ToReplica::Request(request) => self
+            ToReplica::Request(command) => self
                 .core
-                .handle(ReplicaCoreEvent::Request(request), &mut self.core_actions),
-            ToReplica::PrePrepare(pre_prepare, requests) => {
+                .handle(ReplicaCoreEvent::Request(command), &mut self.core_actions),
+            ToReplica::PrePrepare(pre_prepare, commands) => {
                 if pre_prepare.view_num != self.core.view_num {
                     return;
                 }
@@ -465,13 +470,13 @@ impl Replica {
                     tracing::warn!(%err, ?pre_prepare, "malformed PrePrepare");
                     return;
                 }
-                let digest = block_digest(&requests);
+                let digest = block_digest(&commands);
                 if pre_prepare.digest != digest {
                     tracing::warn!(?pre_prepare, "malformed PrePrepare (digest mismatch)");
                     return;
                 }
                 let block = Block {
-                    requests: requests.clone(),
+                    commands: commands.clone(),
                     digest,
                     pre_prepare: (pre_prepare.view_num, pre_prepare.sig),
                     prepare_quorum: None,
@@ -558,8 +563,8 @@ impl Replica {
         for action in take(&mut self.core_actions) {
             tracing::trace!(?action);
             match action {
-                ReplicaCoreAction::Propose(block_num, requests) => {
-                    let digest = block_digest(&requests);
+                ReplicaCoreAction::Propose(block_num, commands) => {
+                    let digest = block_digest(&commands);
                     let mut pre_prepare = message::PrePrepare {
                         view_num: self.core.view_num,
                         block_num,
@@ -568,7 +573,7 @@ impl Replica {
                     };
                     pre_prepare.sig = sign(pre_prepare.sha256(), &self.crypto_config.secret_key);
                     let block = Block {
-                        requests: requests.clone(),
+                        commands: commands.clone(),
                         digest,
                         pre_prepare: (pre_prepare.view_num, pre_prepare.sig.clone()),
                         prepare_quorum: None,
@@ -576,7 +581,7 @@ impl Replica {
                     };
                     actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
                         pre_prepare,
-                        requests,
+                        commands,
                     )));
                     self.core.handle(
                         ReplicaCoreEvent::Proposal(block_num, block),
@@ -652,13 +657,13 @@ impl Replica {
                     let removed = self.block_scratches.remove(&block_num);
                     assert!(removed.is_some()); // really?
                     actions.push(ReplicaAction::Finalize(
-                        self.core.blocks[&block_num].requests.clone(),
+                        self.core.blocks[&block_num].commands.clone(),
                     ));
                 }
-                ReplicaCoreAction::Forward(replica_id, request) => {
+                ReplicaCoreAction::Forward(replica_id, command) => {
                     actions.push(ReplicaAction::SendToReplica(
                         replica_id,
-                        ToReplica::Request(request),
+                        ToReplica::Request(command),
                     ));
                     // TODO view expiration timer
                 }
@@ -728,7 +733,7 @@ impl Replica {
             pre_prepare.sig = sign(pre_prepare.sha256(), &self.crypto_config.secret_key);
             actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
                 pre_prepare,
-                block.requests.clone(),
+                block.commands.clone(),
             )))
         }
     }

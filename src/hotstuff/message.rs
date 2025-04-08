@@ -8,8 +8,6 @@ use crate::{
     },
 };
 
-pub use crate::common::client::Request;
-
 use super::BlockHeight;
 
 #[derive(Debug, Clone, Encode, Decode)]
@@ -36,7 +34,7 @@ pub struct Generic {
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Block {
     pub parent: Digest,
-    pub requests: Vec<Request>, // cmd
+    pub commands: Vec<super::Command>, // cmd
     pub justify: QuorumCert,
     pub height: BlockHeight,
 }
