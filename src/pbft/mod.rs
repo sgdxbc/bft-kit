@@ -3,8 +3,6 @@ use std::{
     mem::{replace, take},
 };
 
-use sha2::Digest as _;
-
 use crate::{
     common::{
         ClientId, CommandPool, ReplicaId,
@@ -410,13 +408,7 @@ impl Replica {
 }
 
 fn block_digest(commands: &[Command]) -> Digest {
-    let mut state = sha2::Sha256::new();
-    for command in commands {
-        state.update(command.client_id.to_le_bytes());
-        state.update(command.seq.to_le_bytes());
-        state.update(&command.op)
-    }
-    state.finalize().into()
+    commands.sha256().into()
 }
 
 type ReplicaAction = crate::common::ReplicaAction<ToReplica>;

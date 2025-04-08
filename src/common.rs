@@ -2,8 +2,14 @@ use std::fmt::{self, Formatter, Write as _};
 
 use bincode::{Decode, Encode};
 
+use crate::crypto::UpdateHash;
+
 pub mod command_pool;
 pub use command_pool::CommandPool;
+
+// pub type ClientId = u32;
+pub use client::Id as ClientId;
+pub use client::Seq as ClientSeq;
 
 pub mod client {
     use std::fmt::{self, Formatter};
@@ -52,15 +58,19 @@ pub mod client {
     pub type Seq = u32;
 }
 
-// pub type ClientId = u32;
-pub use client::Id as ClientId;
-pub use client::Seq as ClientSeq;
-
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Command {
     pub client_id: ClientId,
     pub seq: ClientSeq,
     pub op: Vec<u8>,
+}
+
+impl<S: sha2::Digest> UpdateHash<S> for Command {
+    fn update(&self, state: &mut S) {
+        state.update(self.client_id.to_le_bytes());
+        state.update(self.seq.to_le_bytes());
+        state.update(&self.op)
+    }
 }
 
 pub type ReplicaId = u8;

@@ -42,6 +42,14 @@ pub trait UpdateHash<S> {
     fn update(&self, state: &mut S);
 }
 
+impl<T: UpdateHash<S>, S> UpdateHash<S> for &[T] {
+    fn update(&self, state: &mut S) {
+        for item in *self {
+            item.update(state)
+        }
+    }
+}
+
 pub trait Sha256Hash {
     fn sha256(&self) -> Sha256Output;
 }

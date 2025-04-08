@@ -54,3 +54,12 @@ pub struct VoteGeneric {
     // ourselves
     pub replica_id: ReplicaId,
 }
+
+impl<S: sha2::Digest> UpdateHash<S> for Block {
+    fn update(&self, state: &mut S) {
+        state.update(&self.parent);
+        (&*self.commands).update(state);
+        state.update(&self.justify.node);
+        state.update(self.height.to_le_bytes())
+    }
+}
