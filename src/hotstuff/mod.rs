@@ -284,15 +284,17 @@ impl ReplicaCore {
                 // of managed state
                 // any better way?
                 use crate::crypto::UpdateHash;
-                use sha2::Digest;
+                use sha2::Digest as _;
                 let mut state = sha2::Sha256::new();
                 state.update(self.nodes[block.parent].digest());
                 (&*block.commands).update(&mut state);
                 state.update(self.nodes[self.quorum_certs[block.justify].node].digest());
                 state.update(block.height.to_le_bytes());
+                let block_digest = Digest::from(state.finalize());
                 self.block_leaf = self
                     .nodes
-                    .insert(StoredNode(state.finalize().into(), block.clone()));
+                    .insert(StoredNode(block_digest.clone(), block.clone()));
+                self.node_index.insert(block_digest, self.block_leaf);
                 actions.push(ReplicaCoreAction::Propose(self.block_leaf))
             }
         }
@@ -316,17 +318,24 @@ impl ReplicaCore {
                         })
                     });
                 let block_height = block.height;
-                let block = self.nodes.insert(StoredNode(
-                    block_digest.clone(),
-                    Node {
-                        parent: self.node_index[&block.parent],
-                        commands: block.commands,
-                        justify,
-                        height: block_height,
-                    },
-                ));
-                let replaced = self.node_index.insert(block_digest, block);
-                assert!(replaced.is_none());
+                let block = if let Some(&block) = self.node_index.get(&block_digest) {
+                    // `Replica` only deliver Proposal that presents in self.nodes if it is just
+                    // `Propose`d by the core itself
+                    assert!(block == self.block_leaf);
+                    block
+                } else {
+                    let block = self.nodes.insert(StoredNode(
+                        block_digest.clone(),
+                        Node {
+                            parent: self.node_index[&block.parent],
+                            commands: block.commands,
+                            justify,
+                            height: block_height,
+                        },
+                    ));
+                    self.node_index.insert(block_digest, block);
+                    block
+                };
                 if block_height > self.vote_height
                     && (self.extends(block, self.block_lock)
                         || self.nodes[self.quorum_certs[justify].node].height
