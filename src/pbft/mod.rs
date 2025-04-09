@@ -551,122 +551,125 @@ impl Replica {
                 }
             }
         }
-        // would like to drain but need to use self.core_actions in the loop
-        for action in take(&mut self.core_actions) {
-            tracing::trace!(?action);
-            match action {
-                ReplicaCoreAction::Propose(block_num, commands) => {
-                    let digest = block_digest(&commands);
-                    let mut pre_prepare = message::PrePrepare {
-                        view_num: self.core.view_num,
-                        block_num,
-                        digest: digest.clone(),
-                        sig: Default::default(),
-                    };
-                    pre_prepare.sig = sign(pre_prepare.sha256(), &self.crypto_config.secret_key);
-                    let block = Block {
-                        commands: commands.clone(),
-                        digest,
-                        pre_prepare: (pre_prepare.view_num, pre_prepare.sig.clone()),
-                        prepare_quorum: None,
-                        commit_quorum: None,
-                    };
-                    actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
-                        pre_prepare,
-                        commands,
-                    )));
-                    self.core.handle(
-                        ReplicaCoreEvent::Proposal(block_num, block),
-                        &mut self.core_actions,
-                    )
+        while !self.core_actions.is_empty() {
+            // would like to drain but need to use self.core_actions in the loop
+            for action in take(&mut self.core_actions) {
+                tracing::trace!(?action);
+                match action {
+                    ReplicaCoreAction::Propose(block_num, commands) => {
+                        let digest = block_digest(&commands);
+                        let mut pre_prepare = message::PrePrepare {
+                            view_num: self.core.view_num,
+                            block_num,
+                            digest: digest.clone(),
+                            sig: Default::default(),
+                        };
+                        pre_prepare.sig =
+                            sign(pre_prepare.sha256(), &self.crypto_config.secret_key);
+                        let block = Block {
+                            commands: commands.clone(),
+                            digest,
+                            pre_prepare: (pre_prepare.view_num, pre_prepare.sig.clone()),
+                            prepare_quorum: None,
+                            commit_quorum: None,
+                        };
+                        actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
+                            pre_prepare,
+                            commands,
+                        )));
+                        self.core.handle(
+                            ReplicaCoreEvent::Proposal(block_num, block),
+                            &mut self.core_actions,
+                        )
+                    }
+                    ReplicaCoreAction::Prepare(block_num, digest) => {
+                        let scratch = self.block_scratches.entry(block_num).or_default();
+                        let matching_vote = |vote: message::Vote| {
+                            if vote.digest == digest {
+                                Some((vote.replica_id, vote.sig))
+                            } else {
+                                None
+                            }
+                        };
+                        scratch.prepare_quorum.extend(
+                            take(&mut scratch.prepare_votes)
+                                .into_iter()
+                                .filter_map(matching_vote),
+                        );
+                        scratch.commit_quorum.extend(
+                            take(&mut scratch.commit_votes)
+                                .into_iter()
+                                .filter_map(matching_vote),
+                        );
+                        let mut prepare = message::Vote {
+                            view_num: self.core.view_num,
+                            block_num,
+                            digest,
+                            replica_id: self.core.config.id,
+                            sig: Default::default(),
+                        };
+                        prepare.sig = sign(prepare.sha256(), &self.crypto_config.secret_key);
+                        scratch
+                            .prepare_quorum
+                            .insert(prepare.replica_id, prepare.sig.clone());
+                        actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Prepare(
+                            prepare,
+                        )));
+                        Self::check_prepare_quorum(
+                            block_num,
+                            scratch,
+                            &mut self.core,
+                            &mut self.core_actions,
+                        )
+                        // the PrepareQuorum event will trigger a Commit action and we will check for
+                        // commit quorum when performing that Commit nevertheless. not check here to
+                        // avoid duplicated CommitQuorum event
+                        // this is really coupled with ReplicaCore...
+                    }
+                    ReplicaCoreAction::Commit(block_num) => {
+                        let scratch = self.block_scratches.get_mut(&block_num).unwrap();
+                        let mut commit = message::Vote {
+                            view_num: self.core.view_num,
+                            block_num,
+                            digest: self.core.blocks[&block_num].digest.clone(),
+                            replica_id: self.core.config.id,
+                            sig: Default::default(),
+                        };
+                        commit.sig = sign(commit.sha256(), &self.crypto_config.secret_key);
+                        scratch
+                            .commit_quorum
+                            .insert(commit.replica_id, commit.sig.clone());
+                        actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Commit(commit)));
+                        Self::check_commit_quorum(
+                            block_num,
+                            scratch,
+                            &mut self.core,
+                            &mut self.core_actions,
+                        )
+                    }
+                    ReplicaCoreAction::Finalize(block_num) => {
+                        let removed = self.block_scratches.remove(&block_num);
+                        assert!(removed.is_some()); // really?
+                        actions.push(ReplicaAction::Finalize(
+                            self.core.blocks[&block_num].commands.clone(),
+                        ));
+                    }
+                    ReplicaCoreAction::Forward(replica_id, command) => {
+                        actions.push(ReplicaAction::SendToReplica(
+                            replica_id,
+                            ToReplica::Request(command),
+                        ));
+                        // TODO view expiration timer
+                    }
+                    #[allow(unused)]
+                    ReplicaCoreAction::ViewChange(view_num, blocks) => todo!(),
+                    #[allow(unused)]
+                    ReplicaCoreAction::NewView(view_num, view_changes, proposals) => {
+                        self.block_scratches.clear();
+                        todo!()
+                    }
+                    ReplicaCoreAction::EnterView => self.block_scratches.clear(),
                 }
-                ReplicaCoreAction::Prepare(block_num, digest) => {
-                    let scratch = self.block_scratches.entry(block_num).or_default();
-                    let matching_vote = |vote: message::Vote| {
-                        if vote.digest == digest {
-                            Some((vote.replica_id, vote.sig))
-                        } else {
-                            None
-                        }
-                    };
-                    scratch.prepare_quorum.extend(
-                        take(&mut scratch.prepare_votes)
-                            .into_iter()
-                            .filter_map(matching_vote),
-                    );
-                    scratch.commit_quorum.extend(
-                        take(&mut scratch.commit_votes)
-                            .into_iter()
-                            .filter_map(matching_vote),
-                    );
-                    let mut prepare = message::Vote {
-                        view_num: self.core.view_num,
-                        block_num,
-                        digest,
-                        replica_id: self.core.config.id,
-                        sig: Default::default(),
-                    };
-                    prepare.sig = sign(prepare.sha256(), &self.crypto_config.secret_key);
-                    scratch
-                        .prepare_quorum
-                        .insert(prepare.replica_id, prepare.sig.clone());
-                    actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Prepare(
-                        prepare,
-                    )));
-                    Self::check_prepare_quorum(
-                        block_num,
-                        scratch,
-                        &mut self.core,
-                        &mut self.core_actions,
-                    )
-                    // the PrepareQuorum event will trigger a Commit action and we will check for
-                    // commit quorum when performing that Commit nevertheless. not check here to
-                    // avoid duplicated CommitQuorum event
-                    // this is really coupled with ReplicaCore...
-                }
-                ReplicaCoreAction::Commit(block_num) => {
-                    let scratch = self.block_scratches.get_mut(&block_num).unwrap();
-                    let mut commit = message::Vote {
-                        view_num: self.core.view_num,
-                        block_num,
-                        digest: self.core.blocks[&block_num].digest.clone(),
-                        replica_id: self.core.config.id,
-                        sig: Default::default(),
-                    };
-                    commit.sig = sign(commit.sha256(), &self.crypto_config.secret_key);
-                    scratch
-                        .commit_quorum
-                        .insert(commit.replica_id, commit.sig.clone());
-                    actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Commit(commit)));
-                    Self::check_commit_quorum(
-                        block_num,
-                        scratch,
-                        &mut self.core,
-                        &mut self.core_actions,
-                    )
-                }
-                ReplicaCoreAction::Finalize(block_num) => {
-                    let removed = self.block_scratches.remove(&block_num);
-                    assert!(removed.is_some()); // really?
-                    actions.push(ReplicaAction::Finalize(
-                        self.core.blocks[&block_num].commands.clone(),
-                    ));
-                }
-                ReplicaCoreAction::Forward(replica_id, command) => {
-                    actions.push(ReplicaAction::SendToReplica(
-                        replica_id,
-                        ToReplica::Request(command),
-                    ));
-                    // TODO view expiration timer
-                }
-                #[allow(unused)]
-                ReplicaCoreAction::ViewChange(view_num, blocks) => todo!(),
-                #[allow(unused)]
-                ReplicaCoreAction::NewView(view_num, view_changes, proposals) => {
-                    self.block_scratches.clear();
-                    todo!()
-                }
-                ReplicaCoreAction::EnterView => self.block_scratches.clear(),
             }
         }
     }

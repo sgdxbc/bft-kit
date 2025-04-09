@@ -55,7 +55,7 @@ enum Event {
 }
 
 #[derive(Debug)]
-enum StepResult {
+enum Step {
     ServerProgress,
     ClientProgress,
     ClientReturn(ClientId, Vec<u8>),
@@ -90,7 +90,7 @@ impl System {
         }
     }
 
-    fn step(&mut self) -> Option<StepResult> {
+    fn step(&mut self) -> Option<Step> {
         let result = 'result: {
             let event = self.events.pop_front();
             tracing::debug!(?event);
@@ -103,10 +103,10 @@ impl System {
                     let (replica, service) = &mut self.servers[replica_id as usize];
                     if let ToReplica::Request(command) = message {
                         match service.receive(command) {
-                            ServiceAction::Nop => break 'result StepResult::ServerProgress,
+                            ServiceAction::Nop => break 'result Step::ServerProgress,
                             ServiceAction::SendToClient(client_id, reply) => {
                                 self.events.push_back(Event::SendToClient(client_id, reply));
-                                break 'result StepResult::ServerProgress;
+                                break 'result Step::ServerProgress;
                             }
                             ServiceAction::Submit(command) => message = ToReplica::Request(command),
                         }
@@ -116,25 +116,21 @@ impl System {
                     for action in actions {
                         self.handle_replica_action(replica_id, action)
                     }
-                    StepResult::ServerProgress
+                    Step::ServerProgress
                 }
             }
         };
         Some(result)
     }
 
-    fn handle_client_action(
-        &mut self,
-        client_id: ClientId,
-        client_action: ClientAction,
-    ) -> StepResult {
+    fn handle_client_action(&mut self, client_id: ClientId, client_action: ClientAction) -> Step {
         match client_action {
             ClientAction::Nop => {}
-            ClientAction::Return(result) => return StepResult::ClientReturn(client_id, result),
+            ClientAction::Return(result) => return Step::ClientReturn(client_id, result),
             ClientAction::SendToReplica(id, message) => self.send_to_replica(id, message),
             ClientAction::SendToAllReplicas(message) => self.send_to_all_replica(message, None),
         }
-        StepResult::ClientProgress
+        Step::ClientProgress
     }
 
     fn handle_replica_action(&mut self, replica_id: ReplicaId, replica_action: ReplicaAction) {
@@ -173,7 +169,7 @@ impl System {
         }
     }
 
-    fn invoke(&mut self, client_id: ClientId, op: Vec<u8>) -> StepResult {
+    fn invoke(&mut self, client_id: ClientId, op: Vec<u8>) -> Step {
         let action = self.clients[client_id as usize].invoke(op);
         self.handle_client_action(client_id, action)
     }
@@ -198,7 +194,7 @@ fn normal_1() {
     system.invoke(0, b"hello".into());
     for i in 0.. {
         assert!(i < 100);
-        if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+        if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
             assert_eq!(client_id, 0);
             assert_eq!(&result, b"hello");
             break;
@@ -224,7 +220,7 @@ fn close_loop() {
         system.invoke(0, format!("hello#{round}").into());
         for i in 0.. {
             assert!(i < 100);
-            if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+            if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
                 assert_eq!(client_id, 0);
                 assert_eq!(&result, format!("hello#{round}").as_bytes());
                 break;
@@ -253,7 +249,7 @@ fn concurrent_clients() {
     for _ in 0..10 {
         for i in 0.. {
             assert!(i < 100);
-            if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+            if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
                 assert_eq!(&result, format!("hello@{client_id}").as_bytes());
                 break;
             }
@@ -284,7 +280,7 @@ fn batched() {
     for _ in 0..10 {
         for i in 0.. {
             assert!(i < 100);
-            if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+            if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
                 assert_eq!(&result, format!("hello@{client_id}").as_bytes());
                 break;
             }
@@ -322,7 +318,7 @@ fn concurrent_proposals(max_num_inflight: BlockNum, max_batch_size: usize) {
                 100 * max_num_inflight
             };
             assert!(i < threshold);
-            if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+            if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
                 assert_eq!(&result, format!("hello@{client_id}").as_bytes());
                 break;
             }
@@ -377,7 +373,7 @@ fn drop_1(skip: impl Fn(&Event) -> bool, tick_client: bool, tick_replica0: bool)
     }
     for i in 0.. {
         assert!(i < 100);
-        if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+        if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
             assert_eq!(client_id, 0);
             assert_eq!(&result, b"hello");
             break;
@@ -457,7 +453,7 @@ fn drop_replica3() {
             system.events.pop_front();
             continue;
         }
-        if let StepResult::ClientReturn(client_id, result) = system.step().unwrap() {
+        if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
             assert_eq!(client_id, 0);
             assert_eq!(&result, b"hello");
             break;

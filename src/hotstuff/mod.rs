@@ -1,4 +1,3 @@
-#![allow(unused)]
 use std::{
     collections::{BTreeMap, HashMap},
     iter::repeat_with,
@@ -578,104 +577,110 @@ impl Replica {
                 .extend(supply),
         }
 
-        for action in take(&mut self.core_actions) {
-            match action {
-                ReplicaCoreAction::Propose(node) => {
-                    let mut justify = message::QuorumCert {
-                        node: self.core.nodes[self.core.quorum_certs[node.justify].node]
-                            .digest()
-                            .clone(),
-                        sig: self.core.quorum_certs[node.justify].sig.clone(),
-                    };
-                    let block = message::Block {
-                        parent: self.core.nodes[node.parent].digest().clone(),
-                        commands: node.commands,
-                        justify,
-                        height: node.height,
-                    };
-                    let num_signer =
-                        (self.core.config.spec.num_replica - self.core.config.spec.num_faulty) as _;
-                    let mut signers = self
-                        .public_commitments_pool
-                        .iter_mut()
-                        .filter_map(|(&index, supply)| {
-                            let public_commitments = supply.pop()?;
-                            Some((index, public_commitments))
-                        })
-                        .take(num_signer)
-                        .collect::<Vec<_>>();
-                    if signers.len() < num_signer {
-                        todo!("fallback to slower signature scheme")
-                    }
-                    let generic = message::Generic {
-                        block: block.sha256().into(),
-                        signers,
-                    };
-                    actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Generic(
-                        generic.clone(),
-                        block.clone(),
-                    )));
-                    self.proposal_scratches.insert(
-                        generic.block.clone(),
-                        ProposalScratch {
-                            partial_sigs: PartialSigs::Givre(Default::default()),
-                            signers: generic.signers.clone(),
-                        },
-                    );
-                    let replaced = self
-                        .block_signers
-                        .insert(generic.block.clone(), generic.signers);
-                    assert!(replaced.is_none());
-                    self.core.handle(
-                        ReplicaCoreEvent::Proposal(generic.block, block),
-                        &mut self.core_actions,
-                    )
-                }
-                ReplicaCoreAction::Vote(block) => {
-                    let digest = self.core.nodes[block].digest();
-                    let signers = self.block_signers.remove(digest).unwrap();
-                    let Some((_, public_commitments)) = signers
-                        .iter()
-                        .find(|&&(index, _)| index == self.signer_index())
-                    else {
-                        continue;
-                    };
-                    let nonce = self.nonces.remove(public_commitments).unwrap();
-                    let signers = signers
-                        .into_iter()
-                        .map(|(index, GivrePublicCommitments(public_commitments))| {
-                            (index, public_commitments)
-                        })
-                        .collect::<Vec<_>>();
-                    let partial_sig = match givre::signing::round2::sign::<GivreCiphersuite>(
-                        &self.crypto_config.key_share,
-                        nonce,
-                        digest.as_ref(),
-                        &signers,
-                    ) {
-                        Ok(sig_share) => PartialSig::Givre(GivreSigShare(sig_share)),
-                        Err(err) => {
-                            tracing::warn!(%err, "failed to sign signature share");
-                            continue;
+        while !self.core_actions.is_empty() {
+            for action in take(&mut self.core_actions) {
+                match action {
+                    ReplicaCoreAction::Propose(node) => {
+                        let justify = message::QuorumCert {
+                            node: self.core.nodes[self.core.quorum_certs[node.justify].node]
+                                .digest()
+                                .clone(),
+                            sig: self.core.quorum_certs[node.justify].sig.clone(),
+                        };
+                        let block = message::Block {
+                            parent: self.core.nodes[node.parent].digest().clone(),
+                            commands: node.commands,
+                            justify,
+                            height: node.height,
+                        };
+                        let num_signer = (self.core.config.spec.num_replica
+                            - self.core.config.spec.num_faulty)
+                            as _;
+                        let signers = self
+                            .public_commitments_pool
+                            .iter_mut()
+                            .filter_map(|(&index, supply)| {
+                                let public_commitments = supply.pop()?;
+                                Some((index, public_commitments))
+                            })
+                            .take(num_signer)
+                            .collect::<Vec<_>>();
+                        if signers.len() < num_signer {
+                            todo!("fallback to slower signature scheme")
                         }
-                    };
-                    let vote_generic = message::VoteGeneric {
-                        node: digest.clone(),
-                        partial_sig,
-                        signer_index: self.signer_index(),
-                    };
-                    actions.push(ReplicaAction::SendToReplica(
-                        self.core.get_leader(),
-                        ToReplica::VoteGeneric(vote_generic),
-                    ));
-                    if self.nonces.len() < self.crypto_config.num_max_refill {
-                        self.refill_nonces(actions)
+                        let generic = message::Generic {
+                            block: block.sha256().into(),
+                            signers,
+                        };
+                        actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Generic(
+                            generic.clone(),
+                            block.clone(),
+                        )));
+                        self.proposal_scratches.insert(
+                            generic.block.clone(),
+                            ProposalScratch {
+                                partial_sigs: PartialSigs::Givre(Default::default()),
+                                signers: generic.signers.clone(),
+                            },
+                        );
+                        let replaced = self
+                            .block_signers
+                            .insert(generic.block.clone(), generic.signers);
+                        assert!(replaced.is_none());
+                        self.core.handle(
+                            ReplicaCoreEvent::Proposal(generic.block, block),
+                            &mut self.core_actions,
+                        )
                     }
+                    ReplicaCoreAction::Vote(block) => {
+                        let digest = self.core.nodes[block].digest();
+                        let signers = self.block_signers.remove(digest).unwrap();
+                        let Some((_, public_commitments)) = signers
+                            .iter()
+                            .find(|&&(index, _)| index == self.signer_index())
+                        else {
+                            continue;
+                        };
+                        let nonce = self.nonces.remove(public_commitments).unwrap();
+                        let signers = signers
+                            .into_iter()
+                            .map(|(index, GivrePublicCommitments(public_commitments))| {
+                                (index, public_commitments)
+                            })
+                            .collect::<Vec<_>>();
+                        let partial_sig = match givre::signing::round2::sign::<GivreCiphersuite>(
+                            &self.crypto_config.key_share,
+                            nonce,
+                            digest.as_ref(),
+                            &signers,
+                        ) {
+                            Ok(sig_share) => PartialSig::Givre(GivreSigShare(sig_share)),
+                            Err(err) => {
+                                tracing::warn!(%err, "failed to sign signature share");
+                                continue;
+                            }
+                        };
+                        let vote_generic = message::VoteGeneric {
+                            node: digest.clone(),
+                            partial_sig,
+                            signer_index: self.signer_index(),
+                        };
+                        actions.push(ReplicaAction::SendToReplica(
+                            self.core.get_leader(),
+                            ToReplica::VoteGeneric(vote_generic),
+                        ));
+                        if self.nonces.len() < self.crypto_config.num_max_refill {
+                            self.refill_nonces(actions)
+                        }
+                    }
+                    ReplicaCoreAction::Finalize(block) => actions.push(ReplicaAction::Finalize(
+                        self.core.nodes[block].commands.clone(),
+                    )),
                 }
-                ReplicaCoreAction::Finalize(block) => actions.push(ReplicaAction::Finalize(
-                    self.core.nodes[block].commands.clone(),
-                )),
             }
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

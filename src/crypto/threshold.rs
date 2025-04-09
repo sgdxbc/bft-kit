@@ -7,6 +7,8 @@ use bincode::{
     error::{DecodeError, EncodeError},
 };
 
+use crate::common::ReplicaId;
+
 // note on threshold definition
 // threshold_crypto defines threshold as the maximum number of faulty
 // participants, and combine signature with threshold + 1 partial signatures
@@ -250,6 +252,18 @@ pub fn verify(
         _ => anyhow::bail!("unmatched public key and signature types"),
     }
     Ok(())
+}
+
+pub fn givre_replica_key_shares(
+    num_replica: ReplicaId,
+    num_faulty: ReplicaId,
+) -> Vec<GivreKeyShare> {
+    givre::trusted_dealer::builder(num_replica as _)
+        .set_threshold(Some((num_replica - num_faulty) as _))
+        .generate_shares(
+            &mut <rand08::rngs::StdRng as rand08::SeedableRng>::seed_from_u64(0x117418),
+        )
+        .unwrap()
 }
 
 fn into_decode(err: impl ToString) -> DecodeError {
