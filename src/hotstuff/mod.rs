@@ -14,8 +14,9 @@ use crate::{
     crypto::{
         Digest, Sha256Hash,
         threshold::{
-            GivreCiphersuite, GivreKeyShare, GivrePublicCommitments, GivreSecretNonces,
-            PartialSigs, PublicMasterKey, Sig, verify,
+            AggregateContext, GivreAggregateContext, GivreCiphersuite, GivreKeyShare,
+            GivrePublicCommitments, GivreSecretNonces, GivreSigShare, PartialSig, PartialSigs,
+            PublicMasterKey, Sig, verify,
         },
     },
 };
@@ -179,9 +180,9 @@ impl Deref for StoredNode {
 
 #[derive(Debug)]
 enum ReplicaCoreEvent {
-    Request(Command),                           // onBeat (kind of)
-    Proposal(message::Generic, message::Block), // onReceiveProposal
-    QuorumCert(QuorumCert),                     // onReceiveVote (bottom half)
+    Request(Command),                 // onBeat (kind of)
+    Proposal(Digest, message::Block), // onReceiveProposal
+    QuorumCert(QuorumCert),           // onReceiveVote (bottom half)
 }
 
 enum ReplicaCoreAction {
@@ -293,7 +294,7 @@ impl ReplicaCore {
                 self.pool.push(request);
                 self.beat(actions)
             }
-            ReplicaCoreEvent::Proposal(generic, block) => {
+            ReplicaCoreEvent::Proposal(block_digest, block) => {
                 let justify = *self
                     .quorum_cert_index
                     .entry(block.justify.node.clone())
@@ -305,7 +306,7 @@ impl ReplicaCore {
                     });
                 let block_height = block.height;
                 let block = self.nodes.insert(StoredNode(
-                    generic.block.clone(),
+                    block_digest.clone(),
                     Node {
                         parent: self.node_index[&block.parent],
                         commands: block.commands,
@@ -313,7 +314,7 @@ impl ReplicaCore {
                         height: block_height,
                     },
                 ));
-                let replaced = self.node_index.insert(generic.block, block);
+                let replaced = self.node_index.insert(block_digest, block);
                 assert!(replaced.is_none());
                 if block_height > self.vote_height
                     && (self.extends(block, self.block_lock)
@@ -407,16 +408,22 @@ pub struct Replica {
     crypto_config: CryptoConfig,
 
     // block.sha256() of b is pending for => b
-    reordering_blocks: HashMap<Digest, Vec<(message::Generic, message::Block)>>,
-    // primary
-    proposal_votes: HashMap<Digest, PartialSigs>,
+    reordering_blocks: HashMap<Digest, Vec<(Digest, message::Block)>>,
+    nonces: HashMap<GivrePublicCommitments, GivreSecretNonces>,
+    block_signers: HashMap<Digest, Vec<(givre::SignerIndex, GivrePublicCommitments)>>,
+
+    // primary exclusive
+    proposal_scratches: HashMap<Digest, ProposalScratch>,
     // require ordered keys to ensure consistently reach out the first 2f + 1
     // replicas for signing. round robin signing could have better performance, but
     // that would be _really_ strong assumption on fast path i.e. all replicas are
     // not byzantine
     public_commitments_pool: BTreeMap<givre::SignerIndex, Vec<GivrePublicCommitments>>,
-    // all replicas
-    nonces: HashMap<GivrePublicCommitments, GivreSecretNonces>,
+}
+
+struct ProposalScratch {
+    partial_sigs: PartialSigs,
+    signers: Vec<(givre::SignerIndex, GivrePublicCommitments)>,
 }
 
 pub type ReplicaAction = crate::common::ReplicaAction<ToReplica>;
@@ -429,9 +436,10 @@ impl Replica {
             core_actions: Default::default(),
             crypto_config,
             reordering_blocks: Default::default(),
-            proposal_votes: Default::default(),
-            public_commitments_pool: Default::default(),
             nonces: Default::default(),
+            block_signers: Default::default(),
+            proposal_scratches: Default::default(),
+            public_commitments_pool: Default::default(),
         }
     }
 
@@ -494,32 +502,53 @@ impl Replica {
                     }
                 }
 
+                let replaced = self
+                    .block_signers
+                    .insert(generic.block.clone(), generic.signers);
+                assert!(replaced.is_none());
                 if !self.core.node_index.contains_key(&block.parent) {
                     self.reordering_blocks
                         .entry(block.parent.clone())
                         .or_default()
-                        .push((generic, block));
+                        .push((generic.block, block));
                     return;
                 }
-                let mut pending = vec![(generic, block)];
-                while let Some((generic, block)) = pending.pop() {
+                let mut pending = vec![(generic.block, block)];
+                while let Some((block_digest, block)) = pending.pop() {
                     if !self.core.node_index.contains_key(&block.justify.node) {
                         self.reordering_blocks
                             .entry(block.justify.node.clone())
                             .or_default()
-                            .push((generic, block));
+                            .push((block_digest, block));
                         continue;
                     }
-                    if let Some(other_pending) = self.reordering_blocks.remove(&generic.block) {
+                    if let Some(other_pending) = self.reordering_blocks.remove(&block_digest) {
                         pending.extend(other_pending);
                     }
                     self.core.handle(
-                        ReplicaCoreEvent::Proposal(generic, block),
+                        ReplicaCoreEvent::Proposal(block_digest, block),
                         &mut self.core_actions,
                     )
                 }
             }
-            ToReplica::VoteGeneric(vote_generic) => todo!(),
+            ToReplica::VoteGeneric(vote_generic) => {
+                let scratch = self.proposal_scratches.get_mut(&vote_generic.node).unwrap();
+                match scratch.partial_sigs.add_partial(
+                    vote_generic.signer_index,
+                    vote_generic.partial_sig,
+                    AggregateContext::Givre(GivreAggregateContext {
+                        key_share: &self.crypto_config.key_share,
+                        signers: &scratch.signers,
+                        message: vote_generic.node.as_ref(),
+                    }),
+                ) {
+                    Ok(None) => {}
+                    Ok(Some(sig)) => {
+                        //
+                    }
+                    Err(_) => todo!("fallback to slower signature scheme"),
+                }
+            }
             ToReplica::PublicCommitmentsSupply(index, supply) => self
                 .public_commitments_pool
                 .entry(index)
@@ -553,7 +582,9 @@ impl Replica {
                         })
                         .take(num_signer)
                         .collect::<Vec<_>>();
-                    assert!(signers.len() == num_signer); // TODO support fallback to vec scheme
+                    if signers.len() < num_signer {
+                        todo!("fallback to slower signature scheme")
+                    }
                     let generic = message::Generic {
                         block: block.sha256().into(),
                         signers,
@@ -562,12 +593,56 @@ impl Replica {
                         generic.clone(),
                         block.clone(),
                     )));
+                    self.proposal_scratches.insert(
+                        generic.block.clone(),
+                        ProposalScratch {
+                            partial_sigs: PartialSigs::Givre(Default::default()),
+                            signers: generic.signers.clone(),
+                        },
+                    );
+                    let replaced = self
+                        .block_signers
+                        .insert(generic.block.clone(), generic.signers);
+                    assert!(replaced.is_none());
                     self.core.handle(
-                        ReplicaCoreEvent::Proposal(generic, block),
+                        ReplicaCoreEvent::Proposal(generic.block, block),
                         &mut self.core_actions,
                     )
                 }
-                ReplicaCoreAction::Vote(block) => todo!(),
+                ReplicaCoreAction::Vote(block) => {
+                    let digest = self.core.nodes[block].digest();
+                    let signers = self.block_signers.remove(digest).unwrap();
+                    let Some((_, public_commitments)) = signers
+                        .iter()
+                        .find(|&&(index, _)| index == self.signer_index())
+                    else {
+                        continue;
+                    };
+                    let nonce = self.nonces.remove(public_commitments).unwrap();
+                    let signers = signers
+                        .into_iter()
+                        .map(|(index, GivrePublicCommitments(public_commitments))| {
+                            (index, public_commitments)
+                        })
+                        .collect::<Vec<_>>();
+                    let partial_sig = match givre::signing::round2::sign::<GivreCiphersuite>(
+                        &self.crypto_config.key_share,
+                        nonce,
+                        digest.as_ref(),
+                        &signers,
+                    ) {
+                        Ok(sig_share) => PartialSig::Givre(GivreSigShare(sig_share)),
+                        Err(err) => {
+                            tracing::warn!(%err, "failed to sign signature share");
+                            continue;
+                        }
+                    };
+                    let vote_generic = message::VoteGeneric {
+                        node: digest.clone(),
+                        partial_sig,
+                        signer_index: self.signer_index(),
+                    };
+                }
                 ReplicaCoreAction::Finalize(block) => actions.push(ReplicaAction::Finalize(
                     self.core.nodes[block].commands.clone(),
                 )),

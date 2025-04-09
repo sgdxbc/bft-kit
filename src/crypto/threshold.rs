@@ -101,6 +101,7 @@ pub fn sign(message: impl Into<[u8; 32]>, secret_key: &PartialSecretKey) -> Part
         PartialSecretKey::ThresholdCrypto(secret_key_share) => PartialSig::ThresholdCrypto(
             ThresholdCryptoSigShare(secret_key_share.sign(message.into()).into()),
         ),
+        // givre sign require extra inputs and not implemented here
     }
 }
 
@@ -222,7 +223,7 @@ pub fn verify(
     let message = message.into();
     match (sig, master_key) {
         (Sig::Vec(sigs), PublicMasterKey::Vec(public_keys, threshold)) => {
-            let threshold = *threshold as _;
+            let threshold = *threshold as usize;
             // deduplicate partial signatures by index
             let sigs = sigs
                 .iter()

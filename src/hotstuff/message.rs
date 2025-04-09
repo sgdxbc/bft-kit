@@ -54,7 +54,7 @@ pub struct VoteGeneric {
     pub partial_sig: PartialSig,
     // our transport interface does not provide sender id by default, so bring it by
     // ourselves
-    pub replica_id: ReplicaId,
+    pub signer_index: givre::SignerIndex,
 }
 
 impl<S: sha2::Digest> UpdateHash<S> for Block {
