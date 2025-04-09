@@ -111,6 +111,8 @@ impl Client {
 pub struct ReplicaCoreConfig {
     pub spec: Spec, // unused for now but probably useful for a (responsible) pacemaker.getLeader
     pub id: ReplicaId,
+
+    pub max_batch_size: usize,
 }
 
 // the event driven algorithm does not maintain view number anywhere (explicitly
@@ -237,6 +239,21 @@ impl ReplicaCore {
         0 // TODO
     }
 
+    // updateQCHigh
+    fn update_quorum_cert_high(
+        &mut self,
+        quorum_cert: QuorumCertKey,
+        actions: &mut ReplicaCoreActions,
+    ) {
+        if self.nodes[self.quorum_certs[quorum_cert].node].height
+            > self.nodes[self.quorum_certs[self.quorum_cert_high].node].height
+        {
+            self.quorum_cert_high = quorum_cert;
+            self.block_leaf = self.quorum_certs[quorum_cert].node;
+            self.beat(actions)
+        }
+    }
+
     fn beat(&mut self, actions: &mut ReplicaCoreActions) {
         // "Based on some application-specific heuristics (to wait until the previously
         // proposed node gets a QC, for example), the current leader invokes onBeat to
@@ -261,7 +278,7 @@ impl ReplicaCore {
     fn on_beat(&mut self, actions: &mut ReplicaCoreActions) {
         if self.config.id == self.get_leader() {
             // inlined onPropose
-            let commands = self.pool.close_batch(1); // TODO
+            let commands = self.pool.close_batch(self.config.max_batch_size);
             // ensure liveness of close loop clients: keep proposing (even empty nodes) as
             // long as there exists (nonempty) node that is not deep enough to be committed
             // the PMRoundRobinProposer seems to have similar consideration with
@@ -299,6 +316,8 @@ impl ReplicaCore {
             }
         }
     }
+
+    // TODO primary change stuff
 
     fn handle(&mut self, event: ReplicaCoreEvent, actions: &mut ReplicaCoreActions) {
         tracing::trace!(?event);
@@ -379,21 +398,6 @@ impl ReplicaCore {
             self.block_execute = block3
         }
         self.beat(actions)
-    }
-
-    // updateQCHigh
-    fn update_quorum_cert_high(
-        &mut self,
-        quorum_cert: QuorumCertKey,
-        actions: &mut ReplicaCoreActions,
-    ) {
-        if self.nodes[self.quorum_certs[quorum_cert].node].height
-            > self.nodes[self.quorum_certs[self.quorum_cert_high].node].height
-        {
-            self.quorum_cert_high = quorum_cert;
-            self.block_leaf = self.quorum_certs[quorum_cert].node;
-            self.beat(actions)
-        }
     }
 
     fn on_commit(&mut self, block: NodeKey, actions: &mut ReplicaCoreActions) {

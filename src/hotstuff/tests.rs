@@ -25,6 +25,7 @@ impl System {
                     ReplicaCoreConfig {
                         spec: spec.clone(),
                         id: i,
+                        max_batch_size: 1,
                     },
                     CryptoConfig {
                         key_share: key_shares[i as usize].clone(),
@@ -127,9 +128,157 @@ fn normal_1() {
     system.init();
     let mut actions = Vec::new();
     system.exhaust(100, &mut actions);
+
     system.request(0, Command::new(0, 1));
     system.exhaust(100, &mut actions);
     for replica_id in 0..4 {
         assert!(actions.contains(&Action::Finalize(replica_id, vec![Command::new(0, 1)])))
     }
+    assert_eq!(actions.len(), 4)
+}
+
+#[test]
+fn close_loop() {
+    let spec = Spec {
+        num_faulty: 1,
+        num_replica: 4,
+    };
+    let mut system = System::new(spec);
+    system.init();
+    let mut actions = Vec::new();
+    system.exhaust(100, &mut actions);
+
+    for seq in 1..=10 {
+        system.request(0, Command::new(0, seq));
+        for num_step in 0.. {
+            assert!(num_step < 100);
+            system.step(&mut actions);
+            if (0..4)
+                .filter(|&replica_id| {
+                    actions.contains(&Action::Finalize(replica_id, vec![Command::new(0, seq)]))
+                })
+                .count()
+                > 1
+            {
+                break;
+            }
+        }
+    }
+    let logs = replica_logs(actions, 4);
+    for replica_id in 0..4 {
+        for (i, replica_action) in logs[replica_id as usize].iter().enumerate() {
+            assert_eq!(replica_action, &Command::new(0, (i + 1) as _))
+        }
+    }
+    let num_vote = 10 * (3 + 1);
+    assert!(
+        system
+            .replicas
+            .iter()
+            .all(|replica| (num_vote - 1..=num_vote).contains(&replica.core.vote_height))
+    )
+}
+
+fn replica_logs(actions: Actions, num_replica: ReplicaId) -> Vec<Vec<Command>> {
+    let mut categories = vec![Vec::new(); num_replica as _];
+    for action in actions {
+        let Action::Finalize(replica_id, commands) = action;
+        categories[replica_id as usize].extend(commands)
+    }
+    categories
+}
+
+#[test]
+fn concurrent_clients() {
+    let spec = Spec {
+        num_faulty: 1,
+        num_replica: 4,
+    };
+    let mut system = System::new(spec);
+    system.init();
+    let mut actions = Vec::new();
+    system.exhaust(100, &mut actions);
+
+    for client_id in 0..10 {
+        system.request(0, Command::new(client_id, 1));
+    }
+    for client_id in 0..10 {
+        for num_step in 0.. {
+            if (0..4)
+                .filter(|&replica_id| {
+                    actions.contains(&Action::Finalize(
+                        replica_id,
+                        vec![Command::new(client_id, 1)],
+                    ))
+                })
+                .count()
+                > 1
+            {
+                break;
+            }
+            assert!(num_step < 100);
+            system.step(&mut actions);
+        }
+    }
+    let logs = replica_logs(actions, 4);
+    for i in 0..logs.iter().map(|log| log.len()).min().unwrap() {
+        assert!(logs.iter().skip(1).all(|log| log[i] == logs[0][i]))
+    }
+    let num_vote = 10 + 3;
+    assert!(
+        system
+            .replicas
+            .iter()
+            .all(|replica| (num_vote - 1..=num_vote).contains(&replica.core.vote_height))
+    )
+}
+
+#[test]
+fn batched() {
+    let spec = Spec {
+        num_faulty: 1,
+        num_replica: 4,
+    };
+    let mut system = System::new(spec);
+    for replica in &mut system.replicas {
+        replica.core.config.max_batch_size = 100
+    }
+    system.init();
+    let mut actions = Vec::new();
+    system.exhaust(100, &mut actions);
+
+    for client_id in 0..10 {
+        system.request(0, Command::new(client_id, 1));
+    }
+    for client_id in 0..10 {
+        for num_step in 0.. {
+            if (0..4)
+                .filter(|replica_id| {
+                    actions.iter().any(|action| {
+                        matches!(action, Action::Finalize(
+                            id,
+                            commands,
+                        ) if id == replica_id && commands.contains(&Command::new(client_id, 1)))
+                    })
+                })
+                .count()
+                > 1
+            {
+                break;
+            }
+            assert!(num_step < 100);
+            system.step(&mut actions);
+        }
+    }
+    let logs = replica_logs(actions, 4);
+    for i in 0..logs.iter().map(|log| log.len()).min().unwrap() {
+        assert!(logs.iter().skip(1).all(|log| log[i] == logs[0][i]))
+    }
+    let num_vote = 2 + 3;
+    assert!(
+        system
+            .replicas
+            .iter()
+            .all(|replica| (num_vote - 1..=num_vote).contains(&replica.core.vote_height))
+    )
 }
