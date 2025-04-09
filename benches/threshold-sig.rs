@@ -147,19 +147,19 @@ fn combine(
     for (i, partial_sig) in sigs.iter().enumerate() {
         assert!(sig.is_none());
         sig = partial_sigs
-            .add_partial(i, partial_sig.clone(), context)
+            .add_partial(i as _, partial_sig.clone(), context)
             .unwrap()
     }
     sig.unwrap()
 }
 
 fn prepare_combine_vec(
-    threshold: usize,
+    threshold: threshold::Index,
     message: [u8; 32],
 ) -> (Vec<threshold::PartialSig>, threshold::PublicMasterKey) {
     let secp = secp256k1::Secp256k1::new();
     let (sigs, public_keys) = repeat_with(secp256k1_secret_key)
-        .take(threshold)
+        .take(threshold as _)
         .map(|secret_key| {
             let sig = sign(message, &secret_key);
             (
@@ -173,15 +173,18 @@ fn prepare_combine_vec(
 }
 
 fn prepare_combine_threshold_crypto(
-    threshold: usize,
+    threshold: threshold::Index,
     message: [u8; 32],
 ) -> (Vec<threshold::PartialSig>, threshold_crypto::PublicKeySet) {
     let secret_key_set =
-        threshold_crypto::SecretKeySet::random(threshold - 1, &mut rand07::thread_rng());
+        threshold_crypto::SecretKeySet::random((threshold - 1) as _, &mut rand07::thread_rng());
     let sigs = (0..threshold)
         .map(|i| {
             threshold::PartialSig::ThresholdCrypto(ThresholdCryptoSigShare(
-                secret_key_set.secret_key_share(i).sign(message).into(),
+                secret_key_set
+                    .secret_key_share(i as usize)
+                    .sign(message)
+                    .into(),
             ))
         })
         .collect::<Vec<_>>();
@@ -190,8 +193,8 @@ fn prepare_combine_threshold_crypto(
 
 #[allow(clippy::type_complexity)]
 fn prepare_combine_givre(
-    n: u16,
-    threshold: u16,
+    n: threshold::Index,
+    threshold: threshold::Index,
     message: [u8; 32],
 ) -> (
     Vec<threshold::PartialSig>,

@@ -17,7 +17,7 @@ use bincode::{
 // targeted use case i.e. permissioned blockchain, and the threshold is set to
 // n - f as the same to a regular majority quorum size
 
-pub type Index = usize;
+pub type Index = givre::SignerIndex;
 
 #[derive(Debug, Clone)]
 // box to prevent imbalance enum size below
@@ -107,19 +107,19 @@ pub fn sign(message: impl Into<[u8; 32]>, secret_key: &PartialSecretKey) -> Part
 pub fn verify_partial(
     message: impl Into<[u8; 32]>,
     master_key: &PublicMasterKey,
-    index: usize,
+    index: Index,
     partial_sig: &PartialSig,
 ) -> anyhow::Result<()> {
     match (master_key, partial_sig) {
         (PublicMasterKey::Vec(public_keys, _), PartialSig::Vec(sig)) => {
-            super::verify(message, &public_keys[index], sig)?
+            super::verify(message, &public_keys[index as usize], sig)?
         }
         (
             PublicMasterKey::ThresholdCrypto(public_key_set),
             PartialSig::ThresholdCrypto(ThresholdCryptoSigShare(sig_share)),
         ) => {
             let valid = public_key_set
-                .public_key_share(index)
+                .public_key_share(index as usize)
                 .verify(sig_share, message.into());
             anyhow::ensure!(valid)
         }
@@ -160,7 +160,7 @@ impl PartialSigs {
                 AggregateContext::Vec(threshold),
             ) => {
                 partial_sigs.insert(index, partial_sig);
-                if partial_sigs.len() < threshold {
+                if partial_sigs.len() < threshold as usize {
                     None
                 } else {
                     Some(Sig::Vec(partial_sigs.drain().collect()))
@@ -176,7 +176,9 @@ impl PartialSigs {
                     None
                 } else {
                     let sig = public_key_set
-                        .combine_signatures(sig_shares.iter().map(|(&index, sig)| (index, sig)))
+                        .combine_signatures(
+                            sig_shares.iter().map(|(&index, sig)| (index as usize, sig)),
+                        )
                         .map_err(|err| anyhow::format_err!(err))?;
                     Some(Sig::ThresholdCrypto(ThresholdCryptoSig(sig.into())))
                 }
@@ -192,7 +194,7 @@ impl PartialSigs {
                 } else {
                     let mut signers = Vec::new();
                     for &(index, GivrePublicCommitments(public_commitments)) in context.signers {
-                        let Some(sig_share) = sig_shares.remove(&(index as usize)) else {
+                        let Some(sig_share) = sig_shares.remove(&index) else {
                             anyhow::bail!("missing signature share for index {index}")
                         };
                         signers.push((index, public_commitments, sig_share))
@@ -220,6 +222,7 @@ pub fn verify(
     let message = message.into();
     match (sig, master_key) {
         (Sig::Vec(sigs), PublicMasterKey::Vec(public_keys, threshold)) => {
+            let threshold = *threshold as _;
             // deduplicate partial signatures by index
             let sigs = sigs
                 .iter()
@@ -227,10 +230,12 @@ pub fn verify(
                 .collect::<HashMap<_, _>>();
             let count = sigs
                 .into_iter()
-                .filter(|&(index, sig)| super::verify(message, &public_keys[index], sig).is_ok())
-                .take(*threshold + 1)
+                .filter(|&(index, sig)| {
+                    super::verify(message, &public_keys[index as usize], sig).is_ok()
+                })
+                .take(threshold + 1)
                 .count();
-            anyhow::ensure!(count == *threshold)
+            anyhow::ensure!(count == threshold)
         }
         (
             Sig::ThresholdCrypto(ThresholdCryptoSig(sig)),
