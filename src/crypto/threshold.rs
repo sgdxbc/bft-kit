@@ -408,6 +408,6 @@ impl<'de, C> BorrowDecode<'de, C> for GivrePublicCommitments {
 impl Hash for GivrePublicCommitments {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.hiding_comm.hash(state);
-        self.0.binding_comm.hash(state);
+        self.0.binding_comm.hash(state)
     }
 }

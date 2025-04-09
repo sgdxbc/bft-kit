@@ -1,5 +1,6 @@
-#![allow(unused)]
 use std::collections::VecDeque;
+
+use test_log::test;
 
 use crate::crypto::threshold::givre_replica_key_shares;
 
@@ -40,6 +41,7 @@ impl System {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Action {
     Finalize(ReplicaId, Vec<Command>),
 }
@@ -50,11 +52,22 @@ impl System {
         let Some(event) = self.events.pop_front() else {
             return false;
         };
+        tracing::debug!(?event);
         let Event::SendToReplica(replica_id, message) = event;
         let mut replica_actions = Vec::new();
         self.replicas[replica_id as usize].receive(message, &mut replica_actions);
         self.effect(replica_id, replica_actions, actions);
         true
+    }
+
+    fn init(&mut self) {
+        let mut actions = Vec::new();
+        for replica_id in 0..self.replicas.len() as ReplicaId {
+            let mut replica_actions = Vec::new();
+            self.replicas[replica_id as usize].init(&mut replica_actions);
+            self.effect(replica_id, replica_actions, &mut actions);
+            assert!(actions.is_empty())
+        }
     }
 
     fn request(&mut self, replica_id: ReplicaId, command: Command) {
@@ -92,5 +105,31 @@ impl System {
                 }
             }
         }
+    }
+
+    fn exhaust(&mut self, max_num_step: u32, actions: &mut Actions) {
+        for _ in 0..max_num_step {
+            if !self.step(actions) {
+                return;
+            }
+        }
+        unreachable!()
+    }
+}
+
+#[test]
+fn normal_1() {
+    let spec = Spec {
+        num_faulty: 1,
+        num_replica: 4,
+    };
+    let mut system = System::new(spec);
+    system.init();
+    let mut actions = Vec::new();
+    system.exhaust(100, &mut actions);
+    system.request(0, Command::new(0, 1));
+    system.exhaust(100, &mut actions);
+    for replica_id in 0..4 {
+        assert!(actions.contains(&Action::Finalize(replica_id, vec![Command::new(0, 1)])))
     }
 }

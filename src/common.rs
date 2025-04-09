@@ -58,11 +58,22 @@ pub mod client {
     pub type Seq = u32;
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Command {
     pub client_id: ClientId,
     pub seq: ClientSeq,
     pub op: Vec<u8>,
+}
+
+#[cfg(test)]
+impl Command {
+    pub fn new(client_id: u32, seq: ClientSeq) -> Self {
+        Self {
+            client_id: ClientId(client_id),
+            seq,
+            op: format!("command@{client_id:x}#{seq}").into(),
+        }
+    }
 }
 
 impl<S: sha2::Digest> UpdateHash<S> for Command {

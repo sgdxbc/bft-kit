@@ -184,8 +184,9 @@ enum ReplicaCoreEvent {
     QuorumCert(message::QuorumCert),  // onReceiveVote (bottom half)
 }
 
+#[derive(Debug)]
 enum ReplicaCoreAction {
-    Propose(Node),
+    Propose(NodeKey),
     Vote(NodeKey),
     Finalize(NodeKey),
 }
@@ -279,9 +280,20 @@ impl ReplicaCore {
                     justify: self.quorum_cert_high,
                     height: self.nodes[self.block_leaf].height + 1,
                 };
-                actions.push(ReplicaCoreAction::Propose(block))
-                // update of block_leaf will happen when the corresponding Proposal event
-                // arrives back and triggers update(..) and then update_quorum_cert_high(..)
+                // calculate block hash: exact mirroring message::Block::sha256(..) but make use
+                // of managed state
+                // any better way?
+                use crate::crypto::UpdateHash;
+                use sha2::Digest;
+                let mut state = sha2::Sha256::new();
+                state.update(self.nodes[block.parent].digest());
+                (&*block.commands).update(&mut state);
+                state.update(self.nodes[self.quorum_certs[block.justify].node].digest());
+                state.update(block.height.to_le_bytes());
+                self.block_leaf = self
+                    .nodes
+                    .insert(StoredNode(state.finalize().into(), block.clone()));
+                actions.push(ReplicaCoreAction::Propose(self.block_leaf))
             }
         }
     }
@@ -416,7 +428,7 @@ pub struct Replica {
     block_signers: HashMap<Digest, Vec<(givre::SignerIndex, GivrePublicCommitments)>>,
 
     // primary exclusive
-    proposal_scratches: HashMap<Digest, ProposalScratch>,
+    quorum_cert_scratches: HashMap<Digest, QuorumCertScratch>,
     // require ordered keys to ensure consistently reach out the first 2f + 1
     // replicas for signing. round robin signing could have better performance, but
     // that would be _really_ strong assumption on fast path i.e. all replicas are
@@ -424,7 +436,7 @@ pub struct Replica {
     public_commitments_pool: BTreeMap<givre::SignerIndex, Vec<GivrePublicCommitments>>,
 }
 
-struct ProposalScratch {
+struct QuorumCertScratch {
     partial_sigs: PartialSigs,
     signers: Vec<(givre::SignerIndex, GivrePublicCommitments)>,
 }
@@ -441,7 +453,7 @@ impl Replica {
             reordering_blocks: Default::default(),
             nonces: Default::default(),
             block_signers: Default::default(),
-            proposal_scratches: Default::default(),
+            quorum_cert_scratches: Default::default(),
             public_commitments_pool: Default::default(),
         }
     }
@@ -469,7 +481,7 @@ impl Replica {
         })
         .take(self.crypto_config.num_supply_commit)
         .collect::<HashMap<_, _>>();
-        let public_commitments = self.nonces.keys().copied().collect();
+        let public_commitments = supply.keys().copied().collect();
         if self.is_primary() {
             self.public_commitments_pool
                 .insert(self.signer_index(), public_commitments);
@@ -539,7 +551,10 @@ impl Replica {
                 }
             }
             ToReplica::VoteGeneric(vote_generic) => {
-                let scratch = self.proposal_scratches.get_mut(&vote_generic.node).unwrap();
+                let scratch = self
+                    .quorum_cert_scratches
+                    .get_mut(&vote_generic.node)
+                    .unwrap();
                 let sig = match scratch.partial_sigs.add_partial(
                     vote_generic.signer_index,
                     vote_generic.partial_sig,
@@ -556,7 +571,7 @@ impl Replica {
                         todo!("fallback to slower signature scheme")
                     }
                 };
-                self.proposal_scratches.remove(&vote_generic.node);
+                self.quorum_cert_scratches.remove(&vote_generic.node);
                 let quorum_cert = message::QuorumCert {
                     node: vote_generic.node,
                     sig,
@@ -579,19 +594,21 @@ impl Replica {
 
         while !self.core_actions.is_empty() {
             for action in take(&mut self.core_actions) {
+                tracing::trace!(?action);
                 match action {
-                    ReplicaCoreAction::Propose(node) => {
+                    ReplicaCoreAction::Propose(block) => {
+                        let StoredNode(block_digest, block) = &self.core.nodes[block];
                         let justify = message::QuorumCert {
-                            node: self.core.nodes[self.core.quorum_certs[node.justify].node]
+                            node: self.core.nodes[self.core.quorum_certs[block.justify].node]
                                 .digest()
                                 .clone(),
-                            sig: self.core.quorum_certs[node.justify].sig.clone(),
+                            sig: self.core.quorum_certs[block.justify].sig.clone(),
                         };
                         let block = message::Block {
-                            parent: self.core.nodes[node.parent].digest().clone(),
-                            commands: node.commands,
+                            parent: self.core.nodes[block.parent].digest().clone(),
+                            commands: block.commands.clone(),
                             justify,
-                            height: node.height,
+                            height: block.height,
                         };
                         let num_signer = (self.core.config.spec.num_replica
                             - self.core.config.spec.num_faulty)
@@ -609,16 +626,16 @@ impl Replica {
                             todo!("fallback to slower signature scheme")
                         }
                         let generic = message::Generic {
-                            block: block.sha256().into(),
+                            block: block_digest.clone(),
                             signers,
                         };
                         actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Generic(
                             generic.clone(),
                             block.clone(),
                         )));
-                        self.proposal_scratches.insert(
+                        self.quorum_cert_scratches.insert(
                             generic.block.clone(),
-                            ProposalScratch {
+                            QuorumCertScratch {
                                 partial_sigs: PartialSigs::Givre(Default::default()),
                                 signers: generic.signers.clone(),
                             },
