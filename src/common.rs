@@ -7,6 +7,9 @@ use crate::crypto::UpdateHash;
 pub mod command_pool;
 pub use command_pool::CommandPool;
 
+#[cfg(test)]
+pub mod test; // no test inside, common infrastructure for writing tests
+
 // pub type ClientId = u32;
 pub use client::Id as ClientId;
 pub use client::Seq as ClientSeq;

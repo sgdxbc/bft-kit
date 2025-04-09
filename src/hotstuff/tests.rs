@@ -1,20 +1,13 @@
-use std::collections::VecDeque;
-
 use test_log::test;
 
-use crate::crypto::threshold::givre_replica_key_shares;
+use crate::{
+    common::test::{AbstractReplica, Action, Actions, Effect, Event},
+    crypto::threshold::givre_replica_key_shares,
+};
 
 use super::*;
 
-struct System {
-    replicas: Vec<Replica>,
-    events: VecDeque<Event>,
-}
-
-#[derive(Debug)]
-enum Event {
-    SendToReplica(ReplicaId, ToReplica),
-}
+type System = crate::common::test::System<Replica, ToReplica>;
 
 impl System {
     fn new(spec: Spec) -> Self {
@@ -42,79 +35,40 @@ impl System {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Action {
-    Finalize(ReplicaId, Vec<Command>),
+impl AbstractReplica for Replica {
+    type Action = ReplicaAction;
+    type Message = ToReplica;
+
+    fn init(&mut self, actions: &mut Vec<Self::Action>) {
+        Replica::init(self, actions)
+    }
+
+    fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>) {
+        self.receive(ToReplica::Request(command), actions)
+    }
+
+    fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>) {
+        Self::receive(self, message, actions)
+    }
 }
-type Actions = Vec<Action>;
 
-impl System {
-    fn step(&mut self, actions: &mut Actions) -> bool {
-        let Some(event) = self.events.pop_front() else {
-            return false;
-        };
-        tracing::debug!(?event);
-        let Event::SendToReplica(replica_id, message) = event;
-        let mut replica_actions = Vec::new();
-        self.replicas[replica_id as usize].receive(message, &mut replica_actions);
-        self.effect(replica_id, replica_actions, actions);
-        true
-    }
-
-    fn init(&mut self) {
-        let mut actions = Vec::new();
-        for replica_id in 0..self.replicas.len() as ReplicaId {
-            let mut replica_actions = Vec::new();
-            self.replicas[replica_id as usize].init(&mut replica_actions);
-            self.effect(replica_id, replica_actions, &mut actions);
-            assert!(actions.is_empty())
-        }
-    }
-
-    fn request(&mut self, replica_id: ReplicaId, command: Command) {
-        let mut replica_actions = Vec::new();
-        self.replicas[replica_id as usize]
-            .receive(ToReplica::Request(command), &mut replica_actions);
-        let mut actions = Vec::new();
-        self.effect(replica_id, replica_actions, &mut actions);
-        assert!(actions.is_empty())
-    }
-
-    fn effect(
-        &mut self,
-        replica_id: ReplicaId,
-        mut replica_actions: ReplicaActions,
-        actions: &mut Actions,
-    ) {
-        while !replica_actions.is_empty() {
-            for action in take(&mut replica_actions) {
-                match action {
-                    ReplicaAction::SendToReplica(replica_id, message) => self
-                        .events
-                        .push_back(Event::SendToReplica(replica_id, message)),
-                    ReplicaAction::SendToAllReplicas(message) => {
-                        for id in 0..self.replicas.len() as ReplicaId {
-                            if id != replica_id {
-                                self.events
-                                    .push_back(Event::SendToReplica(id, message.clone()))
-                            }
-                        }
-                    }
-                    ReplicaAction::Finalize(commands) => {
-                        actions.push(Action::Finalize(replica_id, commands))
+impl Effect<System> for ReplicaAction {
+    fn effect(self, replica_id: ReplicaId, system: &mut System, actions: &mut Actions) {
+        match self {
+            Self::SendToReplica(replica_id, message) => system
+                .events
+                .push_back(Event::SendToReplica(replica_id, message)),
+            Self::SendToAllReplicas(message) => {
+                for id in 0..system.replicas.len() as ReplicaId {
+                    if id != replica_id {
+                        system
+                            .events
+                            .push_back(Event::SendToReplica(id, message.clone()))
                     }
                 }
             }
+            Self::Finalize(commands) => actions.push(Action::Finalize(replica_id, commands)),
         }
-    }
-
-    fn exhaust(&mut self, max_num_step: u32, actions: &mut Actions) {
-        for _ in 0..max_num_step {
-            if !self.step(actions) {
-                return;
-            }
-        }
-        unreachable!()
     }
 }
 
@@ -125,16 +79,7 @@ fn normal_1() {
         num_replica: 4,
     };
     let mut system = System::new(spec);
-    system.init();
-    let mut actions = Vec::new();
-    system.exhaust(100, &mut actions);
-
-    system.request(0, Command::new(0, 1));
-    system.exhaust(100, &mut actions);
-    for replica_id in 0..4 {
-        assert!(actions.contains(&Action::Finalize(replica_id, vec![Command::new(0, 1)])))
-    }
-    assert_eq!(actions.len(), 4)
+    System::normal_1(&mut system)
 }
 
 #[test]
@@ -144,32 +89,7 @@ fn close_loop() {
         num_replica: 4,
     };
     let mut system = System::new(spec);
-    system.init();
-    let mut actions = Vec::new();
-    system.exhaust(100, &mut actions);
-
-    for seq in 1..=10 {
-        system.request(0, Command::new(0, seq));
-        for num_step in 0.. {
-            assert!(num_step < 100);
-            system.step(&mut actions);
-            if (0..4)
-                .filter(|&replica_id| {
-                    actions.contains(&Action::Finalize(replica_id, vec![Command::new(0, seq)]))
-                })
-                .count()
-                > 1
-            {
-                break;
-            }
-        }
-    }
-    let logs = replica_logs(actions, 4);
-    for replica_id in 0..4 {
-        for (i, replica_action) in logs[replica_id as usize].iter().enumerate() {
-            assert_eq!(replica_action, &Command::new(0, (i + 1) as _))
-        }
-    }
+    System::close_loop(&mut system, 10, 1 + 1);
     let num_vote = 10 * (3 + 1);
     assert!(
         system
@@ -179,15 +99,6 @@ fn close_loop() {
     )
 }
 
-fn replica_logs(actions: Actions, num_replica: ReplicaId) -> Vec<Vec<Command>> {
-    let mut categories = vec![Vec::new(); num_replica as _];
-    for action in actions {
-        let Action::Finalize(replica_id, commands) = action;
-        categories[replica_id as usize].extend(commands)
-    }
-    categories
-}
-
 #[test]
 fn concurrent_clients() {
     let spec = Spec {
@@ -195,35 +106,7 @@ fn concurrent_clients() {
         num_replica: 4,
     };
     let mut system = System::new(spec);
-    system.init();
-    let mut actions = Vec::new();
-    system.exhaust(100, &mut actions);
-
-    for client_id in 0..10 {
-        system.request(0, Command::new(client_id, 1));
-    }
-    for client_id in 0..10 {
-        for num_step in 0.. {
-            if (0..4)
-                .filter(|&replica_id| {
-                    actions.contains(&Action::Finalize(
-                        replica_id,
-                        vec![Command::new(client_id, 1)],
-                    ))
-                })
-                .count()
-                > 1
-            {
-                break;
-            }
-            assert!(num_step < 100);
-            system.step(&mut actions);
-        }
-    }
-    let logs = replica_logs(actions, 4);
-    for i in 0..logs.iter().map(|log| log.len()).min().unwrap() {
-        assert!(logs.iter().skip(1).all(|log| log[i] == logs[0][i]))
-    }
+    System::concurrent_clients(&mut system, 10, 1 + 1);
     let num_vote = 10 + 3;
     assert!(
         system
@@ -243,37 +126,7 @@ fn batched() {
     for replica in &mut system.replicas {
         replica.core.config.max_batch_size = 100
     }
-    system.init();
-    let mut actions = Vec::new();
-    system.exhaust(100, &mut actions);
-
-    for client_id in 0..10 {
-        system.request(0, Command::new(client_id, 1));
-    }
-    for client_id in 0..10 {
-        for num_step in 0.. {
-            if (0..4)
-                .filter(|replica_id| {
-                    actions.iter().any(|action| {
-                        matches!(action, Action::Finalize(
-                            id,
-                            commands,
-                        ) if id == replica_id && commands.contains(&Command::new(client_id, 1)))
-                    })
-                })
-                .count()
-                > 1
-            {
-                break;
-            }
-            assert!(num_step < 100);
-            system.step(&mut actions);
-        }
-    }
-    let logs = replica_logs(actions, 4);
-    for i in 0..logs.iter().map(|log| log.len()).min().unwrap() {
-        assert!(logs.iter().skip(1).all(|log| log[i] == logs[0][i]))
-    }
+    System::concurrent_clients(&mut system, 10, 1 + 1);
     let num_vote = 2 + 3;
     assert!(
         system
