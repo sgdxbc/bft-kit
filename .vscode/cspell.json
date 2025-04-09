@@ -15,6 +15,7 @@
         "Niko",
         "pbft",
         "permissioned",
+        "permissionless",
         "Pkcs8",
         "pkill",
         "proptest",
@@ -25,6 +26,7 @@
         "secp",
         "seqs",
         "sidenote",
+        "sidenotes",
         "specpaxos"
     ],
     "ignoreWords": [],

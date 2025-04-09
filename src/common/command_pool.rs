@@ -1,6 +1,18 @@
 use super::{ClientId, ClientSeq, Command};
 
 // "mempool" in cryptocurrency term
+// assist (primary) replica to propose blocks with rational commands
+// note that command pool is not aware of protocol details and may return
+// duplicated commands during primary change (on different primaries), so the
+// replicated services still need to bring their own solutions for at most once
+// semantic, but simply record the highest executed sequence numbers of each
+// client should be sufficient
+// both variants of command pool preserve the ordering. if a `command` is
+// `push`ed later than the other one, it will not be returned by `close_batch`
+// earlier. they also ensure idempotent: if a command is `push`ed or `commit`ed,
+// `push` it again will return false and it will not be returned by
+// `close_batch` one more time for that. the differences between the two
+// variants are noted below
 pub enum CommandPool {
     CloseLoop(close_loop::CommandPool),
     OpenLoop(open_loop::CommandPool),
@@ -37,50 +49,63 @@ impl CommandPool {
     }
 }
 
-// unlike close loop pool, the open loop pool does _not_ guarantee idempotent: a
-// `push` with a command that is previously returned from `close_batch` will be
-// pending again, and will later be returned by `close_batch` again
-// this limitation is to prevent the pool to record for ever growing submitted
-// requests, since we cannot compress the recording with sequence number as the
-// close loop pool
-// nevertheless, the idempotent is guaranteed before a command is submitted i.e.
-// returned by `close_batch`. and nevertheless, we don't expect open loop
-// clients to resend their requests in practice
-mod open_loop {
-    use std::collections::HashSet;
+// unlike close loop pool, the open loop pool does _not_ guarantee liveness: a
+// `push`ed command is not guaranteed to be returned by `close_batch` even if it
+// is later re`push`ed. this is expected by open loop clients as they simply
+// move on to new requests regardless whether the old ones are replied
+pub mod open_loop {
+    use std::collections::HashMap;
+
+    use crate::common::ClientSeq;
 
     use super::{ClientId, Command};
 
     #[derive(Debug, Default)]
     pub struct CommandPool {
         pending_buf: Vec<Command>,
-        client_pending_offsets: HashSet<ClientId>,
+        client_seqs: HashMap<ClientId, ClientSeq>,
     }
 
     impl CommandPool {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
         pub fn push(&mut self, command: Command) -> bool {
-            assert_eq!(command.seq, 1);
-            if self.client_pending_offsets.insert(command.client_id) {
-                self.pending_buf.push(command);
-                true
-            } else {
-                false
+            if matches!(self.client_seqs.get(&command.client_id), Some(&seq) if seq >= command.seq)
+            {
+                return false;
             }
+            self.client_seqs.insert(command.client_id, command.seq);
+            self.pending_buf.push(command);
+            true
         }
 
         pub fn close_batch(&mut self, max_batch_size: usize) -> Option<Vec<Command>> {
             if self.pending_buf.is_empty() {
                 None
             } else {
-                self.client_pending_offsets.clear();
                 let num_discarded = self.pending_buf.len().max(max_batch_size) - max_batch_size;
                 Some(self.pending_buf.drain(..).skip(num_discarded).collect())
             }
         }
+
+        pub fn commit(&mut self, command: &Command) {
+            if matches!(self.client_seqs.get(&command.client_id), Some(&seq) if seq >= command.seq)
+            {
+                return;
+            }
+            self.client_seqs.insert(command.client_id, command.seq);
+        }
     }
 }
 
-mod close_loop {
+// a close loop pool guarantees liveness mentioned above. combining with the
+// common ordering property this becomes fairness. this is critical for the tail
+// latency. at the same time, it assumes causal behavior of close loop clients:
+// `push` a command of the same client with higher sequence number happens after
+// all lower sequence numbers have been committed by the client
+pub mod close_loop {
     use std::{collections::HashMap, mem::swap};
 
     use super::{ClientId, ClientSeq, Command};
@@ -94,8 +119,7 @@ mod close_loop {
     }
 
     impl CommandPool {
-        #[cfg(test)]
-        fn new() -> Self {
+        pub fn new() -> Self {
             Self::default()
         }
 
@@ -113,8 +137,9 @@ mod close_loop {
                 if command.seq > pending_command.seq {
                     // pending command has been committed by other replicas; we are out of sync with
                     // majority's view
-                    // in place replace is not completely "fair", but it is simple and we only need
-                    // to ensure basic fairness i.e. client liveness
+                    // in place replace defeats the ordering (and hence the fairness) a little bit,
+                    // but it is simple and the damage is strictly limited by the fact that each
+                    // close loop client has at most one active command
                     *pending_command = command;
                     true
                 } else {

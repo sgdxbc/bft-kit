@@ -79,6 +79,10 @@ pub type ReplicaId = u8;
 pub enum ReplicaAction<M> {
     SendToReplica(ReplicaId, M),
     SendToAllReplicas(M), // except loopback
+    // the commands are ready to be executed by the replicated service
+    // commonly referred as "commit", but the term commit has been overloaded by
+    // protocols such as PBFT as "start the commit phase", so following the
+    // permissionless convention and saying the commands "reach the finality"
     Finalize(Vec<Command>),
 }
 

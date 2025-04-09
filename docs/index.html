@@ -10,6 +10,7 @@
 
 <!-- latex.css's default max-width is a bit too narrow, opt to Jekyll's minima choice -->
 <body class="libertinus", style="max-width: calc(800px - (30px * 2));">
+    <div id="placeholder">Rendering markdown</div>
     <div id="content" style="display: none;">
 # Cowsay's BFT Testbed
 $$BFT\ Evaluations\ Made\ Simple$$
@@ -34,6 +35,8 @@ Ergonomics for rapid development and evaluation iteration. Include useful buildi
 Thorough and consistent logging. Annotate on all slow path entrances with `WARN` logs. All fast path logs have `TRACE` level.
 
 Network transport with QUIC. The testbed provides out of the box server certification by embedding a self-signed private key (and its certificate) into compiled artifacts.<span class="sidenote">The private key is stored (deliberately) in clear text at `src/crypto/cert/key_pair.pem`. Do not use it in production (like everything else in the codebase). If you would like to use another private key, run `rotate-cert` example in project root folder to override it.</span>
+
+(On mobile devices, click the numbered superscripts to toggle the sidenotes.)
 
 **Technology Stack.** Build with the greatest from the ecosystem. The testbed uses `tokio` for IO transport and timers, `quinn` for QUIC network layer, `bincode` for serialization/deserialization, `sha2` and `secp256k1` (`threshold_crypto` and `givre`) for hashing and (threshold) digital signatures, `tracing` and `tracing-subscriber` for logging, and `hdrhistogram` for metrics statistics.
 
@@ -76,6 +79,8 @@ to shutdown current running replicas.
 
 ## Design Practices
 
+If you only want to experiment with this codebase this section will not be useful. Keep reading if you wondering "why the hell he writes the codebase in such a way".<span class="sidenote">The short (but annoying) answer is: [all attempts to write it in alternative forms](https://github.com/neatsys-failures) didn't end satisfying.
+
 **Abstract over receiver actions instead of runtime context, or [sans I/O] (that is specialized to higher level protocols).** In a codebase that consists of protocol state machines and the "outside world" e.g. network transport, simulated event queue, etc, it is tempting to let receiver (i.e. protocol state machines) and runtime context to hold reference to each other. Runtime calls into receivers for processing arriving messages, and receivers call runtime context in the middle of processing for making any *effect*, mostly send messages and set timers. The projects following this practice include the good old [specpaxos] (replicating whom became my starting point from long time ago), and [Demikernel].
 
 [sans I/O]: https://sans-io.readthedocs.io/
@@ -84,9 +89,9 @@ to shutdown current running replicas.
 
 However, this is not the optimal solution at least for *simplicity*. In particular of Rust, cyclic (mutable) references between receivers and runtime cannot be elegantly expressed. If we don't want to involve `dyn`<span class="sidenote">Not elaborate on inconveniences caused by it for brevity, but Niko has [a series of blogs](https://smallcultfollowing.com/babysteps/series/dyn-async-traits/) that is kind of on them.</span>, the receiver and runtime types will lock into each other through generic parameters. The root cause of these troubles is to interleave code of protocol logic and calling runtime context methods.
 
-Sans I/O has been the preferred practice to implement protocol recently. Different from its original proposed setup where protocols interact with outside world with receiving and sending binary buffers, in this testbed we would like to design a rather higher level interface e.g. for better testing ergonomics. The receiving buffer is replaced by calling into two methods `receive_message` and `tick`, and the sending buffer is replaced by an "action" buffer where actions are like "send a message to each one of these replicas", etc.
+Sans I/O has been the preferred practice to implement protocol recently. Different from its original proposed setup where protocols interact with outside world with receiving and sending binary buffers, in this testbed we would like to design a rather higher level interface e.g. for better testing ergonomics. The receiving buffer is replaced by calling into two methods `receive_message` and `tick`, and the sending buffer is replaced by an "action" buffer where actions are like "send a message to each one of these replicas", etc.<span class="sidenote">Alternatively, `tick` could be an active `SetTimer` action, but with that I was struggling with designing a proper abstraction for canceling timers.</span>
 
-In the PBFT case it may looks like simply applying command design pattern to realize *inversion of control*. Other protocols generalize the idea with more customized actions.
+The `common::ReplicaAction` is an enumeration of common actions of BFT replicas. It may looks like simply applying command design pattern to materialize the calls to runtimes and realize *inversion of control*. However, note that the `SendTo` and `Finalize` will probably be "called" on different components: network transport and the service state machine driven by order commands. The enumeration is an aggregation of replica's *intents*, not some outside component's *capabilities*.
 
 The downside of this approach is the mandatory copying for the message sending out, comparing to the runtime context approach where protocols can pass to the context the reference to some data they own. The copying should not be a heavy hitter of performance in most expected cases, and even if we implement some protocols dealing with bulk data in the future, swallow copy achieved by e.g. utilizing `bytes` is straightforward. On the other hand, the runtime usually cannot finish sending messages in place, such as the simulated runtime and the asynchronous runtime (and we probably don't want to color our protocols with `async`), then a copying becomes unavoidable.
 
@@ -96,7 +101,7 @@ The downside of this approach is the mandatory copying for the message sending o
 
 The protocol core should be decoupled from message passing. It does not touch the wire message format directly. Instead, it passes its *intents* to the wrapping "protocol", which deals with assembling/disassembling wire messages, translate *core actions* into protocol actions and received messages into *core events*.
 
-The goal is not to isolate the IO complexity from the protocol cores: sans I/O practice already nailed it. The goal of this disaggregation is to further isolate the *imperfect network condition* out of the core protocol logic. From the protocol core's perspective, there's no lost message, even neither slow one: whatever core event it receives can progress it in some sense. This enables very concise protocol cores, usually can fit into single (relatively lengthy) methods like `pbft::ReplicaCore::handle(..)` (close to 100 lines at the time of writing). These cores are easy to reason about the correctness and can match the paper text as much as possible.
+The goal is not to isolate the IO complexity from the protocol cores: sans I/O practice already nailed it. The goal of this disaggregation is to further isolate the *imperfect network condition* out of the core protocol logic. From the protocol core's perspective, there's no lost message, even neither slow/reordered one: the core events it receives are always about things it is currently interested, and every issued core action will always effect. This enables very concise protocol cores, usually can fit into single (relatively lengthy) methods like `pbft::ReplicaCore::handle(..)` (close to 100 lines at the time of writing). These cores are easy to reason about the correctness and can match the paper text as much as possible.
 
 Besides network asynchronous, protocol cores can also opt out of cryptographs and certain detailed message flows. The most significant case would be collecting quorum certificates. To do so, protocol core simply produces a single "now watch for a set of particular matching messages" core action, and handle a single "here you are the messages" core event afterward. Actually, the initial motivation of applying this practice is when implementing the collection of quorum certificates with threshold signatures in HotStuff. As it turns out, the state of the art threshold signature protocols (not algorithms yet!) requires one additional "sign request" broadcast before the (partial) signing can conduct. This is a technical detail that is completely unrelated to how HotStuff works, but it requires to modify the message format, affect how the messages are produced and consumed, and will sneak into all around the protocol code if without the disaggregation. However, we can keep it out of the protocol core with a clear separation.
 
@@ -132,6 +137,7 @@ There's never "one code fits all". When the code does not fit, write (seemingly 
             const content = document.querySelector('#content');
             content.innerHTML = marked.parse(content.innerHTML);
             content.style.display = 'inherit';
+            document.querySelector('#placeholder').style.display = 'none';
         });
     </script>
 </body>
