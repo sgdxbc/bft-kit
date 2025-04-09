@@ -112,7 +112,7 @@ Disaggregation is only for isolating the engineering details, not to make indepe
 
 Do not attempt to write generic code in its first instantiation. It probably will not fit (or only awkwardly fit) into the following use sites.
 
-Furthermore, this practice leads to code modules that can be more easily used. On the opposite, the "extremely composable" approach, which only write orthogonal atomic snippets and construct the final binaries by accumulating tons of them, may result in amazing code, but the code will also be really painful to develop and iterate. I wrote a [blog] about it.
+Furthermore, this practice leads to code modules that can be more easily used. On the opposite, the "extremely composable" approach, which only write orthogonal atomic snippets and construct the final binaries by accumulating tons of them, may result in amazing code<span class="sidenote">If you wonder how it would looks like, [here](https://github.com/neatsys/neatworks/blob/augustus/src/pbft/replica.rs) is a PBFT replica I have written.</span>, but the code will also be really painful to develop and iterate. I wrote a [blog] about it.
 
 [blog]: https://zhuanlan.zhihu.com/p/690959110
 

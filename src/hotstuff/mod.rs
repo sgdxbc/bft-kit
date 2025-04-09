@@ -182,7 +182,7 @@ impl Deref for StoredNode {
 enum ReplicaCoreEvent {
     Request(Command),                 // onBeat (kind of)
     Proposal(Digest, message::Block), // onReceiveProposal
-    QuorumCert(QuorumCert),           // onReceiveVote (bottom half)
+    QuorumCert(message::QuorumCert),  // onReceiveVote (bottom half)
 }
 
 enum ReplicaCoreAction {
@@ -327,7 +327,10 @@ impl ReplicaCore {
                 self.update(block, actions)
             }
             ReplicaCoreEvent::QuorumCert(quorum_cert) => {
-                let quorum_cert = self.quorum_certs.insert(quorum_cert);
+                let quorum_cert = self.quorum_certs.insert(QuorumCert {
+                    node: self.node_index[&quorum_cert.node],
+                    sig: quorum_cert.sig,
+                });
                 self.update_quorum_cert_high(quorum_cert, actions)
             }
         }
@@ -399,6 +402,7 @@ pub enum ToReplica {
 pub struct CryptoConfig {
     pub key_share: GivreKeyShare,
     pub num_supply_commit: usize,
+    pub num_max_refill: usize,
 }
 
 pub struct Replica {
@@ -452,17 +456,20 @@ impl Replica {
     }
 
     pub fn init(&mut self, actions: &mut ReplicaActions) {
-        self.nonces.extend(
-            repeat_with(|| {
-                let (secret_nones, public_commitments) =
-                    givre::signing::round1::commit::<GivreCiphersuite>(
-                        &mut rand08::thread_rng(),
-                        &self.crypto_config.key_share,
-                    );
-                (GivrePublicCommitments(public_commitments), secret_nones)
-            })
-            .take(self.crypto_config.num_supply_commit),
-        );
+        self.refill_nonces(actions)
+    }
+
+    fn refill_nonces(&mut self, actions: &mut ReplicaActions) {
+        let supply = repeat_with(|| {
+            let (secret_nones, public_commitments) =
+                givre::signing::round1::commit::<GivreCiphersuite>(
+                    &mut rand08::thread_rng(),
+                    &self.crypto_config.key_share,
+                );
+            (GivrePublicCommitments(public_commitments), secret_nones)
+        })
+        .take(self.crypto_config.num_supply_commit)
+        .collect::<HashMap<_, _>>();
         let public_commitments = self.nonces.keys().copied().collect();
         if self.is_primary() {
             self.public_commitments_pool
@@ -473,6 +480,7 @@ impl Replica {
                 ToReplica::PublicCommitmentsSupply(self.signer_index(), public_commitments),
             ))
         }
+        self.nonces.extend(supply)
     }
 
     pub fn receive(&mut self, message: ToReplica, actions: &mut ReplicaActions) {
@@ -533,7 +541,7 @@ impl Replica {
             }
             ToReplica::VoteGeneric(vote_generic) => {
                 let scratch = self.proposal_scratches.get_mut(&vote_generic.node).unwrap();
-                match scratch.partial_sigs.add_partial(
+                let sig = match scratch.partial_sigs.add_partial(
                     vote_generic.signer_index,
                     vote_generic.partial_sig,
                     AggregateContext::Givre(GivreAggregateContext {
@@ -542,12 +550,26 @@ impl Replica {
                         message: vote_generic.node.as_ref(),
                     }),
                 ) {
-                    Ok(None) => {}
-                    Ok(Some(sig)) => {
-                        //
+                    Ok(None) => return,
+                    Ok(Some(sig)) => sig,
+                    Err(err) => {
+                        tracing::warn!(%err, "fail to aggregate signature");
+                        todo!("fallback to slower signature scheme")
                     }
-                    Err(_) => todo!("fallback to slower signature scheme"),
+                };
+                self.proposal_scratches.remove(&vote_generic.node);
+                let quorum_cert = message::QuorumCert {
+                    node: vote_generic.node,
+                    sig,
+                };
+                if !self.core.node_index.contains_key(&quorum_cert.node) {
+                    // probably never happen without primary change
+                    todo!("fetch missing justified node")
                 }
+                self.core.handle(
+                    ReplicaCoreEvent::QuorumCert(quorum_cert),
+                    &mut self.core_actions,
+                )
             }
             ToReplica::PublicCommitmentsSupply(index, supply) => self
                 .public_commitments_pool
@@ -642,6 +664,13 @@ impl Replica {
                         partial_sig,
                         signer_index: self.signer_index(),
                     };
+                    actions.push(ReplicaAction::SendToReplica(
+                        self.core.get_leader(),
+                        ToReplica::VoteGeneric(vote_generic),
+                    ));
+                    if self.nonces.len() < self.crypto_config.num_max_refill {
+                        self.refill_nonces(actions)
+                    }
                 }
                 ReplicaCoreAction::Finalize(block) => actions.push(ReplicaAction::Finalize(
                     self.core.nodes[block].commands.clone(),
