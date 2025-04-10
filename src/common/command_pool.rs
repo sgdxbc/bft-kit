@@ -9,10 +9,14 @@ use super::{ClientId, ClientSeq, Command};
 // client should be sufficient
 // both variants of command pool preserve the ordering. if a `command` is
 // `push`ed later than the other one, it will not be returned by `close_batch`
-// earlier. they also ensure idempotent: if a command is `push`ed or `commit`ed,
-// `push` it again will return false and it will not be returned by
-// `close_batch` one more time for that. the differences between the two
-// variants are noted below
+// earlier
+// they also ensure idempotent: if a command is `push`ed or `commit`ed, `push`
+// it again will return false and it will not be returned by `close_batch` one
+// more time for that
+// finally, they are also bounded. the maximum size of open loop pool is MAX_LEN
+// while the maximum size of close loop pool is the number of concurrent clients
+// as it precisely keeps at most one command per client
+// the difference of the pools is noted below
 pub enum CommandPool {
     CloseLoop(close_loop::CommandPool),
     OpenLoop(open_loop::CommandPool),
@@ -94,13 +98,11 @@ pub mod open_loop {
             if self.pending_buf.is_empty() {
                 None
             } else {
+                // it seems a bit wasteful to drop all commands unconditionally, but as the
+                // sending rate increases, replica can receive a batch worth of commands during
+                // a batch interval eventually
                 let num_skipped = self.pending_buf.len().max(max_batch_size) - max_batch_size;
-                Some(
-                    self.pending_buf
-                        .split_off(num_skipped)
-                        .into_iter()
-                        .collect(),
-                )
+                Some(self.pending_buf.drain(..).skip(num_skipped).collect())
             }
         }
 
@@ -111,7 +113,8 @@ pub mod open_loop {
             // the fact that the replicated service will not respect any future committed
             // commands from the same client with lower sequence numbers
             // however, assuming the replica can receive commands for all the time, it's
-            // highly likely that newer commands
+            // highly likely that those previous commands are evicted (from the future
+            // batches) by the freshly received ones
         }
     }
 }
