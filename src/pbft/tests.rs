@@ -1,186 +1,63 @@
-use std::collections::VecDeque;
+use std::iter::{once, repeat};
 
 use test_log::test;
 
+use crate::common::testing::{AbstractReplica, Action, Actions, Effect, Event, is_finalized};
+
 use super::*;
 
-struct System {
-    clients: Vec<Client>,
-    servers: Vec<(Replica, Service)>,
-    events: VecDeque<Event>,
-}
-
-type ClientId = u32;
-const _: () = assert!(size_of::<ClientId>() == size_of::<crate::common::ClientId>());
-
-struct Service {
-    replies: HashMap<crate::common::ClientId, message::Reply>,
-}
-
-enum ServiceAction {
-    Nop,
-    Submit(Command),
-    SendToClient(ClientId, message::Reply),
-}
-
-impl Service {
-    fn receive(&self, command: Command) -> ServiceAction {
-        match self.replies.get(&command.client_id) {
-            Some(reply) if reply.seq > command.seq => ServiceAction::Nop,
-            Some(reply) if reply.seq == command.seq => {
-                ServiceAction::SendToClient(command.client_id.0, reply.clone())
-            }
-            _ => ServiceAction::Submit(command),
-        }
-    }
-
-    fn commit(&mut self, command: Command, replica: &Replica) -> ServiceAction {
-        let result = command.op; // echo back
-        let reply = message::Reply {
-            seq: command.seq,
-            view_num: replica.core.view_num,
-            result,
-            replica_id: replica.core.config.id,
-        };
-        let replaced = self.replies.insert(command.client_id, reply.clone());
-        assert!(replaced.map(|reply| reply.seq) < Some(command.seq)); // None < Some(..)
-        ServiceAction::SendToClient(command.client_id.0, reply)
-    }
-}
-
-#[derive(Debug)]
-enum Event {
-    SendToClient(ClientId, message::Reply),
-    SendToReplica(ReplicaId, ToReplica),
-}
-
-#[derive(Debug)]
-enum Step {
-    ServerProgress,
-    ClientProgress,
-    ClientReturn(ClientId, Vec<u8>),
-}
+type System = crate::common::testing::System<Replica, ToReplica>;
 
 impl System {
-    fn new(spec: Spec, num_client: u32) -> Self {
-        let clients = (0..num_client)
-            .map(|i| {
-                let config = ClientConfig {
-                    spec: spec.clone(),
-                    id: ClientId(i),
-                };
-                Client::new(config)
-            })
-            .collect();
-        let servers = (0..spec.num_replica)
+    fn new(spec: Spec) -> Self {
+        let replicas = (0..spec.num_replica)
             .map(|i| {
                 let config = ReplicaCoreConfig::new_basic(spec.clone(), i);
-                (
-                    Replica::new(config),
-                    Service {
-                        replies: Default::default(),
-                    },
-                )
+                Replica::new(config)
             })
             .collect();
         Self {
-            clients,
-            servers,
+            replicas,
             events: Default::default(),
         }
     }
+}
 
-    fn step(&mut self) -> Option<Step> {
-        let result = 'result: {
-            let event = self.events.pop_front();
-            tracing::debug!(?event);
-            match event? {
-                Event::SendToClient(client_id, reply) => {
-                    let action = self.clients[client_id as usize].receive(reply);
-                    self.handle_client_action(client_id, action)
-                }
-                Event::SendToReplica(replica_id, mut message) => {
-                    let (replica, service) = &mut self.servers[replica_id as usize];
-                    if let ToReplica::Request(command) = message {
-                        match service.receive(command) {
-                            ServiceAction::Nop => break 'result Step::ServerProgress,
-                            ServiceAction::SendToClient(client_id, reply) => {
-                                self.events.push_back(Event::SendToClient(client_id, reply));
-                                break 'result Step::ServerProgress;
-                            }
-                            ServiceAction::Submit(command) => message = ToReplica::Request(command),
-                        }
-                    }
-                    let mut actions = Vec::new();
-                    replica.receive(message, &mut actions);
-                    for action in actions {
-                        self.handle_replica_action(replica_id, action)
-                    }
-                    Step::ServerProgress
-                }
+impl AbstractReplica for Replica {
+    type Action = ReplicaAction;
+    type Message = ToReplica;
+
+    fn init(&mut self, _actions: &mut Vec<Self::Action>) {}
+
+    fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>) {
+        self.receive(ToReplica::Request(command), actions)
+    }
+
+    fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>) {
+        Replica::receive(self, message, actions)
+    }
+}
+
+impl Effect<System> for ReplicaAction {
+    fn effect(self, replica_id: ReplicaId, system: &mut System, actions: &mut Actions) {
+        tracing::debug!(?self);
+        match self {
+            ReplicaAction::SendToReplica(id, message) => {
+                system.events.push_back(Event::SendToReplica(id, message))
             }
-        };
-        Some(result)
-    }
-
-    fn handle_client_action(&mut self, client_id: ClientId, client_action: ClientAction) -> Step {
-        match client_action {
-            ClientAction::Nop => {}
-            ClientAction::Return(result) => return Step::ClientReturn(client_id, result),
-            ClientAction::SendToReplica(id, message) => self.send_to_replica(id, message),
-            ClientAction::SendToAllReplicas(message) => self.send_to_all_replica(message, None),
-        }
-        Step::ClientProgress
-    }
-
-    fn handle_replica_action(&mut self, replica_id: ReplicaId, replica_action: ReplicaAction) {
-        tracing::debug!(?replica_action);
-        match replica_action {
-            ReplicaAction::SendToReplica(id, message) => self.send_to_replica(id, message),
             ReplicaAction::SendToAllReplicas(message) => {
-                self.send_to_all_replica(message, Some(replica_id))
+                for id in 0..system.num_replica() {
+                    if id != replica_id {
+                        system
+                            .events
+                            .push_back(Event::SendToReplica(id, message.clone()))
+                    }
+                }
             }
             ReplicaAction::Finalize(commands) => {
-                let (replica, service) = &mut self.servers[replica_id as usize];
-                for command in commands {
-                    match service.commit(command, replica) {
-                        ServiceAction::Nop => {}
-                        ServiceAction::SendToClient(client_id, reply) => {
-                            self.events.push_back(Event::SendToClient(client_id, reply))
-                        }
-                        // probably unimplemented! when converting to a general construction
-                        ServiceAction::Submit(_) => unreachable!(),
-                    }
-                }
+                actions.push(Action::Finalize(replica_id, commands))
             }
         }
-    }
-
-    fn send_to_replica(&mut self, replica_id: u8, message: ToReplica) {
-        self.events
-            .push_back(Event::SendToReplica(replica_id, message));
-    }
-
-    fn send_to_all_replica(&mut self, message: ToReplica, loopback: Option<ReplicaId>) {
-        for replica_id in 0..self.servers.len() as ReplicaId {
-            if loopback != Some(replica_id) {
-                self.send_to_replica(replica_id, message.clone());
-            }
-        }
-    }
-
-    fn invoke(&mut self, client_id: ClientId, op: Vec<u8>) -> Step {
-        let action = self.clients[client_id as usize].invoke(op);
-        self.handle_client_action(client_id, action)
-    }
-
-    fn exhaust(&mut self, max_num_step: u32) {
-        for _ in 0..max_num_step {
-            if self.step().is_none() {
-                return;
-            }
-        }
-        unreachable!()
     }
 }
 
@@ -190,23 +67,8 @@ fn normal_1() {
         num_faulty: 1,
         num_replica: 4,
     };
-    let mut system = System::new(spec, 1);
-    system.invoke(0, b"hello".into());
-    for i in 0.. {
-        assert!(i < 100);
-        if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
-            assert_eq!(client_id, 0);
-            assert_eq!(&result, b"hello");
-            break;
-        }
-    }
-    system.exhaust(100);
-    let num_committed = system
-        .servers
-        .iter()
-        .filter(|(replica, _)| replica.core.finalize_num == 1)
-        .count();
-    assert!(num_committed >= 3)
+    let mut system = System::new(spec);
+    System::normal_1(&mut system)
 }
 
 #[test]
@@ -215,25 +77,8 @@ fn close_loop() {
         num_faulty: 1,
         num_replica: 4,
     };
-    let mut system = System::new(spec, 1);
-    for round in 0..10 {
-        system.invoke(0, format!("hello#{round}").into());
-        for i in 0.. {
-            assert!(i < 100);
-            if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
-                assert_eq!(client_id, 0);
-                assert_eq!(&result, format!("hello#{round}").as_bytes());
-                break;
-            }
-        }
-    }
-    system.exhaust(100);
-    let num_committed = system
-        .servers
-        .iter()
-        .filter(|(replica, _)| replica.core.finalize_num == 10)
-        .count();
-    assert!(num_committed >= 3)
+    let mut system = System::new(spec);
+    System::close_loop(&mut system, 10, 1 + 1)
 }
 
 #[test]
@@ -242,26 +87,8 @@ fn concurrent_clients() {
         num_faulty: 1,
         num_replica: 4,
     };
-    let mut system = System::new(spec, 10);
-    for i in 0..10 {
-        system.invoke(i, format!("hello@{i}").into());
-    }
-    for _ in 0..10 {
-        for i in 0.. {
-            assert!(i < 100);
-            if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
-                assert_eq!(&result, format!("hello@{client_id}").as_bytes());
-                break;
-            }
-        }
-    }
-    system.exhaust(100);
-    let num_committed = system
-        .servers
-        .iter()
-        .filter(|(replica, _)| replica.core.finalize_num == 10)
-        .count();
-    assert!(num_committed >= 3)
+    let mut system = System::new(spec);
+    System::concurrent_clients(&mut system, 10, 1 + 1)
 }
 
 #[test]
@@ -270,31 +97,17 @@ fn batched() {
         num_faulty: 1,
         num_replica: 4,
     };
-    let mut system = System::new(spec, 10);
-    for (replica, _) in &mut system.servers {
+    let mut system = System::new(spec);
+    for replica in &mut system.replicas {
         replica.core.config.max_batch_size = 100
     }
-    for i in 0..10 {
-        system.invoke(i, format!("hello@{i}").into());
-    }
-    for _ in 0..10 {
-        for i in 0.. {
-            assert!(i < 100);
-            if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
-                assert_eq!(&result, format!("hello@{client_id}").as_bytes());
-                break;
-            }
-        }
-    }
-    system.exhaust(100);
-    let batch_proposal = system.servers.iter().all(|(replica, _)| {
-        replica
-            .core
-            .blocks
-            .values()
-            .any(|block| block.commands.len() > 1)
-    });
-    assert!(batch_proposal)
+    System::concurrent_clients(&mut system, 10, 1 + 1);
+    assert!(
+        system
+            .replicas
+            .iter()
+            .all(|replica| replica.core.finalize_num <= 2)
+    )
 }
 
 fn concurrent_proposals(max_num_inflight: BlockNum, max_batch_size: usize) {
@@ -302,29 +115,25 @@ fn concurrent_proposals(max_num_inflight: BlockNum, max_batch_size: usize) {
         num_faulty: 1,
         num_replica: 4,
     };
-    let mut system = System::new(spec, 10);
-    for (replica, _) in &mut system.servers {
+    let mut system = System::new(spec);
+    for replica in &mut system.replicas {
         replica.core.config.max_num_inflight = max_num_inflight;
         replica.core.config.max_batch_size = max_batch_size
     }
-    for i in 0..10 {
-        system.invoke(i, format!("hello@{i}").into());
-    }
-    for num_replied in 0..10 {
-        for i in 0.. {
-            let threshold = if num_replied > 1 {
-                100
-            } else {
-                100 * max_num_inflight
-            };
-            assert!(i < threshold);
-            if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
-                assert_eq!(&result, format!("hello@{client_id}").as_bytes());
-                break;
-            }
-        }
-    }
-    system.exhaust(100);
+    System::concurrent_clients_with_step_thresholds(
+        &mut system,
+        10,
+        1 + 1,
+        once(100 * max_num_inflight).chain(repeat(100)),
+    );
+    assert!(
+        system
+            .replicas
+            .iter()
+            .all(|replica| replica.core.finalize_num
+                <= max_num_inflight
+                    + ((10 - max_num_inflight) / max_batch_size as BlockNum).max(1))
+    )
 }
 
 #[test]
@@ -342,44 +151,39 @@ fn concurrent_batched_proposals() {
     concurrent_proposals(4, 100)
 }
 
-fn drop_1(skip: impl Fn(&Event) -> bool, tick_client: bool, tick_replica0: bool) -> System {
+fn drop_1(
+    skip: impl Fn(&Event<ToReplica>) -> bool,
+    resend_request: bool,
+    tick_replica0: bool,
+) -> System {
     let spec = Spec {
         num_faulty: 1,
         num_replica: 4,
     };
-    let mut system = System::new(spec, 1);
-    system.invoke(0, b"hello".into());
-    while !system.events.is_empty() {
-        if skip(system.events.front().unwrap()) {
-            let event = system.events.pop_front();
-            tracing::debug!(?event, "dropping");
-            continue;
-        }
-        system.step();
-    }
-    if tick_client {
-        let action = system.clients[0].tick();
-        system.handle_client_action(0, action);
-        let action = system.clients[0].tick();
-        system.handle_client_action(0, action);
-    }
+    let mut system = System::new(spec);
     let mut actions = Vec::new();
+    system.request(0, Command::new(0, 1));
+    system.filter_exhaust(skip, 100, &mut actions);
+    if resend_request {
+        system.request(0, Command::new(0, 1))
+    }
     if tick_replica0 {
-        system.servers[0].0.tick(&mut actions);
-        system.servers[0].0.tick(&mut actions);
-        for action in actions {
-            system.handle_replica_action(0, action)
-        }
+        let mut replica_actions = Vec::new();
+        system.replicas[0].tick(&mut replica_actions);
+        system.replicas[0].tick(&mut replica_actions);
+        system.effect(0, replica_actions, &mut actions)
     }
     for i in 0.. {
         assert!(i < 100);
-        if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
-            assert_eq!(client_id, 0);
-            assert_eq!(&result, b"hello");
+        let progress = system.step(&mut actions);
+        if !resend_request {
+            assert!(progress)
+        }
+        if is_finalized(&actions, Command::new(0, 1), system.num_replica(), 1 + 1) {
             break;
         }
     }
-    system.exhaust(100);
+    system.exhaust(100, &mut actions);
     system
 }
 
@@ -394,16 +198,12 @@ fn drop_request() {
 
 #[test]
 fn drop_reply() {
-    let system = drop_1(
-        |event| matches!(event, Event::SendToClient(_, _)),
-        true,
-        false,
-    );
+    let system = drop_1(|_| false, true, false);
     assert!(
         system
-            .servers
+            .replicas
             .iter()
-            .all(|(replica, _)| replica.core.blocks.len() <= 1)
+            .all(|replica| replica.core.blocks.len() <= 1)
     );
 }
 
@@ -440,22 +240,23 @@ fn drop_commit() {
 }
 
 #[test]
-fn drop_replica3() {
+fn partition_replica3() {
     let spec = Spec {
         num_faulty: 1,
         num_replica: 4,
     };
-    let mut system = System::new(spec, 1);
-    system.invoke(0, b"hello".into());
+    let mut system = System::new(spec);
+    system.request(0, Command::new(0, 1));
+    let mut actions = Vec::new();
     for i in 0.. {
         assert!(i < 100);
         if matches!(system.events.front(), Some(&Event::SendToReplica(id, _)) if id == 3) {
             system.events.pop_front();
             continue;
         }
-        if let Step::ClientReturn(client_id, result) = system.step().unwrap() {
-            assert_eq!(client_id, 0);
-            assert_eq!(&result, b"hello");
+        let progress = system.step(&mut actions);
+        assert!(progress);
+        if is_finalized(&actions, Command::new(0, 1), system.num_replica(), 1 + 1) {
             break;
         }
     }

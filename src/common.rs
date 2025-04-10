@@ -8,7 +8,7 @@ pub mod command_pool;
 pub use command_pool::CommandPool;
 
 #[cfg(test)]
-pub mod test; // no test inside, common infrastructure for writing tests
+pub mod testing; // no test inside, common infrastructure for writing tests
 
 // pub type ClientId = u32;
 pub use client::Id as ClientId;
@@ -67,6 +67,10 @@ pub struct Command {
     pub seq: ClientSeq,
     pub op: Vec<u8>,
 }
+
+// produce a more informative compile error hopefully
+#[cfg(test)]
+const _: () = assert!(size_of::<u32>() == size_of::<ClientId>());
 
 #[cfg(test)]
 impl Command {

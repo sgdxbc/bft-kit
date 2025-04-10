@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, fmt::Debug, mem::take};
+use std::{collections::VecDeque, fmt::Debug, iter::repeat, mem::take};
 
 use super::{ClientSeq, Command, ReplicaId};
 
@@ -90,6 +90,45 @@ impl<R: AbstractReplica> System<R, R::Message> {
         }
         unreachable!()
     }
+
+    pub fn filter_exhaust(
+        &mut self,
+        skip: impl Fn(&Event<R::Message>) -> bool,
+        max_num_step: u32,
+        actions: &mut Actions,
+    ) where
+        R::Message: Debug,
+    {
+        let mut num_step = 0;
+        while let Some(event) = self.events.front() {
+            if skip(event) {
+                self.events.pop_front();
+                continue;
+            }
+            assert!(num_step < max_num_step);
+            num_step += 1;
+            self.step(actions);
+        }
+    }
+}
+
+pub fn is_finalized(
+    actions: &[Action],
+    command: Command,
+    num_replica: ReplicaId,
+    num_finalize: usize,
+) -> bool {
+    (0..num_replica)
+        .filter(|replica_id| {
+            actions.iter().any(|action| {
+                matches!(action, Action::Finalize(
+                    id,
+                    commands,
+                ) if id == replica_id && commands.contains(&command))
+            })
+        })
+        .count()
+        >= num_finalize
 }
 
 fn replica_commands(actions: Actions, num_replica: ReplicaId) -> Vec<Vec<Command>> {
@@ -105,7 +144,7 @@ impl<R: AbstractReplica> System<R, R::Message>
 where
     R::Message: Debug,
 {
-    fn num_replica(&self) -> ReplicaId {
+    pub fn num_replica(&self) -> ReplicaId {
         self.replicas.len() as _
     }
 
@@ -116,7 +155,7 @@ where
 
         system.request(0, Command::new(0, 1));
         system.exhaust(100, &mut actions);
-        for replica_id in 0..system.replicas.len() as ReplicaId {
+        for replica_id in 0..system.num_replica() {
             assert!(actions.contains(&Action::Finalize(replica_id, vec![Command::new(0, 1)])))
         }
         assert_eq!(actions.len(), system.replicas.len())
@@ -132,13 +171,12 @@ where
             for num_step in 0.. {
                 assert!(num_step < 100);
                 system.step(&mut actions);
-                if (0..system.num_replica())
-                    .filter(|&replica_id| {
-                        actions.contains(&Action::Finalize(replica_id, vec![Command::new(0, seq)]))
-                    })
-                    .count()
-                    >= num_finalize
-                {
+                if is_finalized(
+                    &actions,
+                    Command::new(0, seq),
+                    system.num_replica(),
+                    num_finalize,
+                ) {
                     break;
                 }
             }
@@ -152,6 +190,20 @@ where
     }
 
     pub fn concurrent_clients(system: &mut Self, num_client: u32, num_finalize: usize) {
+        System::concurrent_clients_with_step_thresholds(
+            system,
+            num_client,
+            num_finalize,
+            repeat(100),
+        )
+    }
+
+    pub fn concurrent_clients_with_step_thresholds(
+        system: &mut Self,
+        num_client: u32,
+        num_finalize: usize,
+        thresholds: impl IntoIterator<Item = u32>,
+    ) {
         system.init();
         let mut actions = Vec::new();
         system.exhaust(100, &mut actions);
@@ -159,23 +211,19 @@ where
         for client_id in 0..num_client {
             system.request(0, Command::new(client_id, 1));
         }
+        let mut thresholds = thresholds.into_iter();
         for client_id in 0..num_client {
+            let threshold = thresholds.next();
             for num_step in 0.. {
-                if (0..system.num_replica())
-                    .filter(|replica_id| {
-                        actions.iter().any(|action| {
-                            matches!(action, Action::Finalize(
-                                id,
-                                commands,
-                            ) if id == replica_id && commands.contains(&Command::new(client_id, 1)))
-                        })
-                    })
-                    .count()
-                    >= num_finalize
-                {
+                if is_finalized(
+                    &actions,
+                    Command::new(client_id, 1),
+                    system.num_replica(),
+                    num_finalize,
+                ) {
                     break;
                 }
-                assert!(num_step < 100);
+                assert!(Some(num_step) < threshold);
                 system.step(&mut actions);
             }
         }

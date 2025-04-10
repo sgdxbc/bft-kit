@@ -1,13 +1,13 @@
 use test_log::test;
 
 use crate::{
-    common::test::{AbstractReplica, Action, Actions, Effect, Event},
+    common::testing::{AbstractReplica, Action, Actions, Effect, Event},
     crypto::threshold::givre_replica_key_shares,
 };
 
 use super::*;
 
-type System = crate::common::test::System<Replica, ToReplica>;
+type System = crate::common::testing::System<Replica, ToReplica>;
 
 impl System {
     fn new(spec: Spec) -> Self {
@@ -59,7 +59,7 @@ impl Effect<System> for ReplicaAction {
                 .events
                 .push_back(Event::SendToReplica(replica_id, message)),
             Self::SendToAllReplicas(message) => {
-                for id in 0..system.replicas.len() as ReplicaId {
+                for id in 0..system.num_replica() {
                     if id != replica_id {
                         system
                             .events

@@ -1,7 +1,7 @@
 use super::{ClientId, ClientSeq, Command};
 
 // "mempool" in cryptocurrency term
-// assist (primary) replica to propose blocks with rational commands
+// assist (primary) replica to propose blocks with sensible commands
 // note that command pool is not aware of protocol details and may return
 // duplicated commands during primary change (on different primaries), so the
 // replicated services still need to bring their own solutions for at most once
@@ -44,7 +44,7 @@ impl CommandPool {
     pub fn commit(&mut self, command: &Command) {
         match self {
             Self::CloseLoop(pool) => pool.commit(command),
-            Self::OpenLoop(_pool) => {}
+            Self::OpenLoop(pool) => pool.commit(command),
         }
     }
 }
@@ -91,11 +91,13 @@ pub mod open_loop {
         }
 
         pub fn commit(&mut self, command: &Command) {
-            if matches!(self.client_seqs.get(&command.client_id), Some(&seq) if seq >= command.seq)
-            {
-                return;
-            }
-            self.client_seqs.insert(command.client_id, command.seq);
+            let seq = self.client_seqs.entry(command.client_id).or_default();
+            *seq = (*seq).max(command.seq)
+            // TODO remove meaningless commands of the same client from the pending buffer
+            // the identical one should definitely be purged, if any
+            // it should be safe to also remove all commands with lower sequence numbers, as
+            // if those commands are not committed earlier than this one, ordering service
+            // will not respect them anyway
         }
     }
 }
