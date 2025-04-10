@@ -49,12 +49,15 @@ impl CommandPool {
     }
 }
 
+// open loop pool allows multiple concurrent commands (sequence numbers) from
+// the same client, but assumes that clients send commands with increasing
+// sequence numbers
 // unlike close loop pool, the open loop pool does _not_ guarantee liveness: a
 // `push`ed command is not guaranteed to be returned by `close_batch` even if it
-// is later re`push`ed. this is expected by open loop clients as they simply
-// move on to new requests regardless whether the old ones are replied
+// is later re`push`ed. this is acceptable by the nature of open loop, where new
+// commands are produced whether or not the old ones are committed
 pub mod open_loop {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     use crate::common::ClientSeq;
 
@@ -62,7 +65,7 @@ pub mod open_loop {
 
     #[derive(Debug, Default)]
     pub struct CommandPool {
-        pending_buf: Vec<Command>,
+        pending_buf: VecDeque<Command>,
         client_seqs: HashMap<ClientId, ClientSeq>,
     }
 
@@ -71,42 +74,54 @@ pub mod open_loop {
             Self::default()
         }
 
+        const MAX_LEN: usize = 5000;
+
         pub fn push(&mut self, command: Command) -> bool {
             if matches!(self.client_seqs.get(&command.client_id), Some(&seq) if seq >= command.seq)
             {
                 return false;
             }
             self.client_seqs.insert(command.client_id, command.seq);
-            self.pending_buf.push(command);
+            if self.pending_buf.len() == Self::MAX_LEN {
+                self.pending_buf.pop_front();
+            }
+            self.pending_buf.push_back(command);
             true
         }
 
         pub fn close_batch(&mut self, max_batch_size: usize) -> Option<Vec<Command>> {
+            assert!(max_batch_size <= Self::MAX_LEN);
             if self.pending_buf.is_empty() {
                 None
             } else {
-                let num_discarded = self.pending_buf.len().max(max_batch_size) - max_batch_size;
-                Some(self.pending_buf.drain(..).skip(num_discarded).collect())
+                let num_skipped = self.pending_buf.len().max(max_batch_size) - max_batch_size;
+                Some(
+                    self.pending_buf
+                        .split_off(num_skipped)
+                        .into_iter()
+                        .collect(),
+                )
             }
         }
 
         pub fn commit(&mut self, command: &Command) {
             let seq = self.client_seqs.entry(command.client_id).or_default();
             *seq = (*seq).max(command.seq)
-            // TODO remove meaningless commands of the same client from the pending buffer
-            // the identical one should definitely be purged, if any
-            // it should be safe to also remove all commands with lower sequence numbers, as
-            // if those commands are not committed earlier than this one, ordering service
-            // will not respect them anyway
+            // it is possible to achieve "high resolution" command purging here, based on
+            // the fact that the replicated service will not respect any future committed
+            // commands from the same client with lower sequence numbers
+            // however, assuming the replica can receive commands for all the time, it's
+            // highly likely that newer commands
         }
     }
 }
 
+// close loop pool assumes assumes causal behavior of close loop clients: `push`
+// a command of the same client with higher sequence number happens after all
+// lower sequence numbers have been committed by the client
 // a close loop pool guarantees liveness mentioned above. combining with the
-// common ordering property this becomes fairness. this is critical for the tail
-// latency. at the same time, it assumes causal behavior of close loop clients:
-// `push` a command of the same client with higher sequence number happens after
-// all lower sequence numbers have been committed by the client
+// common ordering property this becomes fairness, which is critical for tail
+// latency
 pub mod close_loop {
     use std::{collections::HashMap, mem::swap};
 
