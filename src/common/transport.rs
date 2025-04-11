@@ -1,12 +1,13 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use bincode::{Decode, Encode};
+use futures::channel::mpsc::Receiver;
 use quinn::{Connection, ConnectionError, Endpoint};
 use tokio::{sync::mpsc::Sender, task::JoinSet, time::sleep, try_join};
 
 use crate::crypto::cert::quinn::{client_config, server_config};
 
-use super::ReplicaId;
+use super::{ClientId, ReplicaId};
 
 pub async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     ingress: Connection,
@@ -80,6 +81,18 @@ impl AbstractEgress for &'_ Connection {
     }
 }
 
+pub type Invoke = (Vec<u8>, Option<Vec<u8>>);
+
+pub trait AbstractClientTask {
+    fn run(
+        id: ClientId,
+        config: ClientConfig,
+        service_config: ServiceConfig,
+        invoke_receiver: Receiver<Invoke>,
+        commit_sender: Sender<ClientId>,
+    ) -> anyhow::Result<()>;
+}
+
 #[derive(Debug, Clone)]
 pub struct BootServerConfig {
     pub server_internal_addresses: Vec<SocketAddr>,
@@ -89,11 +102,13 @@ pub struct BootServerConfig {
     pub server_interconnect_delay: Duration,
 }
 
+type BootServer = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>);
+
 pub async fn boot_server<M: Decode<()> + Send + Sync + 'static>(
     replica_id: ReplicaId,
     config: BootServerConfig,
     message_sender: Sender<M>,
-) -> anyhow::Result<(JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>)> {
+) -> anyhow::Result<BootServer> {
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(None);
     let transport = Arc::new(transport);

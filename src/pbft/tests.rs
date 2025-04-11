@@ -166,7 +166,9 @@ fn drop_1(
     system.request(0, Command::new(0, 1));
     system.filter_exhaust(skip, 100, &mut actions);
     if resend_request {
-        system.request(0, Command::new(0, 1))
+        for id in 0..system.num_replica() {
+            system.request(id, Command::new(0, 1))
+        }
     }
     if tick_replica0 {
         let mut replica_actions = Vec::new();
