@@ -1,10 +1,10 @@
 use std::{env::args, path::PathBuf, time::Duration};
 
 use bft_testbed::{
+    common::parse::Options,
     init_logging,
-    pbft::{
-        parse::Options,
-        transport::{ClientTask, TaskConfig, WARMUP_DURATION, concurrent_close_loop_clients_task},
+    pbft::transport::{
+        ClientTask, TaskConfig, WARMUP_DURATION, concurrent_close_loop_clients_task,
     },
 };
 use hdrhistogram::Histogram;
@@ -17,8 +17,8 @@ async fn main() -> anyhow::Result<()> {
 
     let task_config_path = PathBuf::from(args().nth(1).unwrap_or("task.conf".into()));
     let mut options = Options::new();
-    options.parse(&read_to_string(&task_config_path).await?)?;
-    options.parse(&read_to_string(task_config_path.with_file_name("spec.conf")).await?)?;
+    options.parse(&read_to_string(&task_config_path).await?);
+    options.parse(&read_to_string(task_config_path.with_file_name("spec.conf")).await?);
 
     let task_config = TaskConfig::try_from(options.clone())?;
     let client_latencies =

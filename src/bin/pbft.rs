@@ -1,10 +1,10 @@
 use std::{env::args, path::PathBuf, pin::pin, time::Duration};
 
 use bft_testbed::{
+    common::parse::Options,
     init_logging,
     pbft::{
         Replica,
-        parse::Options,
         transport::{Server, server_task},
     },
 };
@@ -16,9 +16,9 @@ async fn main() -> anyhow::Result<()> {
 
     let replica_config_path = PathBuf::from(args().nth(1).unwrap_or("replica.conf".into()));
     let mut options = Options::new();
-    options.parse(&read_to_string(&replica_config_path).await?)?;
-    options.parse(&read_to_string(replica_config_path.with_file_name("spec.conf")).await?)?;
-    options.parse(&read_to_string(replica_config_path.with_file_name("task.conf")).await?)?;
+    options.parse(&read_to_string(&replica_config_path).await?);
+    options.parse(&read_to_string(replica_config_path.with_file_name("spec.conf")).await?);
+    options.parse(&read_to_string(replica_config_path.with_file_name("task.conf")).await?);
     let replica = Replica::new(options.clone().try_into()?);
     let mut server = pin!(server_task::<Server>(replica, options.try_into()?));
     // let mut server = pin!(server_task::<tcp::Server>(replica, options.try_into()?));

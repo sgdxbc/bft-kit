@@ -7,6 +7,7 @@ use crate::crypto::UpdateHash;
 pub mod command_pool;
 pub use command_pool::CommandPool;
 
+pub mod parse;
 #[cfg(test)]
 pub mod testing; // no test inside, common infrastructure for writing tests
 pub mod transport;
