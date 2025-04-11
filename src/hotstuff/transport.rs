@@ -238,14 +238,13 @@ async fn service_task(
                 match replies.get(&command.client_id) {
                     Some(reply) if reply.seq > command.seq => {}
                     Some(reply) if reply.seq == command.seq => {
-                        let egress =
-                            client_egresses
-                                .get(&command.client_id)
-                                .ok_or(anyhow::format_err!(
-                                    "send to unexpected client id {}",
-                                    command.client_id
-                                ))?;
-                        write_message.run(reply.clone(), [egress]).await?
+                        let egress = client_egresses.get(&command.client_id);
+                        anyhow::ensure!(
+                            egress.is_some(),
+                            "send to unexpected client {}",
+                            command.client_id
+                        );
+                        write_message.run(reply.clone(), egress).await?
                     }
                     _ => submit_sender.send(ToReplica::Request(command)).await?,
                 }

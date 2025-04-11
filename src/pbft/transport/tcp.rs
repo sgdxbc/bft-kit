@@ -320,10 +320,14 @@ impl AbstractServer for Server {
     ) -> impl Future<Output = anyhow::Result<()>> {
         service_task(replica_id, config, submit_sender, finalize_receiver)
     }
+
+    fn into_egress(egress: &mut Self::Egress) -> impl AbstractEgress {
+        egress
+    }
 }
 
-impl AbstractEgress for OwnedWriteHalf {
-    async fn write_bytes(&mut self, encode_bytes: &[u8]) -> anyhow::Result<()> {
+impl AbstractEgress for &'_ mut OwnedWriteHalf {
+    async fn write_bytes(self, encode_bytes: &[u8]) -> anyhow::Result<()> {
         self.write_all(encode_bytes).await?;
         Ok(())
     }

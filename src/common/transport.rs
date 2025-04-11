@@ -40,7 +40,7 @@ pub struct WriteMessage {
 }
 
 pub trait AbstractEgress {
-    fn write_bytes(self, encode_bytes: &[u8]) -> impl Future<Output = anyhow::Result<()>>;
+    fn write_bytes(self, encode_bytes: &[u8]) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
 impl WriteMessage {

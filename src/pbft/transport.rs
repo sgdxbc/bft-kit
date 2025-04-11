@@ -1,8 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, pin::pin, time::Duration};
 
-use bincode::{Decode, Encode};
 use hdrhistogram::Histogram;
-use quinn::{Connection, ConnectionError, Endpoint};
+use quinn::{Connection, Endpoint};
 use rand::random;
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
@@ -13,7 +12,7 @@ use tokio::{
 use crate::{
     common::{
         ClientId, ReplicaId,
-        transport::{BootServerConfig, boot_server},
+        transport::{AbstractEgress, BootServerConfig, WriteMessage, boot_server, read_task},
     },
     crypto::cert::quinn::{client_config, server_config},
     pbft::ViewNum,
@@ -37,56 +36,13 @@ pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
 // is just broken), archive it in case of needed
 pub mod tcp;
 
-async fn read_task<M: Decode<()> + Send + Sync + 'static>(
-    ingress: Connection,
-    read_sender: Sender<M>,
-    remote_close: bool,
-) -> anyhow::Result<()> {
-    let mut decode_bytes = vec![0; 1 << 16];
-    loop {
-        let mut stream = match ingress.accept_uni().await {
-            Ok(stream) => stream,
-            Err(ConnectionError::ConnectionClosed(_) | ConnectionError::ApplicationClosed(_)) => {
-                anyhow::ensure!(remote_close);
-                tracing::debug!("remote closed");
-                return Ok(());
-            }
-            Err(err) => anyhow::bail!(err),
-        };
-        let mut offset = 0;
-        while let Some(len) = stream.read(&mut decode_bytes).await? {
-            offset += len
-        }
-        let (message, len) =
-            bincode::decode_from_slice(&decode_bytes[..offset], bincode::config::standard())?;
-        anyhow::ensure!(len == offset); //
-        read_sender.send(message).await?;
-    }
-}
-
-pub trait AbstractEgress {
-    fn write_bytes(&mut self, encode_bytes: &[u8]) -> impl Future<Output = anyhow::Result<()>>;
-}
-
-async fn write_message<'a, C: AbstractEgress + 'a>(
-    message: impl Encode,
-    egresses: impl IntoIterator<Item = &'a mut C>,
-    encode_bytes: &mut [u8],
-) -> anyhow::Result<()> {
-    let len = bincode::encode_into_slice(message, encode_bytes, bincode::config::standard())?;
-    for egress in egresses {
-        egress.write_bytes(&encode_bytes[..len]).await?
-    }
-    Ok(())
-}
-
 pub struct ClientTask {
     client: Client,
     config: TaskConfig,
     replica_ingress: Receiver<message::Reply>,
     read_tasks: JoinSet<anyhow::Result<()>>,
     replica_egresses: Vec<Connection>,
-    encode_bytes: Vec<u8>,
+    write_message: WriteMessage,
 }
 
 impl ClientTask {
@@ -115,7 +71,7 @@ impl ClientTask {
             replica_ingress: read_receiver,
             read_tasks,
             replica_egresses,
-            encode_bytes: vec![0; 1 << 16],
+            write_message: WriteMessage::new(),
         })
     }
 
@@ -126,15 +82,13 @@ impl ClientTask {
             match action {
                 ClientAction::Nop => {}
                 ClientAction::SendToReplica(replica_id, message) => {
-                    write_message(
-                        message,
-                        [&mut self.replica_egresses[replica_id as usize]],
-                        &mut self.encode_bytes,
-                    )
-                    .await?
+                    self.write_message
+                        .run(message, [&self.replica_egresses[replica_id as usize]])
+                        .await?
                 }
                 ClientAction::SendToAllReplicas(message) => {
-                    write_message(message, &mut self.replica_egresses, &mut self.encode_bytes)
+                    self.write_message
+                        .run(message, &self.replica_egresses)
                         .await?
                 }
                 ClientAction::Return(result) => break Ok(result),
@@ -223,6 +177,9 @@ type BootServer<E> = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, E>);
 
 pub trait AbstractServer {
     type Egress;
+
+    fn into_egress(egress: &mut Self::Egress) -> impl AbstractEgress;
+
     fn boot_server(
         replica_id: ReplicaId,
         config: TaskConfig,
@@ -240,10 +197,7 @@ pub trait AbstractServer {
 pub async fn server_task<S: AbstractServer>(
     mut replica: Replica,
     config: TaskConfig,
-) -> anyhow::Result<()>
-where
-    S::Egress: AbstractEgress,
-{
+) -> anyhow::Result<()> {
     let (read_sender, mut read_receiver) = mpsc::channel(100);
     let (mut read_tasks, mut replica_egresses) =
         S::boot_server(replica.core.config.id, config.clone(), read_sender.clone()).await?;
@@ -260,7 +214,7 @@ where
         submit_sender,
         finalize_receiver,
     ));
-    let mut encode_bytes = vec![0; 1 << 16];
+    let mut write_message = WriteMessage::new();
     let mut actions = Vec::new();
     loop {
         #[derive(Debug)]
@@ -291,16 +245,19 @@ where
         for action in actions.drain(..) {
             match action {
                 ReplicaAction::SendToReplica(replica_id, message) => {
-                    let egress =
-                        replica_egresses
-                            .get_mut(&replica_id)
-                            .ok_or(anyhow::format_err!(
-                                "send to unexpected replica id {replica_id}"
-                            ))?;
-                    write_message(message, [egress], &mut encode_bytes).await?
+                    let egress = replica_egresses.get_mut(&replica_id);
+                    anyhow::ensure!(
+                        egress.is_some(),
+                        "send to unexpected replica id {replica_id}"
+                    );
+                    write_message
+                        .run(message, egress.map(S::into_egress))
+                        .await?
                 }
                 ReplicaAction::SendToAllReplicas(message) => {
-                    write_message(message, replica_egresses.values_mut(), &mut encode_bytes).await?
+                    write_message
+                        .run(message, replica_egresses.values_mut().map(S::into_egress))
+                        .await?
                 }
                 ReplicaAction::Finalize(commands) => {
                     finalize_sender
@@ -333,7 +290,7 @@ async fn service_task(
     )?;
     let mut read_tasks = JoinSet::new();
     let mut client_egresses = HashMap::new();
-    let mut encode_bytes = vec![0; 1 << 16];
+    let mut write_message = WriteMessage::new();
     let (client_read_sender, mut client_read_receiver) = mpsc::channel(4096);
     loop {
         let accept = async {
@@ -380,13 +337,13 @@ async fn service_task(
                 match replies.get(&command.client_id) {
                     Some(reply) if reply.seq > command.seq => {}
                     Some(reply) if reply.seq == command.seq => {
-                        let egress = client_egresses.get_mut(&command.client_id).ok_or(
-                            anyhow::format_err!(
-                                "send to unexpected client id {}",
-                                command.client_id
-                            ),
-                        )?;
-                        write_message(reply.clone(), [egress], &mut encode_bytes).await?
+                        let egress = client_egresses.get(&command.client_id);
+                        anyhow::ensure!(
+                            egress.is_some(),
+                            "send to unexpected client {}",
+                            command.client_id
+                        );
+                        write_message.run(reply.clone(), egress).await?
                     }
                     _ => submit_sender.send(ToReplica::Request(command)).await?,
                 }
@@ -397,23 +354,26 @@ async fn service_task(
                     break 'finalize;
                 };
                 for command in finalize.commands {
+                    if matches!(replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq)
+                    {
+                        tracing::warn!(?command, "duplicated finalize");
+                        continue;
+                    }
                     let reply = message::Reply {
                         seq: command.seq,
-                        view_num: finalize.view_num,
                         // a 0/0 service, extend to support arbitrary state machine later
                         result: Default::default(),
                         replica_id,
+                        view_num: finalize.view_num,
                     };
-                    let replaced = replies.insert(command.client_id, reply.clone());
-                    assert!(replaced.map(|reply| reply.seq) < Some(reply.seq));
-                    let egress =
-                        client_egresses
-                            .get_mut(&command.client_id)
-                            .ok_or(anyhow::format_err!(
-                                "send to unexpected client {}",
-                                command.client_id
-                            ))?;
-                    if let Err(err) = write_message(reply, [egress], &mut encode_bytes).await {
+                    replies.insert(command.client_id, reply.clone());
+                    let egress = client_egresses.get(&command.client_id);
+                    anyhow::ensure!(
+                        egress.is_some(),
+                        "send to unexpected client {}",
+                        command.client_id
+                    );
+                    if let Err(err) = write_message.run(reply, egress).await {
                         // TODO only suppress certain errors e.g. BrokenPipe and ApplicationClose
                         tracing::info!(%err, "egress to client failed")
                         // not removing from egress table to prevent the following
@@ -453,11 +413,8 @@ impl AbstractServer for Server {
     ) -> impl Future<Output = anyhow::Result<()>> {
         service_task(replica_id, config, submit_sender, finalize_receiver)
     }
-}
 
-impl AbstractEgress for Connection {
-    async fn write_bytes(&mut self, encode_bytes: &[u8]) -> anyhow::Result<()> {
-        self.open_uni().await?.write_all(encode_bytes).await?;
-        Ok(())
+    fn into_egress(egress: &mut Self::Egress) -> impl AbstractEgress {
+        &*egress
     }
 }
