@@ -18,6 +18,7 @@ async fn main() -> anyhow::Result<()> {
     let mut options = Options::new();
     options.parse(&read_to_string(&replica_config_path).await?);
     options.parse(&read_to_string(replica_config_path.with_file_name("spec.conf")).await?);
+    options.parse(&read_to_string(replica_config_path.with_file_name("network.conf")).await?);
     options.parse(&read_to_string(replica_config_path.with_file_name("task.conf")).await?);
     let replica = Replica::new(options.clone().try_into()?);
     let mut server = pin!(server_task::<Server>(replica, options.try_into()?));

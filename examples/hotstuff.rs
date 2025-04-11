@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{pin::pin, time::Duration};
 
 use bft_testbed::{
     common::{
@@ -74,21 +74,21 @@ async fn main() -> anyhow::Result<()> {
     }
     let (invoke_sender, invoke_receiver) = mpsc::channel(1);
     let (commit_sender, mut commit_receiver) = mpsc::channel(1);
-    let client_task = client_task(
+    let mut client_task = pin!(client_task(
         spec,
         task_config.client,
         task_config.service,
         ClientId(0),
         invoke_receiver,
         commit_sender,
-    );
+    ));
     invoke_sender
         .send((Default::default(), Some(Default::default())))
         .await?;
     async {
         tokio::select! {
             commit = commit_receiver.recv() => anyhow::Ok(commit.unwrap()),
-            result = client_task => {
+            result = &mut client_task => {
                 result?;
                 unreachable!()
             }
@@ -100,6 +100,9 @@ async fn main() -> anyhow::Result<()> {
     }
     .instrument(tracing::info_span!("invoke"))
     .await?;
+    drop(invoke_sender);
+    let latencies = client_task.await?;
+    tracing::info!(latency = ?Duration::from_micros(latencies.mean() as _));
     server_tasks.abort_all();
     Ok(())
 }

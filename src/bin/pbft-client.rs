@@ -17,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let mut options = Options::new();
     options.parse(&read_to_string(&task_config_path).await?);
     options.parse(&read_to_string(task_config_path.with_file_name("spec.conf")).await?);
+    options.parse(&read_to_string(task_config_path.with_file_name("network.conf")).await?);
 
     let task_config = TaskConfig::try_from(options.clone())?;
     let client_latencies = run_close_loop_clients(options.try_into()?, task_config.clone())

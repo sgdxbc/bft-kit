@@ -38,7 +38,7 @@ pub struct TaskConfig {
     pub service: ServiceConfig,
     pub num_client: usize,
     pub client_duration: Duration,
-    pub replica_tick_interval: Duration,
+    pub tick_interval: Duration,
 }
 
 pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
@@ -226,7 +226,7 @@ pub async fn server_task<S: AbstractServer>(
         }
         use Select::*;
         let select = tokio::select! {
-            () = sleep(config.replica_tick_interval) => Sleep,
+            () = sleep(config.tick_interval) => Sleep,
             message = read_receiver.recv() => Read(message),
             result = &mut service_task => Service(result?),
             Some(result) = read_tasks.join_next() => ReadJoin(result??)

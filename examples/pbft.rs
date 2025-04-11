@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         client_duration: Duration::ZERO,
 
         // effectively disable ticks
-        replica_tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
+        tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
     };
     let mut server_tasks = JoinSet::new();
     for i in 0..spec.num_replica {
