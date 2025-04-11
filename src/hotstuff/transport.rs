@@ -17,10 +17,11 @@ use crate::{
     common::{
         ClientId, Command, Quorum, ReplicaId,
         transport::{
-            BootServerConfig, ClientConfig, ServiceConfig, WriteMessage, boot_server, read_task,
+            BootServerConfig, ClientConfig, Invoke, ServiceConfig, WriteMessage, boot_client,
+            boot_server, read_task,
         },
     },
-    crypto::cert::quinn::{client_config, server_config},
+    crypto::cert::quinn::server_config,
 };
 
 use super::{Replica, ReplicaAction, Spec, ToClient, ToReplica, message};
@@ -42,29 +43,15 @@ pub async fn client_task(
     config: ClientConfig,
     service_config: ServiceConfig,
     id: ClientId,
-    mut invoke_receiver: Receiver<(Vec<u8>, Option<Vec<u8>>)>,
+    mut invoke_receiver: Receiver<Invoke>,
     commit_sender: Sender<ClientId>,
 ) -> anyhow::Result<Histogram<u32>> {
-    let mut replica_egresses = Vec::new();
-    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
     let (message_sender, mut message_receiver) = mpsc::channel(64);
-    let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
-    endpoint.set_default_client_config(client_config());
-    for &addr in &service_config.server_external_addresses {
-        let connection = endpoint.connect(addr, "server.example")?.await?;
-        read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), false));
-        replica_egresses.push(connection);
-    }
-    for egress in &mut replica_egresses {
-        egress
-            .open_uni()
-            .await?
-            .write_all(&id.to_le_bytes())
-            .await?;
-    }
-    let mut write_message = WriteMessage::new();
+    let (mut read_tasks, replica_egresses) =
+        boot_client(id, service_config, message_sender).await?;
 
     let mut seq = 0;
+    let mut write_message = WriteMessage::new();
     let mut latencies = Histogram::new(3)?;
     struct SeqScratch {
         results: Quorum<Vec<u8>>,
@@ -74,18 +61,18 @@ pub async fn client_task(
     let mut seq_scratch = BTreeMap::new();
     loop {
         enum Select {
-            Invoke(Option<(Vec<u8>, Option<Vec<u8>>)>),
+            Invoke(Option<Invoke>),
             Message(Option<ToClient>),
             JoinNext(()),
         }
-        use Select::*;
         match tokio::select! {
-            invoke = invoke_receiver.recv() => Invoke(invoke),
-            message = message_receiver.recv() => Message(message),
-            Some(result) = read_tasks.join_next() => JoinNext(result??)
+            invoke = invoke_receiver.recv() => Select::Invoke(invoke),
+            message = message_receiver.recv() => Select::Message(message),
+            Some(result) = read_tasks.join_next() => Select::JoinNext(result??)
         } {
-            Invoke(None) => break Ok(latencies),
-            Invoke(Some((op, result))) => {
+            Select::JoinNext(()) => unreachable!(),
+            Select::Invoke(None) => break Ok(latencies),
+            Select::Invoke(Some((op, result))) => {
                 seq += 1;
                 let command = Command {
                     client_id: id,
@@ -107,7 +94,7 @@ pub async fn client_task(
                     },
                 );
             }
-            Message(reply) => {
+            Select::Message(reply) => {
                 let Some(reply) = reply else {
                     anyhow::bail!("message receive channel close")
                 };
@@ -132,7 +119,6 @@ pub async fn client_task(
                     commit_sender.send(id).await?
                 }
             }
-            JoinNext(()) => unreachable!(),
         }
     }
 }

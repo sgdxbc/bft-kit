@@ -1,7 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use bincode::{Decode, Encode};
-use futures::channel::mpsc::Receiver;
 use quinn::{Connection, ConnectionError, Endpoint};
 use tokio::{sync::mpsc::Sender, task::JoinSet, time::sleep, try_join};
 
@@ -81,17 +80,41 @@ impl AbstractEgress for &'_ Connection {
     }
 }
 
-pub type Invoke = (Vec<u8>, Option<Vec<u8>>);
-
-pub trait AbstractClientTask {
-    fn run(
-        id: ClientId,
-        config: ClientConfig,
-        service_config: ServiceConfig,
-        invoke_receiver: Receiver<Invoke>,
-        commit_sender: Sender<ClientId>,
-    ) -> anyhow::Result<()>;
+#[derive(Debug, Clone)]
+pub struct ServiceConfig {
+    pub server_external_addresses: Vec<SocketAddr>,
 }
+
+pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
+    id: ClientId,
+    service_config: ServiceConfig,
+    message_sender: Sender<M>,
+) -> anyhow::Result<(JoinSet<Result<(), anyhow::Error>>, Vec<Connection>)> {
+    let mut replica_egresses = Vec::new();
+    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
+    let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
+    endpoint.set_default_client_config(client_config());
+    for &addr in &service_config.server_external_addresses {
+        let connection = endpoint.connect(addr, "server.example")?.await?;
+        read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), false));
+        replica_egresses.push(connection);
+    }
+    for egress in &mut replica_egresses {
+        egress
+            .open_uni()
+            .await?
+            .write_all(&id.to_le_bytes())
+            .await?;
+    }
+    Ok((read_tasks, replica_egresses))
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientConfig {
+    pub num_max_concurrent: usize,
+}
+
+pub type Invoke = (Vec<u8>, Option<Vec<u8>>);
 
 #[derive(Debug, Clone)]
 pub struct BootServerConfig {
@@ -173,14 +196,4 @@ pub async fn boot_server<M: Decode<()> + Send + Sync + 'static>(
         read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), false));
     }
     Ok((read_tasks, replica_egresses))
-}
-
-#[derive(Debug, Clone)]
-pub struct ServiceConfig {
-    pub server_external_addresses: Vec<SocketAddr>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ClientConfig {
-    pub num_max_concurrent: usize,
 }
