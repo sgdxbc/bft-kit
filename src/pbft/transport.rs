@@ -321,7 +321,7 @@ async fn boot_server(
     replica_id: ReplicaId,
     config: TaskConfig,
     read_sender: Sender<ToReplica>,
-) -> anyhow::Result<(JoinSet<anyhow::Result<()>>, HashMap<u8, Connection>)> {
+) -> anyhow::Result<(JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>)> {
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(None);
     let transport = Arc::new(transport);
