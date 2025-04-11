@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     common::{
-        ClientId, CommandPool, ReplicaId,
+        ClientId, CommandPool, Quorum, ReplicaId,
         client::{self},
     },
     crypto::{self, Digest, Sha256Hash, sign, verify},
@@ -168,8 +168,6 @@ struct Block {
     prepare_quorum: Option<Quorum<Sig>>,
     commit_quorum: Option<Quorum<Sig>>,
 }
-
-type Quorum<T> = HashMap<ReplicaId, T>;
 
 enum ReplicaCoreEvent {
     // main path: Request -> Propose -> Proposal (-> Prepare) -> PrepareQuorum

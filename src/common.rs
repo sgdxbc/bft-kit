@@ -9,6 +9,7 @@ pub use command_pool::CommandPool;
 
 #[cfg(test)]
 pub mod testing; // no test inside, common infrastructure for writing tests
+pub mod transport;
 
 // pub type ClientId = u32;
 pub use client::Id as ClientId;
@@ -103,6 +104,8 @@ pub enum ReplicaAction<M> {
     // permissionless convention and saying the commands "reach the finality"
     Finalize(Vec<Command>),
 }
+
+pub type Quorum<T> = std::collections::HashMap<ReplicaId, T>;
 
 pub fn fmt_bytes(bytes: &[u8], f: &mut Formatter<'_>) -> fmt::Result {
     let prefix_hex = bytes.iter().take(4).fold(String::new(), |mut s, b| {

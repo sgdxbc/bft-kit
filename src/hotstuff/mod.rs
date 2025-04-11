@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     iter::repeat_with,
-    mem::{replace, take},
+    mem::take,
     ops::Deref,
 };
 
@@ -9,7 +9,7 @@ use bincode::{Decode, Encode};
 use slab::Slab;
 
 use crate::{
-    common::{ClientId, CommandPool, ReplicaId, client},
+    common::{CommandPool, ReplicaId},
     crypto::{
         Digest, Sha256Hash,
         threshold::{
@@ -21,6 +21,7 @@ use crate::{
 };
 
 mod message;
+pub mod transport;
 
 pub use crate::common::Command;
 pub use message::Reply as ToClient;
@@ -29,82 +30,6 @@ pub use message::Reply as ToClient;
 pub struct Spec {
     pub num_faulty: ReplicaId,
     pub num_replica: ReplicaId,
-}
-
-#[derive(Debug)]
-pub struct ClientConfig {
-    pub spec: Spec,
-    pub id: ClientId,
-}
-
-pub struct Client {
-    config: ClientConfig,
-    seq: u32,
-    seq_ticked: u32,
-    op: Option<Vec<u8>>,
-    results: HashMap<ReplicaId, Vec<u8>>,
-}
-
-type ClientAction = client::Action<ToReplica>;
-
-impl Client {
-    pub fn new(config: ClientConfig) -> Self {
-        Self {
-            config,
-            seq: 0,
-            seq_ticked: 0,
-            op: None,
-            results: Default::default(),
-        }
-    }
-
-    pub fn invoke(&mut self, op: Vec<u8>) -> ClientAction {
-        assert!(self.op.is_none());
-        self.op = Some(op.clone());
-        self.seq += 1;
-        let command = Command {
-            client_id: self.config.id,
-            seq: self.seq,
-            op,
-        };
-        ClientAction::SendToAllReplicas(ToReplica::Request(command))
-    }
-
-    pub fn tick(&mut self) -> ClientAction {
-        if replace(&mut self.seq_ticked, self.seq) != self.seq {
-            return ClientAction::Nop;
-        }
-        let Some(op) = self.op.clone() else {
-            return ClientAction::Nop;
-        };
-        tracing::warn!(%self.config.id, self.seq, "resend request");
-        let command = Command {
-            client_id: self.config.id,
-            seq: self.seq,
-            op,
-        };
-        ClientAction::SendToAllReplicas(ToReplica::Request(command))
-    }
-
-    pub fn receive(&mut self, reply: message::Reply) -> ClientAction {
-        if reply.seq != self.seq || self.op.is_none() {
-            return ClientAction::Nop;
-        }
-        self.results.insert(reply.replica_id, reply.result.clone());
-        if self
-            .results
-            .values()
-            .filter(|&result| result == &reply.result)
-            .count() as ReplicaId
-            == self.config.spec.num_faulty + 1
-        {
-            self.op = None;
-            self.results.clear();
-            ClientAction::Return(reply.result)
-        } else {
-            ClientAction::Nop
-        }
-    }
 }
 
 #[derive(Debug)]

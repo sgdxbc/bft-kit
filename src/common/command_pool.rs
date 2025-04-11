@@ -13,9 +13,10 @@ use super::{ClientId, ClientSeq, Command};
 // they also ensure idempotent: if a command is `push`ed or `commit`ed, `push`
 // it again will return false and it will not be returned by `close_batch` one
 // more time for that
-// finally, they are also bounded. the maximum size of open loop pool is MAX_LEN
-// while the maximum size of close loop pool is the number of concurrent clients
-// as it precisely keeps at most one command per client
+// finally, they are also bounded. even if `close_batch` is never called (such
+// as the case of a backup replica), the maximum size of open loop pool is
+// MAX_LEN while the maximum size of close loop pool is the number of concurrent
+// clients as it precisely keeps at most one command per client
 // the difference of the pools is noted below
 pub enum CommandPool {
     CloseLoop(close_loop::CommandPool),
@@ -112,9 +113,8 @@ pub mod open_loop {
             // it is possible to achieve "high resolution" command purging here, based on
             // the fact that the replicated service will not respect any future committed
             // commands from the same client with lower sequence numbers
-            // however, assuming the replica can receive commands for all the time, it's
-            // highly likely that those previous commands are evicted (from the future
-            // batches) by the freshly received ones
+            // however, based on how open loop works (e.g. implied by the `close_batch`
+            // logic), those older commands are probably not in the buffer already
         }
     }
 }

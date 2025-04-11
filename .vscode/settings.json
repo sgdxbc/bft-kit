@@ -1,3 +1,4 @@
 {
-    "rust-analyzer.completion.addSemicolonToUnit": false
+    "rust-analyzer.completion.addSemicolonToUnit": false,
+    "explorer.sortOrder": "mixed"
 }
