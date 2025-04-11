@@ -164,3 +164,8 @@ pub async fn boot_server<M: Decode<()> + Send + Sync + 'static>(
 pub struct ServiceConfig {
     pub server_external_addresses: Vec<SocketAddr>,
 }
+
+#[derive(Debug, Clone)]
+pub struct ClientConfig {
+    pub num_max_concurrent: usize,
+}

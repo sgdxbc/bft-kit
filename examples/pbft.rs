@@ -1,7 +1,7 @@
 use std::{env::args, time::Duration};
 
 use bft_testbed::{
-    common::ClientId,
+    common::{ClientId, transport::BootServerConfig},
     init_logging,
     pbft::{
         Client, ClientConfig, Replica, ReplicaCoreConfig, Spec,
@@ -25,6 +25,13 @@ async fn main() -> anyhow::Result<()> {
         num_replica: 4,
     };
     let task_config = TaskConfig {
+        boot_server: BootServerConfig {
+            server_internal_addresses: (0..spec.num_replica)
+                .map(|i| ([127, 0, 0, 1], 8000 + i as u16).into())
+                .collect(),
+            server_interconnect_delay: Duration::from_millis(100),
+        },
+
         // these two values unused. this example sends single request from one client
         num_client: 0,
         client_duration: Duration::ZERO,
@@ -35,10 +42,6 @@ async fn main() -> anyhow::Result<()> {
         replica_external_addresses: (0..spec.num_replica)
             .map(|i| ([127, 0, 0, 1], 50000 + i as u16).into())
             .collect(),
-        replica_internal_addresses: (0..spec.num_replica)
-            .map(|i| ([127, 0, 0, 1], 8000 + i as u16).into())
-            .collect(),
-        replica_connect_delay: Duration::from_millis(100),
     };
     let mut server_tasks = JoinSet::new();
     for i in 0..spec.num_replica {

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, str::FromStr, time::Duration};
 
 #[derive(Debug, Clone, Default)]
 pub struct Options(HashMap<String, Vec<String>>);
@@ -49,5 +49,38 @@ impl Options {
             .iter()
             .map(|value| value.parse())
             .collect::<Result<_, _>>()?)
+    }
+}
+
+impl TryFrom<Options> for super::transport::BootServerConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(options: Options) -> Result<Self, Self::Error> {
+        Ok(Self {
+            server_internal_addresses: options.get_values("server_internal_address")?,
+            server_interconnect_delay: Duration::from_secs_f32(
+                options.get("server_interconnect_delay")?,
+            ),
+        })
+    }
+}
+
+impl TryFrom<Options> for super::transport::ServiceConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(options: Options) -> Result<Self, Self::Error> {
+        Ok(Self {
+            server_external_addresses: options.get_values("server_external_address")?,
+        })
+    }
+}
+
+impl TryFrom<Options> for super::transport::ClientConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(options: Options) -> Result<Self, Self::Error> {
+        Ok(Self {
+            num_max_concurrent: options.get("num_max_concurrent")?,
+        })
     }
 }

@@ -3,7 +3,7 @@ use std::time::Duration;
 use bft_testbed::{
     common::{
         ClientId,
-        transport::{BootServerConfig, ServiceConfig},
+        transport::{BootServerConfig, ClientConfig, ServiceConfig},
     },
     crypto::threshold::givre_replica_key_shares,
     hotstuff::{
@@ -24,12 +24,6 @@ async fn main() -> anyhow::Result<()> {
         num_replica: 4,
     };
     let task_config = TaskConfig {
-        // these two values unused. this example sends single request from one client
-        num_client: 0,
-        client_duration: Duration::ZERO,
-
-        // effectively disable ticks
-        replica_tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
         service: ServiceConfig {
             server_external_addresses: (0..spec.num_replica)
                 .map(|i| ([127, 0, 0, 1], 50000 + i as u16).into())
@@ -41,6 +35,16 @@ async fn main() -> anyhow::Result<()> {
                 .collect(),
             server_interconnect_delay: Duration::from_millis(100),
         },
+        client: ClientConfig {
+            num_max_concurrent: 1,
+        },
+
+        // these two values unused. this example sends single request from one client
+        num_client: 0,
+        client_duration: Duration::ZERO,
+
+        // effectively disable ticks
+        tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
     };
     let key_shares = givre_replica_key_shares(spec.num_replica, spec.num_faulty);
 
@@ -72,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let (commit_sender, mut commit_receiver) = mpsc::channel(1);
     let client_task = client_task(
         spec,
+        task_config.client,
         task_config.service,
         ClientId(0),
         invoke_receiver,

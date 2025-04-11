@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, pin::pin, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, pin::pin, time::Duration};
 
 use bincode::{Decode, Encode};
 use hdrhistogram::Histogram;
@@ -8,11 +8,13 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
     time::{Instant, sleep, timeout_at},
-    try_join,
 };
 
 use crate::{
-    common::{ClientId, ReplicaId},
+    common::{
+        ClientId, ReplicaId,
+        transport::{BootServerConfig, boot_server},
+    },
     crypto::cert::quinn::{client_config, server_config},
     pbft::ViewNum,
 };
@@ -21,16 +23,12 @@ use super::{Client, ClientAction, ClientConfig, Replica, ReplicaAction, Spec, To
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
+    pub boot_server: BootServerConfig,
     pub num_client: usize,
     pub client_tick_interval: Duration,
     pub client_duration: Duration,
     pub replica_tick_interval: Duration,
     pub replica_external_addresses: Vec<SocketAddr>,
-    pub replica_internal_addresses: Vec<SocketAddr>,
-    // how long should replicas wait before attempting to connect each other's
-    // internal addresses. set longer in higher latency environments (or human
-    // action is involved)
-    pub replica_connect_delay: Duration,
 }
 
 pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
@@ -317,77 +315,6 @@ where
     }
 }
 
-async fn boot_server(
-    replica_id: ReplicaId,
-    config: TaskConfig,
-    read_sender: Sender<ToReplica>,
-) -> anyhow::Result<(JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>)> {
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(None);
-    let transport = Arc::new(transport);
-    let mut internal_endpoint = Endpoint::server(
-        // server_config(),
-        {
-            let mut config = server_config();
-            config.transport_config(transport.clone());
-            config
-        },
-        config.replica_internal_addresses[replica_id as usize],
-    )?;
-    internal_endpoint.set_default_client_config({
-        let mut config = client_config();
-        config.transport_config(transport);
-        config
-    });
-    let active_task = async {
-        sleep(config.replica_connect_delay).await;
-        let mut connections = HashMap::new();
-        for (i, &addr) in config
-            .replica_internal_addresses
-            .iter()
-            .enumerate()
-            .skip(replica_id as usize + 1)
-        {
-            let connection = internal_endpoint.connect(addr, "server.example")?.await?;
-            connection
-                .open_uni()
-                .await?
-                // to need to `to_le_bytes()` for current u8 based ReplicaId, just future proof
-                .write_all(&replica_id.to_le_bytes())
-                .await?;
-            connections.insert(i as ReplicaId, connection);
-        }
-        anyhow::Ok(connections)
-    };
-    let passive_task = async {
-        let mut connections = HashMap::new();
-        for _ in 0..replica_id {
-            let connection = internal_endpoint
-                .accept()
-                .await
-                .expect("endpoint not closed")
-                .await?;
-            let mut replica_id = [0; size_of::<ReplicaId>()];
-            connection
-                .accept_uni()
-                .await?
-                .read_exact(&mut replica_id)
-                .await?;
-            connections.insert(ReplicaId::from_le_bytes(replica_id), connection);
-        }
-        Ok(connections)
-    };
-    let (mut connections, other_connections) = try_join!(active_task, passive_task)?;
-    connections.extend(other_connections);
-    anyhow::ensure!(connections.len() == config.replica_internal_addresses.len() - 1);
-    let replica_egresses = connections;
-    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
-    for connection in replica_egresses.values() {
-        read_tasks.spawn(read_task(connection.clone(), read_sender.clone(), false));
-    }
-    Ok((read_tasks, replica_egresses))
-}
-
 pub struct Finalize {
     commands: Vec<super::Command>,
     view_num: ViewNum,
@@ -515,7 +442,7 @@ impl AbstractServer for Server {
             HashMap<ReplicaId, Self::Egress>,
         )>,
     > {
-        boot_server(replica_id, config, read_sender)
+        boot_server(replica_id, config.boot_server, read_sender)
     }
 
     fn service_task(

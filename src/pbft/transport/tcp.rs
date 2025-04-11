@@ -10,7 +10,7 @@ use tokio::{
     try_join,
 };
 
-use crate::common::{ClientId, ReplicaId};
+use crate::common::{ClientId, ReplicaId, transport::BootServerConfig};
 
 use crate::pbft::{Client, ClientAction, ToReplica, message};
 
@@ -143,23 +143,26 @@ impl super::AbstractClientTask for ClientTask {
     }
 }
 
+// duplicating common::transport::boot_server
+// currently no plan to extract this into common as well since no plan to have
+// more protocols to support tcp
 async fn boot_server(
     replica_id: ReplicaId,
-    config: TaskConfig,
+    config: BootServerConfig,
     read_sender: Sender<ToReplica>,
 ) -> anyhow::Result<(JoinSet<anyhow::Result<()>>, HashMap<u8, OwnedWriteHalf>)> {
     let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
     let new_socket = || {
         let socket = TcpSocket::new_v4()?;
         socket.set_reuseport(true)?;
-        socket.bind(config.replica_internal_addresses[replica_id as usize])?;
+        socket.bind(config.server_internal_addresses[replica_id as usize])?;
         anyhow::Ok(socket)
     };
     let active_task = async {
-        sleep(config.replica_connect_delay).await;
+        sleep(config.server_interconnect_delay).await;
         let mut connections = HashMap::new();
         for (i, &addr) in config
-            .replica_internal_addresses
+            .server_internal_addresses
             .iter()
             .enumerate()
             .skip(replica_id as usize + 1)
@@ -185,7 +188,7 @@ async fn boot_server(
     };
     let (mut connections, other_connections) = try_join!(active_task, passive_task)?;
     connections.extend(other_connections);
-    anyhow::ensure!(connections.len() == config.replica_internal_addresses.len() - 1);
+    anyhow::ensure!(connections.len() == config.server_internal_addresses.len() - 1);
     let mut replica_egresses = HashMap::new();
     for (replica_id, connection) in connections {
         let (read_half, write_half) = connection.into_split();
@@ -306,7 +309,7 @@ impl AbstractServer for Server {
             HashMap<ReplicaId, Self::Egress>,
         )>,
     > {
-        boot_server(replica_id, config, read_sender)
+        boot_server(replica_id, config.boot_server, read_sender)
     }
 
     fn service_task(

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, pin::pin, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    pin::pin,
+    time::Duration,
+};
 
 use hdrhistogram::Histogram;
 use quinn::{Connection, Endpoint};
@@ -12,7 +16,9 @@ use tokio::{
 use crate::{
     common::{
         ClientId, Command, Quorum, ReplicaId,
-        transport::{BootServerConfig, ServiceConfig, WriteMessage, boot_server, read_task},
+        transport::{
+            BootServerConfig, ClientConfig, ServiceConfig, WriteMessage, boot_server, read_task,
+        },
     },
     crypto::cert::quinn::{client_config, server_config},
 };
@@ -21,18 +27,20 @@ use super::{Replica, ReplicaAction, Spec, ToClient, ToReplica, message};
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
+    pub client: ClientConfig,
     pub boot_server: BootServerConfig,
     pub service: ServiceConfig,
     pub num_client: usize,
     pub client_duration: Duration,
-    pub replica_tick_interval: Duration,
+    pub tick_interval: Duration,
 }
 
 pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
 
 pub async fn client_task(
     spec: Spec,
-    config: ServiceConfig,
+    config: ClientConfig,
+    service_config: ServiceConfig,
     id: ClientId,
     mut invoke_receiver: Receiver<(Vec<u8>, Option<Vec<u8>>)>,
     commit_sender: Sender<ClientId>,
@@ -42,7 +50,7 @@ pub async fn client_task(
     let (message_sender, mut message_receiver) = mpsc::channel(64);
     let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(client_config());
-    for &addr in &config.server_external_addresses {
+    for &addr in &service_config.server_external_addresses {
         let connection = endpoint.connect(addr, "server.example")?.await?;
         read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), false));
         replica_egresses.push(connection);
@@ -63,7 +71,7 @@ pub async fn client_task(
         expected_result: Option<Vec<u8>>,
         start: Instant,
     }
-    let mut seq_scratch = HashMap::new();
+    let mut seq_scratch = BTreeMap::new();
     loop {
         enum Select {
             Invoke(Option<(Vec<u8>, Option<Vec<u8>>)>),
@@ -87,6 +95,9 @@ pub async fn client_task(
                 write_message
                     .run(ToReplica::Request(command), &replica_egresses)
                     .await?;
+                if seq_scratch.len() == config.num_max_concurrent {
+                    seq_scratch.pop_first();
+                }
                 seq_scratch.insert(
                     seq,
                     SeqScratch {
@@ -140,6 +151,7 @@ pub async fn run_close_loop_clients(
         anyhow::ensure!(replaced.is_none());
         client_tasks.spawn(client_task(
             spec.clone(),
+            config.client.clone(),
             config.service.clone(),
             id,
             invoke_receiver,
@@ -329,7 +341,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
         }
         use Select::*;
         match tokio::select! {
-            () = sleep(config.replica_tick_interval) => Sleep,
+            () = sleep(config.tick_interval) => Sleep,
             message = message_receiver.recv() => Message(message),
             result = &mut service_task => Service(result?),
             Some(result) = read_tasks.join_next() => ReadJoin(result??)
