@@ -3,9 +3,7 @@ use std::{env::args, path::PathBuf, time::Duration};
 use bft_testbed::{
     common::parse::Options,
     init_logging,
-    pbft::transport::{
-        ClientTask, TaskConfig, WARMUP_DURATION, concurrent_close_loop_clients_task,
-    },
+    pbft::transport::{TaskConfig, WARMUP_DURATION, run_close_loop_clients},
 };
 use hdrhistogram::Histogram;
 use tokio::fs::read_to_string;
@@ -21,10 +19,9 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(task_config_path.with_file_name("spec.conf")).await?);
 
     let task_config = TaskConfig::try_from(options.clone())?;
-    let client_latencies =
-        concurrent_close_loop_clients_task::<ClientTask>(options.try_into()?, task_config.clone())
-            .instrument(tracing::info_span!("concurrent close loops"))
-            .await?;
+    let client_latencies = run_close_loop_clients(options.try_into()?, task_config.clone())
+        .instrument(tracing::info_span!("concurrent close loops"))
+        .await?;
     // concurrent_close_loop_clients_task::<tcp::ClientTask>(options.try_into()?, task_config.clone())
     //     .instrument(tracing::info_span!("concurrent close loops"))
     //     .await?;

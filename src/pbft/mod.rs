@@ -1,13 +1,10 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     mem::{replace, take},
 };
 
 use crate::{
-    common::{
-        ClientId, CommandPool, Quorum, ReplicaId,
-        client::{self},
-    },
+    common::{CommandPool, Quorum, ReplicaId},
     crypto::{self, Digest, Sha256Hash, sign, verify},
 };
 
@@ -30,6 +27,8 @@ impl Spec {
     }
 }
 
+pub type ToClient = message::Reply;
+
 pub use crate::common::Command;
 
 #[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
@@ -43,90 +42,6 @@ pub enum ToReplica {
     Prepare(message::Vote),
     Commit(message::Vote),
     // TODO recover path messages
-}
-
-#[derive(Debug)]
-pub struct ClientConfig {
-    pub spec: Spec,
-    pub id: ClientId,
-}
-
-pub struct Client {
-    config: ClientConfig,
-    view_num: ViewNum,
-    seq: u32,
-    seq_ticked: u32,
-    op: Option<Vec<u8>>,
-    results: HashMap<ReplicaId, Vec<u8>>,
-}
-
-type ClientAction = client::Action<ToReplica>;
-
-impl Client {
-    pub fn new(config: ClientConfig) -> Self {
-        Self {
-            config,
-            view_num: 0,
-            seq: 0,
-            seq_ticked: 0,
-            op: None,
-            results: Default::default(),
-        }
-    }
-
-    pub fn invoke(&mut self, op: Vec<u8>) -> ClientAction {
-        assert!(self.op.is_none());
-        self.op = Some(op.clone());
-        self.seq += 1;
-        let command = Command {
-            client_id: self.config.id,
-            seq: self.seq,
-            op,
-        };
-        ClientAction::SendToReplica(
-            self.config.spec.primary(self.view_num),
-            ToReplica::Request(command),
-        )
-    }
-
-    pub fn tick(&mut self) -> ClientAction {
-        if replace(&mut self.seq_ticked, self.seq) != self.seq {
-            return ClientAction::Nop;
-        }
-        let Some(op) = self.op.clone() else {
-            return ClientAction::Nop;
-        };
-        tracing::warn!(%self.config.id, self.seq, "resend request");
-        let command = Command {
-            client_id: self.config.id,
-            seq: self.seq,
-            op,
-        };
-        ClientAction::SendToAllReplicas(ToReplica::Request(command))
-    }
-
-    pub fn receive(&mut self, reply: message::Reply) -> ClientAction {
-        if reply.seq != self.seq || self.op.is_none() {
-            return ClientAction::Nop;
-        }
-        self.results.insert(reply.replica_id, reply.result.clone());
-        if self
-            .results
-            .values()
-            .filter(|&result| result == &reply.result)
-            .count() as ReplicaId
-            == self.config.spec.num_faulty + 1
-        {
-            // paper does not specify how to keep track of current view, just arbitrarily
-            // implement
-            self.view_num = reply.view_num;
-            self.op = None;
-            self.results.clear();
-            ClientAction::Return(reply.result)
-        } else {
-            ClientAction::Nop
-        }
-    }
 }
 
 #[derive(Debug)]

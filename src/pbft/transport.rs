@@ -1,4 +1,8 @@
-use std::{collections::HashMap, net::SocketAddr, pin::pin, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    pin::pin,
+    time::Duration,
+};
 
 use hdrhistogram::Histogram;
 use quinn::{Connection, Endpoint};
@@ -11,163 +15,159 @@ use tokio::{
 
 use crate::{
     common::{
-        ClientId, ReplicaId,
-        transport::{AbstractEgress, BootServerConfig, WriteMessage, boot_server, read_task},
+        ClientId, Quorum, ReplicaId,
+        transport::{
+            AbstractEgress, BootServerConfig, ClientConfig, Invoke, ServiceConfig, WriteMessage,
+            boot_client, boot_server, read_task,
+        },
     },
-    crypto::cert::quinn::{client_config, server_config},
-    pbft::ViewNum,
+    crypto::cert::quinn::server_config,
+    pbft::{Command, ToClient, ViewNum},
 };
 
-use super::{Client, ClientAction, ClientConfig, Replica, ReplicaAction, Spec, ToReplica, message};
-
-#[derive(Debug, Clone)]
-pub struct TaskConfig {
-    pub boot_server: BootServerConfig,
-    pub num_client: usize,
-    pub client_tick_interval: Duration,
-    pub client_duration: Duration,
-    pub replica_tick_interval: Duration,
-    pub replica_external_addresses: Vec<SocketAddr>,
-}
-
-pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
+use super::{Replica, ReplicaAction, Spec, ToReplica, message};
 
 // the first transport implemented is with TCP but it doesn't work well (or it
 // is just broken), archive it in case of needed
 pub mod tcp;
 
-pub struct ClientTask {
-    client: Client,
-    config: TaskConfig,
-    replica_ingress: Receiver<message::Reply>,
-    read_tasks: JoinSet<anyhow::Result<()>>,
-    replica_egresses: Vec<Connection>,
-    write_message: WriteMessage,
+#[derive(Debug, Clone)]
+pub struct TaskConfig {
+    pub client: ClientConfig,
+    pub boot_server: BootServerConfig,
+    pub service: ServiceConfig,
+    pub num_client: usize,
+    pub client_duration: Duration,
+    pub replica_tick_interval: Duration,
 }
 
-impl ClientTask {
-    pub async fn init(client: Client, config: TaskConfig) -> anyhow::Result<Self> {
-        let mut replica_egresses = Vec::new();
-        let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
-        let (read_sender, read_receiver) = mpsc::channel(64);
-        let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
-        endpoint.set_default_client_config(client_config());
-        for &addr in &config.replica_external_addresses {
-            let connection = endpoint.connect(addr, "server.example")?.await?;
-            read_tasks.spawn(read_task(connection.clone(), read_sender.clone(), false));
-            replica_egresses.push(connection);
-        }
-        for egress in &mut replica_egresses {
-            egress
-                .open_uni()
-                .await?
-                .write_all(&client.config.id.to_le_bytes())
-                .await?;
-        }
+pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
 
-        Ok(Self {
-            client,
-            config,
-            replica_ingress: read_receiver,
-            read_tasks,
-            replica_egresses,
-            write_message: WriteMessage::new(),
-        })
+pub async fn client_task(
+    spec: Spec,
+    config: ClientConfig,
+    service_config: ServiceConfig,
+    id: ClientId,
+    mut invoke_receiver: Receiver<Invoke>,
+    commit_sender: Sender<ClientId>,
+) -> anyhow::Result<Histogram<u32>> {
+    let (message_sender, mut message_receiver) = mpsc::channel(64);
+    let (mut read_tasks, replica_egresses) =
+        boot_client(id, service_config, message_sender).await?;
+
+    let mut seq = 0;
+    let mut write_message = WriteMessage::new();
+    let mut latencies = Histogram::new(3)?;
+    struct SeqScratch {
+        results: Quorum<Vec<u8>>,
+        expected_result: Option<Vec<u8>>,
+        start: Instant,
     }
-
-    pub async fn invoke(&mut self, op: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        let mut action = self.client.invoke(op);
-        loop {
-            tracing::trace!(?action);
-            match action {
-                ClientAction::Nop => {}
-                ClientAction::SendToReplica(replica_id, message) => {
-                    self.write_message
-                        .run(message, [&self.replica_egresses[replica_id as usize]])
-                        .await?
+    let mut seq_scratch = BTreeMap::new();
+    loop {
+        enum Select {
+            Invoke(Option<Invoke>),
+            Message(Option<ToClient>),
+            JoinNext(()),
+        }
+        match tokio::select! {
+            invoke = invoke_receiver.recv() => Select::Invoke(invoke),
+            message = message_receiver.recv() => Select::Message(message),
+            Some(result) = read_tasks.join_next() => Select::JoinNext(result??)
+        } {
+            Select::JoinNext(()) => unreachable!(),
+            Select::Invoke(None) => break Ok(latencies),
+            Select::Invoke(Some((op, result))) => {
+                seq += 1;
+                let command = Command {
+                    client_id: id,
+                    seq,
+                    op,
+                };
+                write_message
+                    .run(ToReplica::Request(command), &replica_egresses)
+                    .await?;
+                if seq_scratch.len() == config.num_max_concurrent {
+                    seq_scratch.pop_first();
                 }
-                ClientAction::SendToAllReplicas(message) => {
-                    self.write_message
-                        .run(message, &self.replica_egresses)
-                        .await?
+                seq_scratch.insert(
+                    seq,
+                    SeqScratch {
+                        results: Default::default(),
+                        expected_result: result,
+                        start: Instant::now(),
+                    },
+                );
+            }
+            Select::Message(reply) => {
+                let Some(reply) = reply else {
+                    anyhow::bail!("message receive channel close")
+                };
+                let Some(scratch) = seq_scratch.get_mut(&reply.seq) else {
+                    continue;
+                };
+                scratch
+                    .results
+                    .insert(reply.replica_id, reply.result.clone());
+                if scratch
+                    .results
+                    .values()
+                    .filter(|&result| result == &reply.result)
+                    .count() as ReplicaId
+                    == spec.num_faulty + 1
+                {
+                    let scratch = seq_scratch.remove(&reply.seq).unwrap();
+                    if let Some(result) = scratch.expected_result {
+                        anyhow::ensure!(reply.result == result)
+                    }
+                    latencies += scratch.start.elapsed().as_micros() as u64;
+                    commit_sender.send(id).await?
                 }
-                ClientAction::Return(result) => break Ok(result),
-            }
-            // tracing::trace!("action performed");
-
-            enum Select {
-                Sleep,
-                Read(Option<message::Reply>),
-                Join(()),
-            }
-            use Select::*;
-            action = match tokio::select! {
-                () = sleep(self.config.client_tick_interval) => Sleep,
-                reply = self.replica_ingress.recv() => Read(reply),
-                Some(result) = self.read_tasks.join_next() => Join(result??),
-            } {
-                Sleep => self.client.tick(),
-                Read(reply) => self
-                    .client
-                    .receive(reply.ok_or(anyhow::format_err!("unexpect read channel close"))?),
-                Join(()) => unreachable!(),
             }
         }
     }
 }
 
-pub trait AbstractClientTask: Sized {
-    fn init(client: Client, config: TaskConfig) -> impl Future<Output = anyhow::Result<Self>>;
-    fn invoke(&mut self, op: Vec<u8>) -> impl Future<Output = anyhow::Result<Vec<u8>>> + Send;
-}
-
-impl AbstractClientTask for ClientTask {
-    fn init(client: Client, config: TaskConfig) -> impl Future<Output = anyhow::Result<Self>> {
-        Self::init(client, config)
-    }
-
-    fn invoke(&mut self, op: Vec<u8>) -> impl Future<Output = anyhow::Result<Vec<u8>>> + Send {
-        Self::invoke(self, op)
-    }
-}
-
-pub async fn concurrent_close_loop_clients_task<C: AbstractClientTask + Send + 'static>(
+pub async fn run_close_loop_clients(
     spec: Spec,
     config: TaskConfig,
 ) -> anyhow::Result<Vec<Histogram<u32>>> {
-    let mut client_tasks = Vec::new();
+    let mut client_tasks = JoinSet::new();
+    let mut invoke_senders = HashMap::new();
+    let (commit_sender, mut commit_receiver) = mpsc::channel(64);
     for _ in 0..config.num_client {
-        let client = Client::new(ClientConfig {
-            spec: spec.clone(),
-            id: random(),
-        });
-        client_tasks.push(C::init(client, config.clone()).await?)
+        let (invoke_sender, invoke_receiver) = mpsc::channel(64);
+        let id = ClientId(random());
+        let replaced = invoke_senders.insert(id, invoke_sender);
+        anyhow::ensure!(replaced.is_none());
+        client_tasks.spawn(client_task(
+            spec.clone(),
+            config.client.clone(),
+            config.service.clone(),
+            id,
+            invoke_receiver,
+            commit_sender.clone(),
+        ));
     }
-    let mut tasks = JoinSet::new();
-    for mut client_task in client_tasks {
-        let config = config.clone();
-        tasks.spawn(async move {
-            let now = Instant::now();
-            let deadline = now + config.client_duration;
-            let start_record = now + WARMUP_DURATION; // TODO configurable?
-            let mut latencies = Histogram::new(3)?;
-            loop {
-                let start = Instant::now();
-                let record = start >= start_record;
-                match timeout_at(deadline, client_task.invoke(Default::default())).await {
-                    Ok(result) => {
-                        result?;
-                        if record {
-                            latencies += start.elapsed().as_micros() as u64
-                        }
-                    }
-                    Err(_) => break anyhow::Ok(latencies),
-                }
-            }
-        });
+    for sender in invoke_senders.values() {
+        sender
+            .send((Default::default(), Some(Default::default())))
+            .await?
     }
+
+    let deadline = Instant::now() + config.client_duration;
+    while let Ok(client_id) = timeout_at(deadline, commit_receiver.recv()).await {
+        let Some(client_id) = client_id else {
+            anyhow::bail!("commit receive channel closed")
+        };
+        invoke_senders[&client_id]
+            .send((Default::default(), Some(Default::default())))
+            .await?
+    }
+
+    drop(invoke_senders);
     let mut latencies = Vec::new();
-    while let Some(client_latencies) = tasks.join_next().await {
+    while let Some(client_latencies) = client_tasks.join_next().await {
         latencies.push(client_latencies??)
     }
     Ok(latencies)
@@ -279,14 +279,14 @@ pub struct Finalize {
 
 async fn service_task(
     replica_id: ReplicaId,
-    config: TaskConfig,
+    config: ServiceConfig,
     submit_sender: Sender<ToReplica>,
     mut finalize_receiver: Receiver<Finalize>,
 ) -> anyhow::Result<()> {
     let mut replies = HashMap::<ClientId, message::Reply>::new();
     let external_endpoint = Endpoint::server(
         server_config(),
-        config.replica_external_addresses[replica_id as usize],
+        config.server_external_addresses[replica_id as usize],
     )?;
     let mut read_tasks = JoinSet::new();
     let mut client_egresses = HashMap::new();
@@ -411,7 +411,7 @@ impl AbstractServer for Server {
         submit_sender: Sender<ToReplica>,
         finalize_receiver: Receiver<Finalize>,
     ) -> impl Future<Output = anyhow::Result<()>> {
-        service_task(replica_id, config, submit_sender, finalize_receiver)
+        service_task(replica_id, config.service, submit_sender, finalize_receiver)
     }
 
     fn into_egress(egress: &mut Self::Egress) -> impl AbstractEgress {

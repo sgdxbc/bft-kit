@@ -1,16 +1,19 @@
 use std::{env::args, time::Duration};
 
 use bft_testbed::{
-    common::{ClientId, transport::BootServerConfig},
+    common::{
+        ClientId,
+        transport::{BootServerConfig, ServiceConfig},
+    },
     init_logging,
     pbft::{
-        Client, ClientConfig, Replica, ReplicaCoreConfig, Spec,
-        transport::{ClientTask, Server, TaskConfig, server_task, tcp},
+        Replica, ReplicaCoreConfig, Spec,
+        transport::{Server, TaskConfig, client_task, server_task, tcp},
     },
 };
 use futures::FutureExt;
-use tokio::{task::JoinSet, time::timeout};
-use tracing::{Instrument, field};
+use tokio::{sync::mpsc, task::JoinSet, time::timeout};
+use tracing::Instrument;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,11 +28,19 @@ async fn main() -> anyhow::Result<()> {
         num_replica: 4,
     };
     let task_config = TaskConfig {
+        client: bft_testbed::common::transport::ClientConfig {
+            num_max_concurrent: 1,
+        },
         boot_server: BootServerConfig {
             server_internal_addresses: (0..spec.num_replica)
                 .map(|i| ([127, 0, 0, 1], 8000 + i as u16).into())
                 .collect(),
             server_interconnect_delay: Duration::from_millis(100),
+        },
+        service: ServiceConfig {
+            server_external_addresses: (0..spec.num_replica)
+                .map(|i| ([127, 0, 0, 1], 50000 + i as u16).into())
+                .collect(),
         },
 
         // these two values unused. this example sends single request from one client
@@ -37,11 +48,7 @@ async fn main() -> anyhow::Result<()> {
         client_duration: Duration::ZERO,
 
         // effectively disable ticks
-        client_tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
         replica_tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
-        replica_external_addresses: (0..spec.num_replica)
-            .map(|i| ([127, 0, 0, 1], 50000 + i as u16).into())
-            .collect(),
     };
     let mut server_tasks = JoinSet::new();
     for i in 0..spec.num_replica {
@@ -62,36 +69,47 @@ async fn main() -> anyhow::Result<()> {
         Ok(None) => unreachable!(),
         Err(_) => {}
     }
-    let config = ClientConfig {
-        spec,
-        id: ClientId(0),
-    };
-    let client = Client::new(config);
-    let span = tracing::info_span!("invoke", result = field::Empty);
-    let invoke_task = if !use_tcp {
-        async {
-            let mut client_task = ClientTask::init(client, task_config).await?;
-            tracing::info!("client initialized");
-            anyhow::Ok(client_task.invoke(Default::default()).await?)
-        }
+    let (invoke_sender, invoke_receiver) = mpsc::channel(1);
+    let (commit_sender, mut commit_receiver) = mpsc::channel(1);
+    let client_task = if !use_tcp {
+        client_task(
+            spec,
+            task_config.client,
+            task_config.service,
+            ClientId(0),
+            invoke_receiver,
+            commit_sender,
+        )
         .left_future()
     } else {
-        async {
-            let mut client_task = tcp::ClientTask::init(client, task_config).await?;
-            tracing::info!("client initialized");
-            anyhow::Ok(client_task.invoke(Default::default()).await?)
-        }
+        tcp::client_task(
+            spec,
+            task_config.client,
+            task_config.service,
+            ClientId(0),
+            invoke_receiver,
+            commit_sender,
+        )
         .right_future()
-    }
-    .instrument(span.clone());
-    let result = tokio::select! {
-        result = invoke_task => result?,
-        Some(result) = server_tasks.join_next() => {
-            result??;
-            unreachable!()
-        }
     };
-    span.record("result", &*result);
+    invoke_sender
+        .send((Default::default(), Some(Default::default())))
+        .await?;
+    async {
+        tokio::select! {
+            commit = commit_receiver.recv() => anyhow::Ok(commit.unwrap()),
+            result = client_task => {
+                result?;
+                unreachable!()
+            }
+            Some(result) = server_tasks.join_next() => {
+                result??;
+                unreachable!()
+            }
+        }
+    }
+    .instrument(tracing::info_span!("invoke"))
+    .await?;
     server_tasks.abort_all();
     Ok(())
 }

@@ -203,6 +203,7 @@ pub mod close_loop {
             if let Some(pending_index) = self.client_pending_index(command.client_id) {
                 if self.pending_queue[pending_index].seq <= command.seq {
                     self.pending_queue.swap_remove(pending_index);
+                    self.client_pending_offsets.remove(&command.client_id);
                     if let Some(swapped_request) = self.pending_queue.get(pending_index) {
                         self.client_pending_offsets.insert(
                             swapped_request.client_id,
