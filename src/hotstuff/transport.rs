@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, pin::pin, sync::Arc, time::Duration};
+use std::{collections::HashMap, pin::pin, time::Duration};
 
 use hdrhistogram::Histogram;
 use quinn::{Connection, Endpoint};
@@ -7,13 +7,12 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
     time::{Instant, sleep, timeout_at},
-    try_join,
 };
 
 use crate::{
     common::{
         ClientId, Command, Quorum, ReplicaId,
-        transport::{WriteMessage, read_task},
+        transport::{BootServerConfig, ServiceConfig, WriteMessage, boot_server, read_task},
     },
     crypto::cert::quinn::{client_config, server_config},
 };
@@ -22,22 +21,18 @@ use super::{Replica, ReplicaAction, Spec, ToClient, ToReplica, message};
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
+    pub boot_server: BootServerConfig,
+    pub service: ServiceConfig,
     pub num_client: usize,
     pub client_duration: Duration,
     pub replica_tick_interval: Duration,
-    pub replica_external_addresses: Vec<SocketAddr>,
-    pub replica_internal_addresses: Vec<SocketAddr>,
-    // how long should replicas wait before attempting to connect each other's
-    // internal addresses. set longer in higher latency environments (or human
-    // action is involved)
-    pub replica_connect_delay: Duration,
 }
 
 pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
 
 pub async fn client_task(
     spec: Spec,
-    config: TaskConfig,
+    config: ServiceConfig,
     id: ClientId,
     mut invoke_receiver: Receiver<(Vec<u8>, Option<Vec<u8>>)>,
     commit_sender: Sender<ClientId>,
@@ -47,7 +42,7 @@ pub async fn client_task(
     let (message_sender, mut message_receiver) = mpsc::channel(64);
     let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(client_config());
-    for &addr in &config.replica_external_addresses {
+    for &addr in &config.server_external_addresses {
         let connection = endpoint.connect(addr, "server.example")?.await?;
         read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), false));
         replica_egresses.push(connection);
@@ -145,7 +140,7 @@ pub async fn run_close_loop_clients(
         anyhow::ensure!(replaced.is_none());
         client_tasks.spawn(client_task(
             spec.clone(),
-            config.clone(),
+            config.service.clone(),
             id,
             invoke_receiver,
             commit_sender.clone(),
@@ -175,92 +170,21 @@ pub async fn run_close_loop_clients(
     Ok(latencies)
 }
 
-async fn boot_server(
-    replica_id: ReplicaId,
-    config: TaskConfig,
-    message_sender: Sender<ToReplica>,
-) -> anyhow::Result<(JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>)> {
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(None);
-    let transport = Arc::new(transport);
-    let mut internal_endpoint = Endpoint::server(
-        // server_config(),
-        {
-            let mut config = server_config();
-            config.transport_config(transport.clone());
-            config
-        },
-        config.replica_internal_addresses[replica_id as usize],
-    )?;
-    internal_endpoint.set_default_client_config({
-        let mut config = client_config();
-        config.transport_config(transport);
-        config
-    });
-    let active_task = async {
-        sleep(config.replica_connect_delay).await;
-        let mut connections = HashMap::new();
-        for (i, &addr) in config
-            .replica_internal_addresses
-            .iter()
-            .enumerate()
-            .skip(replica_id as usize + 1)
-        {
-            let connection = internal_endpoint.connect(addr, "server.example")?.await?;
-            connection
-                .open_uni()
-                .await?
-                // to need to `to_le_bytes()` for current u8 based ReplicaId, just future proof
-                .write_all(&replica_id.to_le_bytes())
-                .await?;
-            connections.insert(i as ReplicaId, connection);
-        }
-        anyhow::Ok(connections)
-    };
-    let passive_task = async {
-        let mut connections = HashMap::new();
-        for _ in 0..replica_id {
-            let connection = internal_endpoint
-                .accept()
-                .await
-                .expect("endpoint not closed")
-                .await?;
-            let mut replica_id = [0; size_of::<ReplicaId>()];
-            connection
-                .accept_uni()
-                .await?
-                .read_exact(&mut replica_id)
-                .await?;
-            connections.insert(ReplicaId::from_le_bytes(replica_id), connection);
-        }
-        Ok(connections)
-    };
-    let (mut connections, other_connections) = try_join!(active_task, passive_task)?;
-    connections.extend(other_connections);
-    anyhow::ensure!(connections.len() == config.replica_internal_addresses.len() - 1);
-    let replica_egresses = connections;
-    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
-    for connection in replica_egresses.values() {
-        read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), false));
-    }
-    Ok((read_tasks, replica_egresses))
-}
-
 async fn service_task(
     replica_id: ReplicaId,
-    config: TaskConfig,
+    config: ServiceConfig,
     submit_sender: Sender<ToReplica>,
     mut finalize_receiver: Receiver<Vec<Command>>,
 ) -> anyhow::Result<()> {
     let mut replies = HashMap::<ClientId, message::Reply>::new();
     let external_endpoint = Endpoint::server(
         server_config(),
-        config.replica_external_addresses[replica_id as usize],
+        config.server_external_addresses[replica_id as usize],
     )?;
     let mut read_tasks = JoinSet::new();
     let mut client_egresses = HashMap::new();
     let mut write_message = WriteMessage::new();
-    let (client_read_sender, mut client_read_receiver) = mpsc::channel(4096);
+    let (message_sender, mut message_receiver) = mpsc::channel(4096);
     loop {
         let accept = async {
             external_endpoint
@@ -271,14 +195,14 @@ async fn service_task(
         };
         enum Select {
             Accept(Connection),
-            Read(Option<ToReplica>),
+            Message(Option<ToReplica>),
             Finalize(Option<Vec<Command>>),
             Join(()),
         }
-        use Select::{Accept, Join, Read};
+        use Select::{Accept, Join, Message};
         match tokio::select! {
             accept = accept => Accept(accept?),
-            message = client_read_receiver.recv() => Read(message),
+            message = message_receiver.recv() => Message(message),
             finalize = finalize_receiver.recv() => Select::Finalize(finalize),
             Some(result) = read_tasks.join_next() => Join(result??),
         } {
@@ -291,15 +215,11 @@ async fn service_task(
                     .await?;
                 let client_id = ClientId::from_le_bytes(client_id);
                 tracing::debug!(%client_id, "accept client connection");
-                read_tasks.spawn(read_task(
-                    connection.clone(),
-                    client_read_sender.clone(),
-                    true,
-                ));
+                read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), true));
                 let replaced = client_egresses.insert(client_id, connection);
                 anyhow::ensure!(replaced.is_none());
             }
-            Read(message) => {
+            Message(message) => {
                 let Some(ToReplica::Request(command)) = message else {
                     unimplemented!()
                 };
@@ -324,14 +244,18 @@ async fn service_task(
                     break 'finalize;
                 };
                 for command in commands {
+                    if matches!(replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq)
+                    {
+                        tracing::warn!(?command, "duplicated finalize");
+                        continue;
+                    }
                     let reply = message::Reply {
                         seq: command.seq,
                         // a 0/0 service, extend to support arbitrary state machine later
                         result: Default::default(),
                         replica_id,
                     };
-                    let replaced = replies.insert(command.client_id, reply.clone());
-                    assert!(replaced.map(|reply| reply.seq) < Some(reply.seq));
+                    replies.insert(command.client_id, reply.clone());
                     let egress = client_egresses.get(&command.client_id);
                     anyhow::ensure!(
                         egress.is_some(),
@@ -356,7 +280,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
     let (message_sender, mut message_receiver) = mpsc::channel(100);
     let (mut read_tasks, replica_egresses) = boot_server(
         replica.core.config.id,
-        config.clone(),
+        config.boot_server,
         message_sender.clone(),
     )
     .await?;
@@ -369,7 +293,7 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
     let replica_id = replica.core.config.id;
     let mut service_task = pin!(service_task(
         replica_id,
-        config.clone(),
+        config.service,
         submit_sender,
         finalize_receiver,
     ));

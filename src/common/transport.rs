@@ -1,6 +1,12 @@
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+
 use bincode::{Decode, Encode};
-use quinn::{Connection, ConnectionError};
-use tokio::sync::mpsc::Sender;
+use quinn::{Connection, ConnectionError, Endpoint};
+use tokio::{sync::mpsc::Sender, task::JoinSet, time::sleep, try_join};
+
+use crate::crypto::cert::quinn::{client_config, server_config};
+
+use super::ReplicaId;
 
 pub async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     ingress: Connection,
@@ -72,4 +78,89 @@ impl AbstractEgress for &'_ Connection {
         self.open_uni().await?.write_all(encode_bytes).await?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct BootServerConfig {
+    pub server_internal_addresses: Vec<SocketAddr>,
+    // how long should replicas wait before attempting to connect each other's
+    // internal addresses. set longer in higher latency environments (or human
+    // action is involved)
+    pub server_interconnect_delay: Duration,
+}
+
+pub async fn boot_server<M: Decode<()> + Send + Sync + 'static>(
+    replica_id: ReplicaId,
+    config: BootServerConfig,
+    message_sender: Sender<M>,
+) -> anyhow::Result<(JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>)> {
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(None);
+    let transport = Arc::new(transport);
+    let mut internal_endpoint = Endpoint::server(
+        // server_config(),
+        {
+            let mut config = server_config();
+            config.transport_config(transport.clone());
+            config
+        },
+        config.server_internal_addresses[replica_id as usize],
+    )?;
+    internal_endpoint.set_default_client_config({
+        let mut config = client_config();
+        config.transport_config(transport);
+        config
+    });
+    let active_task = async {
+        sleep(config.server_interconnect_delay).await;
+        let mut connections = HashMap::new();
+        for (i, &addr) in config
+            .server_internal_addresses
+            .iter()
+            .enumerate()
+            .skip(replica_id as usize + 1)
+        {
+            let connection = internal_endpoint.connect(addr, "server.example")?.await?;
+            connection
+                .open_uni()
+                .await?
+                // to need to `to_le_bytes()` for current u8 based ReplicaId, just future proof
+                .write_all(&replica_id.to_le_bytes())
+                .await?;
+            connections.insert(i as ReplicaId, connection);
+        }
+        anyhow::Ok(connections)
+    };
+    let passive_task = async {
+        let mut connections = HashMap::new();
+        for _ in 0..replica_id {
+            let connection = internal_endpoint
+                .accept()
+                .await
+                .expect("endpoint not closed")
+                .await?;
+            let mut replica_id = [0; size_of::<ReplicaId>()];
+            connection
+                .accept_uni()
+                .await?
+                .read_exact(&mut replica_id)
+                .await?;
+            connections.insert(ReplicaId::from_le_bytes(replica_id), connection);
+        }
+        Ok(connections)
+    };
+    let (mut connections, other_connections) = try_join!(active_task, passive_task)?;
+    connections.extend(other_connections);
+    anyhow::ensure!(connections.len() == config.server_internal_addresses.len() - 1);
+    let replica_egresses = connections;
+    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
+    for connection in replica_egresses.values() {
+        read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), false));
+    }
+    Ok((read_tasks, replica_egresses))
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceConfig {
+    pub server_external_addresses: Vec<SocketAddr>,
 }
