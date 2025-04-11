@@ -42,7 +42,8 @@ impl Effect<System> for ReplicaAction {
     fn effect(self, replica_id: ReplicaId, system: &mut System, actions: &mut Actions) {
         tracing::debug!(?self);
         match self {
-            ReplicaAction::SendToReplica(id, message) => {
+            Self::SendToReplica(id, message) => {
+                assert_ne!(id, replica_id);
                 system.events.push_back(Event::SendToReplica(id, message))
             }
             ReplicaAction::SendToAllReplicas(message) => {

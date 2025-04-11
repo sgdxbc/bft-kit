@@ -351,7 +351,7 @@ pub enum ToReplica {
 pub struct CryptoConfig {
     pub key_share: GivreKeyShare,
     pub num_supply_commit: usize,
-    pub num_max_refill: usize,
+    pub num_refill_threshold: usize,
 }
 
 pub struct Replica {
@@ -488,41 +488,7 @@ impl Replica {
                     )
                 }
             }
-            ToReplica::VoteGeneric(vote_generic) => {
-                let scratch = self
-                    .quorum_cert_scratches
-                    .get_mut(&vote_generic.node)
-                    .unwrap();
-                let sig = match scratch.partial_sigs.add_partial(
-                    vote_generic.signer_index,
-                    vote_generic.partial_sig,
-                    AggregateContext::Givre(GivreAggregateContext {
-                        key_share: &self.crypto_config.key_share,
-                        signers: &scratch.signers,
-                        message: vote_generic.node.as_ref(),
-                    }),
-                ) {
-                    Ok(None) => return,
-                    Ok(Some(sig)) => sig,
-                    Err(err) => {
-                        tracing::warn!(%err, "fail to aggregate signature");
-                        todo!("fallback to slower signature scheme")
-                    }
-                };
-                self.quorum_cert_scratches.remove(&vote_generic.node);
-                let quorum_cert = message::QuorumCert {
-                    node: vote_generic.node,
-                    sig,
-                };
-                if !self.core.node_index.contains_key(&quorum_cert.node) {
-                    // probably never happen without primary change
-                    todo!("fetch missing justified node")
-                }
-                self.core.handle(
-                    ReplicaCoreEvent::QuorumCert(quorum_cert),
-                    &mut self.core_actions,
-                )
-            }
+            ToReplica::VoteGeneric(vote_generic) => self.handle_vote_generic(vote_generic),
             ToReplica::PublicCommitmentsSupply(index, supply) => self
                 .public_commitments_pool
                 .entry(index)
@@ -620,11 +586,15 @@ impl Replica {
                             partial_sig,
                             signer_index: self.signer_index(),
                         };
-                        actions.push(ReplicaAction::SendToReplica(
-                            self.core.get_leader(),
-                            ToReplica::VoteGeneric(vote_generic),
-                        ));
-                        if self.nonces.len() < self.crypto_config.num_max_refill {
+                        if self.is_primary() {
+                            self.handle_vote_generic(vote_generic)
+                        } else {
+                            actions.push(ReplicaAction::SendToReplica(
+                                self.core.get_leader(),
+                                ToReplica::VoteGeneric(vote_generic),
+                            ))
+                        }
+                        if self.nonces.len() < self.crypto_config.num_refill_threshold {
                             self.refill_nonces(actions)
                         }
                     }
@@ -634,6 +604,42 @@ impl Replica {
                 }
             }
         }
+    }
+
+    fn handle_vote_generic(&mut self, vote_generic: message::VoteGeneric) {
+        let scratch = self
+            .quorum_cert_scratches
+            .get_mut(&vote_generic.node)
+            .unwrap();
+        let sig = match scratch.partial_sigs.add_partial(
+            vote_generic.signer_index,
+            vote_generic.partial_sig,
+            AggregateContext::Givre(GivreAggregateContext {
+                key_share: &self.crypto_config.key_share,
+                signers: &scratch.signers,
+                message: vote_generic.node.as_ref(),
+            }),
+        ) {
+            Ok(None) => return,
+            Ok(Some(sig)) => sig,
+            Err(err) => {
+                tracing::warn!(%err, "fail to aggregate signature");
+                todo!("fallback to slower signature scheme")
+            }
+        };
+        self.quorum_cert_scratches.remove(&vote_generic.node);
+        let quorum_cert = message::QuorumCert {
+            node: vote_generic.node,
+            sig,
+        };
+        if !self.core.node_index.contains_key(&quorum_cert.node) {
+            // probably never happen without primary change
+            todo!("fetch missing justified node")
+        }
+        self.core.handle(
+            ReplicaCoreEvent::QuorumCert(quorum_cert),
+            &mut self.core_actions,
+        )
     }
 }
 

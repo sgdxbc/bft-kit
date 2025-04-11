@@ -23,7 +23,7 @@ impl System {
                     CryptoConfig {
                         key_share: key_shares[i as usize].clone(),
                         num_supply_commit: 10,
-                        num_max_refill: 10,
+                        num_refill_threshold: 10,
                     },
                 )
             })
@@ -55,9 +55,10 @@ impl AbstractReplica for Replica {
 impl Effect<System> for ReplicaAction {
     fn effect(self, replica_id: ReplicaId, system: &mut System, actions: &mut Actions) {
         match self {
-            Self::SendToReplica(replica_id, message) => system
-                .events
-                .push_back(Event::SendToReplica(replica_id, message)),
+            Self::SendToReplica(id, message) => {
+                assert_ne!(id, replica_id);
+                system.events.push_back(Event::SendToReplica(id, message))
+            }
             Self::SendToAllReplicas(message) => {
                 for id in 0..system.num_replica() {
                     if id != replica_id {

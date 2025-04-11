@@ -375,7 +375,28 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
     ));
     let mut write_message = WriteMessage::new();
     let mut actions = Vec::new();
+
+    replica.init(&mut actions);
     loop {
+        for action in actions.drain(..) {
+            match action {
+                ReplicaAction::SendToReplica(replica_id, message) => {
+                    let egress = replica_egresses.get(&replica_id);
+                    anyhow::ensure!(
+                        egress.is_some(),
+                        "send to unexpected replica id {replica_id}"
+                    );
+                    write_message.run(message, egress).await?
+                }
+                ReplicaAction::SendToAllReplicas(message) => {
+                    write_message
+                        .run(message, replica_egresses.values())
+                        .await?
+                }
+                ReplicaAction::Finalize(commands) => finalize_sender.send(commands).await?,
+            }
+        }
+
         enum Select {
             Sleep,
             Message(Option<ToReplica>),
@@ -398,24 +419,6 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
                 replica.receive(message, &mut actions)
             }
             Service(()) | ReadJoin(()) => unreachable!(),
-        }
-        for action in actions.drain(..) {
-            match action {
-                ReplicaAction::SendToReplica(replica_id, message) => {
-                    let egress = replica_egresses.get(&replica_id);
-                    anyhow::ensure!(
-                        egress.is_some(),
-                        "send to unexpected replica id {replica_id}"
-                    );
-                    write_message.run(message, egress).await?
-                }
-                ReplicaAction::SendToAllReplicas(message) => {
-                    write_message
-                        .run(message, replica_egresses.values())
-                        .await?
-                }
-                ReplicaAction::Finalize(commands) => finalize_sender.send(commands).await?,
-            }
         }
     }
 }
