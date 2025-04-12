@@ -5,7 +5,7 @@ use bft_testbed::{
     init_logging,
     pbft::{
         Replica,
-        transport::{Server, TaskConfig, server_task, tcp},
+        transport::{TaskConfig, server_task, tcp},
     },
 };
 use futures::FutureExt;
@@ -24,9 +24,9 @@ async fn main() -> anyhow::Result<()> {
     let replica = Replica::new(options.clone().try_into()?);
     let config = TaskConfig::try_from(options)?;
     let mut server = pin!(if !config.use_tcp {
-        server_task::<Server>(replica, config).left_future()
+        server_task(replica, config).left_future()
     } else {
-        server_task::<tcp::Server>(replica, config).right_future()
+        tcp::server_task(replica, config).right_future()
     });
     'server: {
         tokio::select! {

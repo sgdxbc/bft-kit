@@ -37,7 +37,7 @@ impl TryFrom<Options> for super::transport::TaskConfig {
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(Self {
             client: options.clone().try_into()?,
-            boot_server: options.clone().try_into()?,
+            replica: options.clone().try_into()?,
             service: options.clone().try_into()?,
             use_tcp: options.try_get("use_tcp")?.unwrap_or(false),
             num_client: options.get("num_client")?,

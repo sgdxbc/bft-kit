@@ -328,6 +328,10 @@ type ReplicaAction = crate::common::ReplicaAction<ToReplica>;
 type ReplicaActions = Vec<ReplicaAction>;
 
 impl Replica {
+    pub fn request(&mut self, command: Command, actions: &mut ReplicaActions) {
+        self.receive(ToReplica::Request(command), actions)
+    }
+
     pub fn receive(&mut self, message: ToReplica, actions: &mut ReplicaActions) {
         tracing::trace!(?message);
         match message {

@@ -1,11 +1,10 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    pin::pin,
     time::Duration,
 };
 
 use hdrhistogram::Histogram;
-use quinn::{Connection, Endpoint, Incoming};
+use quinn::{Endpoint, Incoming};
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
@@ -16,8 +15,8 @@ use crate::{
     common::{
         ClientId, Quorum, ReplicaId,
         transport::{
-            AbstractEgress, ReplicaConfig, ClientConfig, ServiceConfig, WriteMessage,
-            boot_client, boot_replica, read_task,
+            AbstractEgress, ClientConfig, ReplicaConfig, ServiceConfig, WriteMessage, boot_client,
+            boot_replica, read_task,
         },
         workload::{ConcurrentClients, Invoke, Latencies},
     },
@@ -32,7 +31,7 @@ pub mod tcp;
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
     pub client: ClientConfig,
-    pub boot_server: ReplicaConfig,
+    pub replica: ReplicaConfig,
     pub service: ServiceConfig,
     pub use_tcp: bool,
     pub num_client: usize,
@@ -86,7 +85,7 @@ pub async fn client_task(
                 };
                 write_message
                     .run(
-                        ToReplica::Request(command),
+                        command,
                         [&replica_egresses[spec.primary(view_num) as usize]],
                     )
                     .await?;
@@ -153,90 +152,61 @@ pub async fn run_close_loop_clients(
     concurrent_clients.close_loop(config.client_duration).await
 }
 
-type BootServer<E> = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, E>);
+type BootReplica<E> = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, E>);
 
-pub trait AbstractServer {
-    type Egress;
+pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
+    let (request_sender, request_receiver) = mpsc::channel(100);
+    let (finalize_sender, finalize_receiver) = mpsc::channel(100);
 
-    fn into_egress(egress: &mut Self::Egress) -> impl AbstractEgress;
-
-    fn boot_server(
-        replica_id: ReplicaId,
-        config: TaskConfig,
-        read_sender: Sender<ToReplica>,
-    ) -> impl Future<Output = anyhow::Result<BootServer<Self::Egress>>>;
-
-    fn service_task(
-        replica_id: ReplicaId,
-        config: TaskConfig,
-        submit_sender: Sender<ToReplica>,
-        finalize_receiver: Receiver<Finalize>,
-    ) -> impl Future<Output = anyhow::Result<()>>;
+    let replica_id = replica.core.config.id;
+    let service_task = service_task(
+        replica_id,
+        config.service.clone(),
+        request_sender,
+        finalize_receiver,
+    );
+    let replica_task = replica_task(replica, config, request_receiver, finalize_sender);
+    tokio::try_join!(service_task, replica_task)?;
+    unreachable!()
 }
 
-pub async fn server_task<S: AbstractServer>(
+pub struct Finalize {
+    commands: Vec<super::Command>,
+    view_num: ViewNum,
+}
+
+async fn replica_task(
     mut replica: Replica,
     config: TaskConfig,
+    mut request_receiver: Receiver<Command>,
+    finalize_sender: Sender<Finalize>,
 ) -> anyhow::Result<()> {
-    let (read_sender, mut read_receiver) = mpsc::channel(100);
-    let (mut read_tasks, mut replica_egresses) =
-        S::boot_server(replica.core.config.id, config.clone(), read_sender.clone()).await?;
+    let (message_sender, mut message_receiver) = mpsc::channel(100);
+    let (mut read_tasks, replica_egresses) = boot_replica(
+        replica.core.config.id,
+        config.replica,
+        message_sender.clone(),
+    )
+    .await?;
     tracing::info!("replica ready");
 
-    // a bit terrible to abuse read_sender, which suppose to directly connect to
-    // read tasks in the original design
-    let submit_sender = read_sender;
-    let (finalize_sender, finalize_receiver) = mpsc::channel(16);
-    let replica_id = replica.core.config.id;
-    let mut service_task = pin!(S::service_task(
-        replica_id,
-        config.clone(),
-        submit_sender,
-        finalize_receiver,
-    ));
     let mut write_message = WriteMessage::new();
     let mut actions = Vec::new();
+
     loop {
-        #[derive(Debug)]
-        enum Select {
-            Sleep,
-            Read(Option<ToReplica>),
-            Service(()),
-            ReadJoin(()),
-        }
-        use Select::*;
-        let select = tokio::select! {
-            () = sleep(config.tick_interval) => Sleep,
-            message = read_receiver.recv() => Read(message),
-            result = &mut service_task => Service(result?),
-            Some(result) = read_tasks.join_next() => ReadJoin(result??)
-        };
-        if tracing::enabled!(tracing::Level::TRACE) {
-            tracing::trace!(?select)
-        }
-        match select {
-            Sleep => replica.tick(&mut actions),
-            Read(message) => {
-                let message = message.ok_or(anyhow::format_err!("unexpect read channel close"))?;
-                replica.receive(message, &mut actions)
-            }
-            Service(()) | ReadJoin(()) => unreachable!(),
-        }
         for action in actions.drain(..) {
             match action {
                 ReplicaAction::SendToReplica(replica_id, message) => {
-                    let egress = replica_egresses.get_mut(&replica_id);
+                    let egress = replica_egresses.get(&replica_id);
                     anyhow::ensure!(
                         egress.is_some(),
                         "send to unexpected replica id {replica_id}"
                     );
-                    write_message
-                        .run(message, egress.map(S::into_egress))
-                        .await?
+                    write_message.run(message, egress).await?
                 }
                 ReplicaAction::SendToAllReplicas(message) => {
                     write_message
-                        .run(message, replica_egresses.values_mut().map(S::into_egress))
+                        .run(message, replica_egresses.values())
                         .await?
                 }
                 ReplicaAction::Finalize(commands) => {
@@ -249,18 +219,43 @@ pub async fn server_task<S: AbstractServer>(
                 }
             }
         }
-    }
-}
 
-pub struct Finalize {
-    commands: Vec<super::Command>,
-    view_num: ViewNum,
+        enum Select {
+            Sleep,
+            Request(Option<Command>),
+            Message(Option<ToReplica>),
+            JoinNext(()),
+        }
+        use Select::*;
+        match tokio::select! {
+            () = sleep(config.tick_interval) => Sleep,
+            request = request_receiver.recv() => Request(request),
+            message = message_receiver.recv() => Message(message),
+            Some(result) = read_tasks.join_next() => JoinNext(result??)
+        } {
+            // Sleep => replica.tick(&mut actions),
+            Sleep => {} // TODO impl tick on replica
+            Request(command) => {
+                let Some(command) = command else {
+                    break Ok(()); // think about whether this is correct
+                };
+                replica.request(command, &mut actions)
+            }
+            Message(message) => {
+                let Some(message) = message else {
+                    anyhow::bail!("message receive channel close")
+                };
+                replica.receive(message, &mut actions)
+            }
+            JoinNext(()) => unreachable!(),
+        }
+    }
 }
 
 async fn service_task(
     replica_id: ReplicaId,
     config: ServiceConfig,
-    submit_sender: Sender<ToReplica>,
+    request_sender: Sender<Command>,
     mut finalize_receiver: Receiver<Finalize>,
 ) -> anyhow::Result<()> {
     let mut replies = HashMap::<ClientId, message::Reply>::new();
@@ -275,7 +270,7 @@ async fn service_task(
     loop {
         enum Select {
             Accept(Option<Incoming>),
-            Message(Option<ToReplica>),
+            Message(Option<Command>),
             Finalize(Option<Finalize>),
             JoinNext(()),
         }
@@ -302,9 +297,9 @@ async fn service_task(
                 let replaced = client_egresses.insert(client_id, connection);
                 anyhow::ensure!(replaced.is_none());
             }
-            Message(message) => {
-                let Some(ToReplica::Request(command)) = message else {
-                    unimplemented!()
+            Message(command) => {
+                let Some(command) = command else {
+                    unreachable!()
                 };
                 match replies.get(&command.client_id) {
                     Some(reply) if reply.seq > command.seq => {}
@@ -317,7 +312,7 @@ async fn service_task(
                         );
                         write_message.run(reply.clone(), egress).await?
                     }
-                    _ => submit_sender.send(ToReplica::Request(command)).await?,
+                    _ => request_sender.send(command).await?,
                 }
             }
             Select::Finalize(finalize) => 'finalize: {
@@ -355,37 +350,5 @@ async fn service_task(
                 }
             }
         }
-    }
-}
-
-pub struct Server;
-
-impl AbstractServer for Server {
-    type Egress = Connection;
-
-    fn boot_server(
-        replica_id: ReplicaId,
-        config: TaskConfig,
-        read_sender: Sender<ToReplica>,
-    ) -> impl Future<
-        Output = anyhow::Result<(
-            JoinSet<anyhow::Result<()>>,
-            HashMap<ReplicaId, Self::Egress>,
-        )>,
-    > {
-        boot_replica(replica_id, config.boot_server, read_sender)
-    }
-
-    fn service_task(
-        replica_id: ReplicaId,
-        config: TaskConfig,
-        submit_sender: Sender<ToReplica>,
-        finalize_receiver: Receiver<Finalize>,
-    ) -> impl Future<Output = anyhow::Result<()>> {
-        service_task(replica_id, config.service, submit_sender, finalize_receiver)
-    }
-
-    fn into_egress(egress: &mut Self::Egress) -> impl AbstractEgress {
-        &*egress
     }
 }

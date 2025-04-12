@@ -30,11 +30,11 @@ impl AbstractReplica for Replica {
     fn init(&mut self, _actions: &mut Vec<Self::Action>) {}
 
     fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>) {
-        self.receive(ToReplica::Request(command), actions)
+        Self::request(self, command, actions)
     }
 
     fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>) {
-        Replica::receive(self, message, actions)
+        Self::receive(self, message, actions)
     }
 }
 

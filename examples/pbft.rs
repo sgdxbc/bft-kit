@@ -8,7 +8,7 @@ use bft_testbed::{
     init_logging,
     pbft::{
         Replica, ReplicaCoreConfig, Spec,
-        transport::{Server, TaskConfig, client_task, server_task, tcp},
+        transport::{TaskConfig, client_task, server_task, tcp},
     },
 };
 use futures::FutureExt;
@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         client: bft_testbed::common::transport::ClientConfig {
             num_max_concurrent: 1,
         },
-        boot_server: ReplicaConfig {
+        replica: ReplicaConfig {
             server_internal_addresses: (0..spec.num_replica)
                 .map(|i| ([127, 0, 0, 1], 8000 + i as u16).into())
                 .collect(),
@@ -56,9 +56,9 @@ async fn main() -> anyhow::Result<()> {
         let config = ReplicaCoreConfig::new_basic(spec.clone(), i);
         let replica = Replica::new(config);
         server_tasks.spawn(if !task_config.use_tcp {
-            server_task::<Server>(replica, task_config.clone()).left_future()
+            server_task(replica, task_config.clone()).left_future()
         } else {
-            server_task::<tcp::Server>(replica, task_config.clone()).right_future()
+            tcp::server_task(replica, task_config.clone()).right_future()
         });
     }
     tracing::info!("wait servers up");
