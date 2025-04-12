@@ -1,4 +1,4 @@
-use std::{env::args, time::Duration};
+use std::{env::args, pin::pin, time::Duration};
 
 use bft_testbed::{
     common::{
@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let (invoke_sender, invoke_receiver) = mpsc::channel(1);
     let (commit_sender, mut commit_receiver) = mpsc::channel(1);
-    let client_task = if !task_config.use_tcp {
+    let mut client_task = pin!(if !task_config.use_tcp {
         client_task(
             spec,
             task_config.client,
@@ -92,14 +92,14 @@ async fn main() -> anyhow::Result<()> {
             commit_sender,
         )
         .right_future()
-    };
+    });
     invoke_sender
         .send((Default::default(), Some(Default::default())))
         .await?;
     async {
         tokio::select! {
             commit = commit_receiver.recv() => anyhow::Ok(commit.unwrap()),
-            result = client_task => {
+            result = &mut client_task => {
                 result?;
                 unreachable!()
             }
@@ -111,6 +111,9 @@ async fn main() -> anyhow::Result<()> {
     }
     .instrument(tracing::info_span!("invoke"))
     .await?;
+    drop(invoke_sender);
+    let latencies = client_task.await?;
+    tracing::info!(latency = ?Duration::from_micros(latencies.mean() as _));
     server_tasks.abort_all();
     Ok(())
 }

@@ -9,7 +9,7 @@ use bincode::{Decode, Encode};
 use slab::Slab;
 
 use crate::{
-    common::{CommandPool, ReplicaId},
+    common::{AbstractReplica, CommandPool, ReplicaId},
     crypto::{
         Digest, Sha256Hash,
         threshold::{
@@ -646,6 +646,23 @@ impl Replica {
                 }
             }
         }
+    }
+}
+
+impl AbstractReplica for Replica {
+    type Action = ReplicaAction;
+    type Message = ToReplica;
+
+    fn init(&mut self, actions: &mut Vec<Self::Action>) {
+        Replica::init(self, actions)
+    }
+
+    fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>) {
+        Self::request(self, command, actions)
+    }
+
+    fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>) {
+        Self::receive(self, message, actions)
     }
 }
 

@@ -2,7 +2,7 @@ use std::iter::{once, repeat};
 
 use test_log::test;
 
-use crate::common::testing::{AbstractReplica, Action, Actions, Effect, Event, is_finalized};
+use crate::common::testing::{Action, Actions, Effect, Event, is_finalized};
 
 use super::*;
 
@@ -20,21 +20,6 @@ impl System {
             replicas,
             events: Default::default(),
         }
-    }
-}
-
-impl AbstractReplica for Replica {
-    type Action = ReplicaAction;
-    type Message = ToReplica;
-
-    fn init(&mut self, _actions: &mut Vec<Self::Action>) {}
-
-    fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>) {
-        Self::request(self, command, actions)
-    }
-
-    fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>) {
-        Self::receive(self, message, actions)
     }
 }
 

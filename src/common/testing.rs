@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, fmt::Debug, iter::repeat, mem::take};
 
-use super::{ClientSeq, Command, ReplicaId};
+use super::{AbstractReplica, ClientSeq, Command, ReplicaId};
 
 pub struct System<R, M> {
     pub replicas: Vec<R>,
@@ -19,21 +19,15 @@ pub enum Action {
 
 pub type Actions = Vec<Action>;
 
-pub trait AbstractReplica: Sized {
-    type Action: Effect<System<Self, Self::Message>>;
-    type Message;
-
-    fn init(&mut self, actions: &mut Vec<Self::Action>);
-    fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>);
-    fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>);
-}
-
 pub trait Effect<S> {
     fn effect(self, replica_id: ReplicaId, system: &mut S, actions: &mut Actions);
 }
 
 impl<R: AbstractReplica> System<R, R::Message> {
-    pub fn init(&mut self) {
+    pub fn init(&mut self)
+    where
+        R::Action: Effect<Self>,
+    {
         let mut actions = Vec::new();
         for replica_id in 0..self.replicas.len() as ReplicaId {
             let mut replica_actions = Vec::new();
@@ -43,7 +37,10 @@ impl<R: AbstractReplica> System<R, R::Message> {
         }
     }
 
-    pub fn request(&mut self, replica_id: ReplicaId, command: Command) {
+    pub fn request(&mut self, replica_id: ReplicaId, command: Command)
+    where
+        R::Action: Effect<Self>,
+    {
         let mut replica_actions = Vec::new();
         self.replicas[replica_id as usize].request(command, &mut replica_actions);
         let mut actions = Vec::new();
@@ -53,6 +50,7 @@ impl<R: AbstractReplica> System<R, R::Message> {
 
     pub fn step(&mut self, actions: &mut Actions) -> bool
     where
+        R::Action: Effect<Self>,
         R::Message: Debug,
     {
         let Some(event) = self.events.pop_front() else {
@@ -71,7 +69,9 @@ impl<R: AbstractReplica> System<R, R::Message> {
         replica_id: ReplicaId,
         mut replica_actions: Vec<R::Action>,
         actions: &mut Actions,
-    ) {
+    ) where
+        R::Action: Effect<Self>,
+    {
         while !replica_actions.is_empty() {
             for action in take(&mut replica_actions) {
                 action.effect(replica_id, self, actions)
@@ -81,6 +81,7 @@ impl<R: AbstractReplica> System<R, R::Message> {
 
     pub fn exhaust(&mut self, max_num_step: u32, actions: &mut Actions)
     where
+        R::Action: Effect<Self>,
         R::Message: Debug,
     {
         for _ in 0..max_num_step {
@@ -97,6 +98,7 @@ impl<R: AbstractReplica> System<R, R::Message> {
         max_num_step: u32,
         actions: &mut Actions,
     ) where
+        R::Action: Effect<Self>,
         R::Message: Debug,
     {
         let mut num_step = 0;
@@ -142,6 +144,7 @@ fn replica_commands(actions: Actions, num_replica: ReplicaId) -> Vec<Vec<Command
 
 impl<R: AbstractReplica> System<R, R::Message>
 where
+    R::Action: Effect<Self>,
     R::Message: Debug,
 {
     pub fn num_replica(&self) -> ReplicaId {

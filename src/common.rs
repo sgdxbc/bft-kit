@@ -107,6 +107,15 @@ pub enum ReplicaAction<M> {
     Finalize(Vec<Command>),
 }
 
+pub trait AbstractReplica {
+    type Action;
+    type Message;
+
+    fn init(&mut self, actions: &mut Vec<Self::Action>);
+    fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>);
+    fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>);
+}
+
 pub type Quorum<T> = std::collections::HashMap<ReplicaId, T>;
 
 pub fn fmt_bytes(bytes: &[u8], f: &mut Formatter<'_>) -> fmt::Result {

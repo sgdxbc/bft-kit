@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    common::{CommandPool, Quorum, ReplicaId},
+    common::{AbstractReplica, CommandPool, Quorum, ReplicaId},
     crypto::{self, Digest, Sha256Hash, sign, verify},
 };
 
@@ -648,6 +648,21 @@ impl Replica {
                 block.commands.clone(),
             )))
         }
+    }
+}
+
+impl AbstractReplica for Replica {
+    type Action = ReplicaAction;
+    type Message = ToReplica;
+
+    fn init(&mut self, _actions: &mut Vec<Self::Action>) {}
+
+    fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>) {
+        Self::request(self, command, actions)
+    }
+
+    fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>) {
+        Self::receive(self, message, actions)
     }
 }
 

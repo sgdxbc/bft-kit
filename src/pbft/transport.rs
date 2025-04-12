@@ -3,22 +3,22 @@ use std::{collections::BTreeMap, time::Duration};
 use hdrhistogram::Histogram;
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
-    time::{Instant, sleep},
+    time::Instant,
 };
 
 use crate::{
     common::{
         ClientId, ClientSeq, Quorum, ReplicaId,
         transport::{
-            AbstractEgress, AbstractService, ClientConfig, ReplicaConfig, Service, ServiceConfig,
-            WriteMessage, boot_client, boot_replica,
+            AbstractEgress, AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, Service,
+            ServiceConfig, WriteMessage, boot_client, replica_task,
         },
         workload::{ConcurrentClients, Invoke, Latencies},
     },
     pbft::{Command, ToClient, ViewNum},
 };
 
-use super::{Replica, ReplicaAction, Spec, ToReplica, message};
+use super::{Replica, Spec, message};
 
 pub mod tcp;
 
@@ -182,79 +182,13 @@ impl AbstractService for Service<ServiceKit> {
     }
 }
 
-async fn replica_task(
-    mut replica: Replica,
-    config: TaskConfig,
-    mut request_receiver: Receiver<Command>,
-    finalize_sender: Sender<Finalize>,
-) -> anyhow::Result<()> {
-    let (message_sender, mut message_receiver) = mpsc::channel(100);
-    let (mut read_tasks, replica_egresses) = boot_replica(
-        replica.core.config.id,
-        config.replica,
-        message_sender.clone(),
-    )
-    .await?;
-    tracing::info!("replica ready");
+impl AbstractReplica for Replica {
+    type Finalize = Finalize;
 
-    let mut write_message = WriteMessage::new();
-    let mut actions = Vec::new();
-
-    loop {
-        for action in actions.drain(..) {
-            match action {
-                ReplicaAction::SendToReplica(replica_id, message) => {
-                    let egress = replica_egresses.get(&replica_id);
-                    anyhow::ensure!(
-                        egress.is_some(),
-                        "send to unexpected replica id {replica_id}"
-                    );
-                    write_message.run(message, egress).await?
-                }
-                ReplicaAction::SendToAllReplicas(message) => {
-                    write_message
-                        .run(message, replica_egresses.values())
-                        .await?
-                }
-                ReplicaAction::Finalize(commands) => {
-                    finalize_sender
-                        .send(Finalize {
-                            commands,
-                            view_num: replica.core.view_num,
-                        })
-                        .await?
-                }
-            }
-        }
-
-        enum Select {
-            Sleep,
-            Request(Option<Command>),
-            Message(Option<ToReplica>),
-            JoinNext(()),
-        }
-        use Select::*;
-        match tokio::select! {
-            () = sleep(config.tick_interval) => Sleep,
-            request = request_receiver.recv() => Request(request),
-            message = message_receiver.recv() => Message(message),
-            Some(result) = read_tasks.join_next() => JoinNext(result??)
-        } {
-            // Sleep => replica.tick(&mut actions),
-            Sleep => {} // TODO impl tick on replica
-            Request(command) => {
-                let Some(command) = command else {
-                    break Ok(()); // think about whether this is correct
-                };
-                replica.request(command, &mut actions)
-            }
-            Message(message) => {
-                let Some(message) = message else {
-                    anyhow::bail!("message receive channel close")
-                };
-                replica.receive(message, &mut actions)
-            }
-            JoinNext(()) => unreachable!(),
+    fn finalize(&self, commands: Vec<Command>) -> Self::Finalize {
+        Finalize {
+            commands,
+            view_num: self.core.view_num,
         }
     }
 }
@@ -265,7 +199,14 @@ pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result
 
     let service_task = Service::<ServiceKit>::new(replica.core.config.id, request_sender)
         .run(config.service.clone(), finalize_receiver);
-    let replica_task = replica_task(replica, config, request_receiver, finalize_sender);
+    let replica_task = replica_task(
+        replica.core.config.id,
+        replica,
+        config.replica,
+        config.tick_interval,
+        request_receiver,
+        finalize_sender,
+    );
     tokio::try_join!(service_task, replica_task)?;
     unreachable!()
 }

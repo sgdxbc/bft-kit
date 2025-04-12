@@ -1,7 +1,7 @@
 use test_log::test;
 
 use crate::{
-    common::testing::{AbstractReplica, Action, Actions, Effect, Event},
+    common::testing::{Action, Actions, Effect, Event},
     crypto::threshold::givre_replica_key_shares,
 };
 
@@ -32,23 +32,6 @@ impl System {
             replicas,
             events: Default::default(),
         }
-    }
-}
-
-impl AbstractReplica for Replica {
-    type Action = ReplicaAction;
-    type Message = ToReplica;
-
-    fn init(&mut self, actions: &mut Vec<Self::Action>) {
-        Replica::init(self, actions)
-    }
-
-    fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>) {
-        Self::request(self, command, actions)
-    }
-
-    fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>) {
-        Self::receive(self, message, actions)
     }
 }
 
