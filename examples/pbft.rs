@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
                 .map(|i| ([127, 0, 0, 1], 50000 + i as u16).into())
                 .collect(),
         },
+        use_tcp,
 
         // these two values unused. this example sends single request from one client
         num_client: 0,
@@ -54,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     for i in 0..spec.num_replica {
         let config = ReplicaCoreConfig::new_basic(spec.clone(), i);
         let replica = Replica::new(config);
-        server_tasks.spawn(if !use_tcp {
+        server_tasks.spawn(if !task_config.use_tcp {
             server_task::<Server>(replica, task_config.clone()).left_future()
         } else {
             server_task::<tcp::Server>(replica, task_config.clone()).right_future()
@@ -71,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let (invoke_sender, invoke_receiver) = mpsc::channel(1);
     let (commit_sender, mut commit_receiver) = mpsc::channel(1);
-    let client_task = if !use_tcp {
+    let client_task = if !task_config.use_tcp {
         client_task(
             spec,
             task_config.client,

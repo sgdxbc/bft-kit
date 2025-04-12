@@ -5,9 +5,10 @@ use bft_testbed::{
     init_logging,
     pbft::{
         Replica,
-        transport::{Server, server_task},
+        transport::{Server, TaskConfig, server_task, tcp},
     },
 };
+use futures::FutureExt;
 use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep};
 
 #[tokio::main]
@@ -21,9 +22,12 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(replica_config_path.with_file_name("network.conf")).await?);
     options.parse(&read_to_string(replica_config_path.with_file_name("task.conf")).await?);
     let replica = Replica::new(options.clone().try_into()?);
-    let mut server = pin!(server_task::<Server>(replica, options.try_into()?));
-    // use bft_testbed::pbft::transport::tcp;
-    // let mut server = pin!(server_task::<tcp::Server>(replica, options.try_into()?));
+    let config = TaskConfig::try_from(options)?;
+    let mut server = pin!(if !config.use_tcp {
+        server_task::<Server>(replica, config).left_future()
+    } else {
+        server_task::<tcp::Server>(replica, config).right_future()
+    });
     'server: {
         tokio::select! {
             result = &mut server => result?,

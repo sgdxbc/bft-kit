@@ -36,6 +36,7 @@ pub struct TaskConfig {
     pub client: ClientConfig,
     pub boot_server: BootServerConfig,
     pub service: ServiceConfig,
+    pub use_tcp: bool,
     pub num_client: usize,
     pub client_duration: Duration,
     pub tick_interval: Duration,

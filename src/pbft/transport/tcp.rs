@@ -291,16 +291,21 @@ async fn service_task(
             Accept((TcpStream, SocketAddr)),
             Message(Option<ToReplica>),
             Finalize(Option<Finalize>),
-            JoinNext(()),
+            JoinNext(anyhow::Result<()>),
         }
         use Select::{Accept, JoinNext, Message};
         match tokio::select! {
             accept = external_listener.accept() => Accept(accept?),
             message = client_read_receiver.recv() => Message(message),
             finalize = finalize_receiver.recv() => Select::Finalize(finalize),
-            Some(result) = read_tasks.join_next() => JoinNext(result??),
+            Some(result) = read_tasks.join_next() => JoinNext(result?),
         } {
-            JoinNext(()) => {}
+            JoinNext(result) => {
+                // sometimes it's connection reset, suppress it
+                if let Err(err) = result {
+                    tracing::warn!(%err, "client read task returned")
+                }
+            }
             Accept((mut connection, _)) => {
                 let mut client_id = [0; size_of::<ClientId>()];
                 connection.read_exact(&mut client_id).await?;
