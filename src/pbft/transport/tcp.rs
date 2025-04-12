@@ -17,7 +17,7 @@ use tokio::{
 use crate::{
     common::{
         ClientId, Quorum, ReplicaId,
-        transport::{BootServerConfig, ClientConfig, ServiceConfig, WriteMessage},
+        transport::{ReplicaConfig, ClientConfig, ServiceConfig, WriteMessage},
         workload::{ConcurrentClients, Invoke},
     },
     pbft::{Command, Spec, ToClient},
@@ -224,7 +224,7 @@ pub async fn run_close_loop_clients(
 // primarily (if not exclusively) use QUIC
 async fn boot_server(
     replica_id: ReplicaId,
-    config: BootServerConfig,
+    config: ReplicaConfig,
     read_sender: Sender<ToReplica>,
 ) -> anyhow::Result<(JoinSet<anyhow::Result<()>>, HashMap<u8, TcpStream>)> {
     let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();

@@ -3,7 +3,7 @@ use std::{env::args, time::Duration};
 use bft_testbed::{
     common::{
         ClientId,
-        transport::{BootServerConfig, ServiceConfig},
+        transport::{ReplicaConfig, ServiceConfig},
     },
     init_logging,
     pbft::{
@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         client: bft_testbed::common::transport::ClientConfig {
             num_max_concurrent: 1,
         },
-        boot_server: BootServerConfig {
+        boot_server: ReplicaConfig {
             server_internal_addresses: (0..spec.num_replica)
                 .map(|i| ([127, 0, 0, 1], 8000 + i as u16).into())
                 .collect(),

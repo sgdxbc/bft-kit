@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    pin::pin,
     time::Duration,
 };
 
@@ -16,7 +15,7 @@ use crate::{
     common::{
         ClientId, Command, Quorum, ReplicaId,
         transport::{
-            BootServerConfig, ClientConfig, ServiceConfig, WriteMessage, boot_client, boot_server,
+            ClientConfig, ReplicaConfig, ServiceConfig, WriteMessage, boot_client, boot_replica,
             read_task,
         },
         workload::{ConcurrentClients, Invoke},
@@ -29,7 +28,7 @@ use super::{Replica, ReplicaAction, Spec, ToClient, ToReplica, message};
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
     pub client: ClientConfig,
-    pub boot_server: BootServerConfig,
+    pub replica: ReplicaConfig,
     pub service: ServiceConfig,
     pub num_client: usize,
     pub client_duration: Duration,
@@ -79,9 +78,7 @@ pub async fn client_task(
                     seq,
                     op,
                 };
-                write_message
-                    .run(ToReplica::Request(command), &replica_egresses)
-                    .await?;
+                write_message.run(command, &replica_egresses).await?;
                 if seq_scratch.len() == config.num_max_concurrent {
                     seq_scratch.pop_first();
                 }
@@ -146,7 +143,7 @@ pub async fn run_close_loop_clients(
 async fn service_task(
     replica_id: ReplicaId,
     config: ServiceConfig,
-    submit_sender: Sender<ToReplica>,
+    request_sender: Sender<Command>,
     mut finalize_receiver: Receiver<Vec<Command>>,
 ) -> anyhow::Result<()> {
     let mut replies = HashMap::<ClientId, message::Reply>::new();
@@ -168,7 +165,7 @@ async fn service_task(
         };
         enum Select {
             Accept(Connection),
-            Message(Option<ToReplica>),
+            Message(Option<Command>),
             Finalize(Option<Vec<Command>>),
             Join(()),
         }
@@ -192,9 +189,9 @@ async fn service_task(
                 let replaced = client_egresses.insert(client_id, connection);
                 anyhow::ensure!(replaced.is_none());
             }
-            Message(message) => {
-                let Some(ToReplica::Request(command)) = message else {
-                    unimplemented!()
+            Message(command) => {
+                let Some(command) = command else {
+                    unreachable!()
                 };
                 match replies.get(&command.client_id) {
                     Some(reply) if reply.seq > command.seq => {}
@@ -207,7 +204,7 @@ async fn service_task(
                         );
                         write_message.run(reply.clone(), egress).await?
                     }
-                    _ => submit_sender.send(ToReplica::Request(command)).await?,
+                    _ => request_sender.send(command).await?,
                 }
             }
             Select::Finalize(commands) => 'finalize: {
@@ -248,27 +245,21 @@ async fn service_task(
     }
 }
 
-pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
+async fn replica_task(
+    mut replica: Replica,
+    config: TaskConfig,
+    mut request_receiver: Receiver<Command>,
+    finalize_sender: Sender<Vec<Command>>,
+) -> anyhow::Result<()> {
     let (message_sender, mut message_receiver) = mpsc::channel(100);
-    let (mut read_tasks, replica_egresses) = boot_server(
+    let (mut read_tasks, replica_egresses) = boot_replica(
         replica.core.config.id,
-        config.boot_server,
+        config.replica,
         message_sender.clone(),
     )
     .await?;
     tracing::info!("replica ready");
 
-    // a bit terrible to abuse read_sender, which suppose to directly connect to
-    // read tasks in the original design
-    let submit_sender = message_sender;
-    let (finalize_sender, finalize_receiver) = mpsc::channel(16);
-    let replica_id = replica.core.config.id;
-    let mut service_task = pin!(service_task(
-        replica_id,
-        config.service,
-        submit_sender,
-        finalize_receiver,
-    ));
     let mut write_message = WriteMessage::new();
     let mut actions = Vec::new();
 
@@ -295,26 +286,48 @@ pub async fn server_task(mut replica: Replica, config: TaskConfig) -> anyhow::Re
 
         enum Select {
             Sleep,
+            Request(Option<Command>),
             Message(Option<ToReplica>),
-            Service(()),
-            ReadJoin(()),
+            JoinNext(()),
         }
         use Select::*;
         match tokio::select! {
             () = sleep(config.tick_interval) => Sleep,
+            request = request_receiver.recv() => Request(request),
             message = message_receiver.recv() => Message(message),
-            result = &mut service_task => Service(result?),
-            Some(result) = read_tasks.join_next() => ReadJoin(result??)
+            Some(result) = read_tasks.join_next() => JoinNext(result??)
         } {
             // Sleep => replica.tick(&mut actions),
             Sleep => {} // TODO impl tick on replica
+            Request(command) => {
+                let Some(command) = command else {
+                    break Ok(()); // think about whether this is correct
+                };
+                replica.request(command, &mut actions)
+            }
             Message(message) => {
                 let Some(message) = message else {
                     anyhow::bail!("message receive channel close")
                 };
                 replica.receive(message, &mut actions)
             }
-            Service(()) | ReadJoin(()) => unreachable!(),
+            JoinNext(()) => unreachable!(),
         }
     }
+}
+
+pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
+    let (request_sender, request_receiver) = mpsc::channel(100);
+    let (finalize_sender, finalize_receiver) = mpsc::channel(100);
+
+    let replica_id = replica.core.config.id;
+    let service_task = service_task(
+        replica_id,
+        config.service.clone(),
+        request_sender,
+        finalize_receiver,
+    );
+    let replica_task = replica_task(replica, config, request_receiver, finalize_sender);
+    tokio::try_join!(service_task, replica_task)?;
+    unreachable!()
 }

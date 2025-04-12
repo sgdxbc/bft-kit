@@ -16,8 +16,8 @@ use crate::{
     common::{
         ClientId, Quorum, ReplicaId,
         transport::{
-            AbstractEgress, BootServerConfig, ClientConfig, ServiceConfig, WriteMessage,
-            boot_client, boot_server, read_task,
+            AbstractEgress, ReplicaConfig, ClientConfig, ServiceConfig, WriteMessage,
+            boot_client, boot_replica, read_task,
         },
         workload::{ConcurrentClients, Invoke, Latencies},
     },
@@ -27,14 +27,12 @@ use crate::{
 
 use super::{Replica, ReplicaAction, Spec, ToReplica, message};
 
-// the first transport implemented is with TCP but it doesn't work well (or it
-// is just broken), archive it in case of needed
 pub mod tcp;
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
     pub client: ClientConfig,
-    pub boot_server: BootServerConfig,
+    pub boot_server: ReplicaConfig,
     pub service: ServiceConfig,
     pub use_tcp: bool,
     pub num_client: usize,
@@ -375,7 +373,7 @@ impl AbstractServer for Server {
             HashMap<ReplicaId, Self::Egress>,
         )>,
     > {
-        boot_server(replica_id, config.boot_server, read_sender)
+        boot_replica(replica_id, config.boot_server, read_sender)
     }
 
     fn service_task(

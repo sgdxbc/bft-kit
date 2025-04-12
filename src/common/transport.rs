@@ -85,11 +85,13 @@ pub struct ServiceConfig {
     pub server_external_addresses: Vec<SocketAddr>,
 }
 
+type BootClient = (JoinSet<Result<(), anyhow::Error>>, Vec<Connection>);
+
 pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
     id: ClientId,
     service_config: ServiceConfig,
     message_sender: Sender<M>,
-) -> anyhow::Result<(JoinSet<Result<(), anyhow::Error>>, Vec<Connection>)> {
+) -> anyhow::Result<BootClient> {
     let mut replica_egresses = Vec::new();
     let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
     let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
@@ -115,7 +117,7 @@ pub struct ClientConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct BootServerConfig {
+pub struct ReplicaConfig {
     pub server_internal_addresses: Vec<SocketAddr>,
     // how long should replicas wait before attempting to connect each other's
     // internal addresses. set longer in higher latency environments (or human
@@ -123,13 +125,13 @@ pub struct BootServerConfig {
     pub server_interconnect_delay: Duration,
 }
 
-type BootServer = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>);
+type BootReplica = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>);
 
-pub async fn boot_server<M: Decode<()> + Send + Sync + 'static>(
+pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     replica_id: ReplicaId,
-    config: BootServerConfig,
+    config: ReplicaConfig,
     message_sender: Sender<M>,
-) -> anyhow::Result<BootServer> {
+) -> anyhow::Result<BootReplica> {
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(None);
     let transport = Arc::new(transport);

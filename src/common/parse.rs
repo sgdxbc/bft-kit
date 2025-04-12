@@ -52,7 +52,7 @@ impl Options {
     }
 }
 
-impl TryFrom<Options> for super::transport::BootServerConfig {
+impl TryFrom<Options> for super::transport::ReplicaConfig {
     type Error = anyhow::Error;
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {

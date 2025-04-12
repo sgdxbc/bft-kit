@@ -3,7 +3,7 @@ use std::{pin::pin, time::Duration};
 use bft_testbed::{
     common::{
         ClientId,
-        transport::{BootServerConfig, ClientConfig, ServiceConfig},
+        transport::{ReplicaConfig, ClientConfig, ServiceConfig},
     },
     crypto::threshold::givre_replica_key_shares,
     hotstuff::{
@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
                 .map(|i| ([127, 0, 0, 1], 50000 + i as u16).into())
                 .collect(),
         },
-        boot_server: BootServerConfig {
+        replica: ReplicaConfig {
             server_internal_addresses: (0..spec.num_replica)
                 .map(|i| ([127, 0, 0, 1], 8000 + i as u16).into())
                 .collect(),
