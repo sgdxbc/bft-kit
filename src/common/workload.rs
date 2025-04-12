@@ -68,3 +68,9 @@ impl ConcurrentClients {
         Ok(latencies)
     }
 }
+
+impl Default for ConcurrentClients {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -23,7 +23,8 @@ async fn main() -> anyhow::Result<()> {
     let client_latencies = run_close_loop_clients(options.try_into()?, task_config.clone())
         .instrument(tracing::info_span!("concurrent close loops"))
         .await?;
-    // concurrent_close_loop_clients_task::<tcp::ClientTask>(options.try_into()?, task_config.clone())
+    // use bft_testbed::pbft::transport::tcp;
+    // let client_latencies = tcp::run_close_loop_clients(options.try_into()?, task_config.clone())
     //     .instrument(tracing::info_span!("concurrent close loops"))
     //     .await?;
     let mut latencies = Histogram::new(3)?;

@@ -42,8 +42,11 @@ async fn read_task<M: Decode<()> + Send + Sync + 'static>(
         }
         bytes_len += len;
         let mut offset = 0;
-        while offset < bytes_len {
-            let range = offset..bytes_len;
+        let mut range;
+        while {
+            range = offset..bytes_len;
+            !range.is_empty()
+        } {
             match bincode::decode_from_slice(
                 &decode_bytes[range.clone()],
                 bincode::config::standard(),
@@ -55,13 +58,13 @@ async fn read_task<M: Decode<()> + Send + Sync + 'static>(
                 // expect to be rare and performance does not matter
                 Err(DecodeError::UnexpectedEnd { additional }) => {
                     tracing::warn!(?range, additional, "read partial message");
-                    bytes_len = range.len();
-                    decode_bytes.copy_within(range, 0);
                     break;
                 }
                 Err(err) => anyhow::bail!(err),
             }
         }
+        bytes_len = range.len();
+        decode_bytes.copy_within(range, 0)
     }
 }
 
@@ -210,6 +213,15 @@ pub async fn run_close_loop_clients(
     concurrent_clients.close_loop(config.client_duration).await
 }
 
+// unlike QUIC, TCP transport use dual socket style interconnect. interconnect
+// streams are unidirectional, sending from ephemeral addresses to server
+// internal addresses. not sure about the exact implications of this
+// the rationale is to avoid TIME_WAIT connections from previous round of
+// benchmark to interfere with the following round during a rapid
+// debugging/tuning develop cycle
+// takeaway: TCP is not the best transport solution to work with when developing
+// research prototypes. will not try to extensively tune it in this codebase and
+// primarily (if not exclusively) use QUIC
 async fn boot_server(
     replica_id: ReplicaId,
     config: BootServerConfig,

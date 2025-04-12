@@ -22,6 +22,7 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(replica_config_path.with_file_name("task.conf")).await?);
     let replica = Replica::new(options.clone().try_into()?);
     let mut server = pin!(server_task::<Server>(replica, options.try_into()?));
+    // use bft_testbed::pbft::transport::tcp;
     // let mut server = pin!(server_task::<tcp::Server>(replica, options.try_into()?));
     'server: {
         tokio::select! {
