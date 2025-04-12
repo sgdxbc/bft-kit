@@ -1,5 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
+use hdrhistogram::Histogram;
 use rand::random;
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
@@ -86,5 +87,49 @@ impl ConcurrentClients {
 impl Default for ConcurrentClients {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub fn report_latencies(client_latencies: Vec<Latencies>, duration: Duration) {
+    let num_client_latencies = client_latencies.len();
+    let mut latencies = Histogram::new(3).expect("valid histogram parameter");
+    for client_latencies in client_latencies {
+        let throughput = client_latencies.len() as f32 / duration.as_secs_f32();
+        let latency_mean = client_latencies.mean() / 1_000_000.;
+        tracing::info!(
+            "client throughput {throughput:.2} ({:.2} = inverse of mean latency {:?})",
+            1. / latency_mean,
+            Duration::from_secs_f64(latency_mean),
+        );
+        latencies += client_latencies
+    }
+    let throughput = latencies.len() as f32 / duration.as_secs_f32();
+    let latency_mean = latencies.mean() / 1_000_000.;
+    tracing::info!(
+        "throughput {throughput:.2} ({:.2} = {num_client_latencies} * inverse of mean latency {:?})",
+        num_client_latencies as f64 / latency_mean,
+        Duration::from_secs_f64(latency_mean),
+    );
+    for value in latencies.iter_quantiles(1) {
+        if value.count_since_last_iteration() == 0 {
+            continue;
+        }
+        tracing::info!(
+            "quantile {:8.6} latency {:10?}",
+            value.quantile(),
+            Duration::from_micros(value.value_iterated_to()),
+        )
+    }
+    for value in latencies.iter_log(1, 2.) {
+        let count = value.count_since_last_iteration();
+        if count == 0 {
+            continue;
+        }
+        tracing::info!(
+            "{:8} ({:4.2}) requests <= {:?}",
+            count,
+            count as f32 / latencies.len() as f32,
+            Duration::from_micros(value.value_iterated_to())
+        );
     }
 }
