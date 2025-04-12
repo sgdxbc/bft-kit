@@ -114,8 +114,6 @@ pub struct ClientConfig {
     pub num_max_concurrent: usize,
 }
 
-pub type Invoke = (Vec<u8>, Option<Vec<u8>>);
-
 #[derive(Debug, Clone)]
 pub struct BootServerConfig {
     pub server_internal_addresses: Vec<SocketAddr>,

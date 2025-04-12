@@ -5,20 +5,20 @@ use std::{
 
 use bincode::{Decode, Encode, error::DecodeError};
 use hdrhistogram::Histogram;
-use rand::random;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpSocket, TcpStream, tcp::OwnedWriteHalf},
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
-    time::{Instant, sleep, timeout_at},
+    time::{Instant, sleep},
     try_join,
 };
 
 use crate::{
     common::{
         ClientId, Quorum, ReplicaId,
-        transport::{BootServerConfig, ClientConfig, Invoke, ServiceConfig, WriteMessage},
+        transport::{BootServerConfig, ClientConfig, ServiceConfig, WriteMessage},
+        workload::{ConcurrentClients, Invoke},
     },
     pbft::{Command, Spec, ToClient},
 };
@@ -100,15 +100,16 @@ pub async fn client_task(
     let (mut read_tasks, mut replica_egresses) =
         boot_client(id, service_config, message_sender).await?;
 
-    let mut seq = 0;
-    let mut write_message = WriteMessage::new();
-    let mut latencies = Histogram::new(3)?;
     struct SeqScratch {
         results: Quorum<Vec<u8>>,
         expected_result: Option<Vec<u8>>,
         start: Instant,
     }
+    let mut seq = 0;
     let mut seq_scratch = BTreeMap::new();
+    let mut view_num = 0;
+    let mut write_message = WriteMessage::new();
+    let mut latencies = Histogram::new(3)?;
     loop {
         enum Select {
             Invoke(Option<Invoke>),
@@ -130,8 +131,12 @@ pub async fn client_task(
                     op,
                 };
                 write_message
-                    .run(ToReplica::Request(command), &mut replica_egresses)
+                    .run(
+                        ToReplica::Request(command),
+                        [&mut replica_egresses[spec.primary(view_num) as usize]],
+                    )
                     .await?;
+                // resend for close loop?
                 if seq_scratch.len() == config.num_max_concurrent {
                     seq_scratch.pop_first();
                 }
@@ -161,6 +166,7 @@ pub async fn client_task(
                     .count() as ReplicaId
                     == spec.num_faulty + 1
                 {
+                    view_num = reply.view_num;
                     let scratch = seq_scratch.remove(&reply.seq).unwrap();
                     if let Some(result) = scratch.expected_result {
                         anyhow::ensure!(reply.result == result)
@@ -177,45 +183,20 @@ pub async fn run_close_loop_clients(
     spec: Spec,
     config: TaskConfig,
 ) -> anyhow::Result<Vec<Histogram<u32>>> {
-    let mut client_tasks = JoinSet::new();
-    let mut invoke_senders = HashMap::new();
-    let (commit_sender, mut commit_receiver) = mpsc::channel(64);
+    let mut concurrent_clients = ConcurrentClients::new();
     for _ in 0..config.num_client {
-        let (invoke_sender, invoke_receiver) = mpsc::channel(64);
-        let id = ClientId(random());
-        let replaced = invoke_senders.insert(id, invoke_sender);
-        anyhow::ensure!(replaced.is_none());
-        client_tasks.spawn(client_task(
-            spec.clone(),
-            config.client.clone(),
-            config.service.clone(),
-            id,
-            invoke_receiver,
-            commit_sender.clone(),
-        ));
+        concurrent_clients.spawn(|id, invoke_receiver, commit_sender| {
+            client_task(
+                spec.clone(),
+                config.client.clone(),
+                config.service.clone(),
+                id,
+                invoke_receiver,
+                commit_sender,
+            )
+        })
     }
-    for sender in invoke_senders.values() {
-        sender
-            .send((Default::default(), Some(Default::default())))
-            .await?
-    }
-
-    let deadline = Instant::now() + config.client_duration;
-    while let Ok(client_id) = timeout_at(deadline, commit_receiver.recv()).await {
-        let Some(client_id) = client_id else {
-            anyhow::bail!("commit receive channel closed")
-        };
-        invoke_senders[&client_id]
-            .send((Default::default(), Some(Default::default())))
-            .await?
-    }
-
-    drop(invoke_senders);
-    let mut latencies = Vec::new();
-    while let Some(client_latencies) = client_tasks.join_next().await {
-        latencies.push(client_latencies??)
-    }
-    Ok(latencies)
+    concurrent_clients.close_loop(config.client_duration).await
 }
 
 // duplicating common::transport::boot_server

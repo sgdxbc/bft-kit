@@ -6,20 +6,20 @@ use std::{
 
 use hdrhistogram::Histogram;
 use quinn::{Connection, Endpoint};
-use rand::random;
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
-    time::{Instant, sleep, timeout_at},
+    time::{Instant, sleep},
 };
 
 use crate::{
     common::{
         ClientId, Command, Quorum, ReplicaId,
         transport::{
-            BootServerConfig, ClientConfig, Invoke, ServiceConfig, WriteMessage, boot_client,
-            boot_server, read_task,
+            BootServerConfig, ClientConfig, ServiceConfig, WriteMessage, boot_client, boot_server,
+            read_task,
         },
+        workload::{ConcurrentClients, Invoke},
     },
     crypto::cert::quinn::server_config,
 };
@@ -127,45 +127,20 @@ pub async fn run_close_loop_clients(
     spec: Spec,
     config: TaskConfig,
 ) -> anyhow::Result<Vec<Histogram<u32>>> {
-    let mut client_tasks = JoinSet::new();
-    let mut invoke_senders = HashMap::new();
-    let (commit_sender, mut commit_receiver) = mpsc::channel(64);
+    let mut concurrent_clients = ConcurrentClients::new();
     for _ in 0..config.num_client {
-        let (invoke_sender, invoke_receiver) = mpsc::channel(64);
-        let id = ClientId(random());
-        let replaced = invoke_senders.insert(id, invoke_sender);
-        anyhow::ensure!(replaced.is_none());
-        client_tasks.spawn(client_task(
-            spec.clone(),
-            config.client.clone(),
-            config.service.clone(),
-            id,
-            invoke_receiver,
-            commit_sender.clone(),
-        ));
+        concurrent_clients.spawn(|id, invoke_receiver, commit_sender| {
+            client_task(
+                spec.clone(),
+                config.client.clone(),
+                config.service.clone(),
+                id,
+                invoke_receiver,
+                commit_sender,
+            )
+        })
     }
-    for sender in invoke_senders.values() {
-        sender
-            .send((Default::default(), Some(Default::default())))
-            .await?
-    }
-
-    let deadline = Instant::now() + config.client_duration;
-    while let Ok(client_id) = timeout_at(deadline, commit_receiver.recv()).await {
-        let Some(client_id) = client_id else {
-            anyhow::bail!("commit receive channel closed")
-        };
-        invoke_senders[&client_id]
-            .send((Default::default(), Some(Default::default())))
-            .await?
-    }
-
-    drop(invoke_senders);
-    let mut latencies = Vec::new();
-    while let Some(client_latencies) = client_tasks.join_next().await {
-        latencies.push(client_latencies??)
-    }
-    Ok(latencies)
+    concurrent_clients.close_loop(config.client_duration).await
 }
 
 async fn service_task(
