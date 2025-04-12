@@ -1,26 +1,20 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::Duration,
-};
+use std::{collections::BTreeMap, time::Duration};
 
 use hdrhistogram::Histogram;
-use quinn::{Endpoint, Incoming};
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
-    task::JoinSet,
     time::{Instant, sleep},
 };
 
 use crate::{
     common::{
-        ClientId, Quorum, ReplicaId,
+        ClientId, ClientSeq, Quorum, ReplicaId,
         transport::{
-            AbstractEgress, ClientConfig, ReplicaConfig, ServiceConfig, WriteMessage, boot_client,
-            boot_replica, read_task,
+            AbstractEgress, AbstractService, ClientConfig, ReplicaConfig, Service, ServiceConfig,
+            WriteMessage, boot_client, boot_replica,
         },
         workload::{ConcurrentClients, Invoke, Latencies},
     },
-    crypto::cert::quinn::server_config,
     pbft::{Command, ToClient, ViewNum},
 };
 
@@ -152,27 +146,40 @@ pub async fn run_close_loop_clients(
     concurrent_clients.close_loop(config.client_duration).await
 }
 
-type BootReplica<E> = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, E>);
-
-pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
-    let (request_sender, request_receiver) = mpsc::channel(100);
-    let (finalize_sender, finalize_receiver) = mpsc::channel(100);
-
-    let replica_id = replica.core.config.id;
-    let service_task = service_task(
-        replica_id,
-        config.service.clone(),
-        request_sender,
-        finalize_receiver,
-    );
-    let replica_task = replica_task(replica, config, request_receiver, finalize_sender);
-    tokio::try_join!(service_task, replica_task)?;
-    unreachable!()
-}
-
 pub struct Finalize {
     commands: Vec<super::Command>,
     view_num: ViewNum,
+}
+
+pub struct ServiceKit;
+impl AbstractService for Service<ServiceKit> {
+    type Reply = message::Reply;
+    type Finalize = Finalize;
+
+    fn reply_seq(reply: &Self::Reply) -> ClientSeq {
+        reply.seq
+    }
+
+    fn on_finalize(
+        &mut self,
+        finalize: Self::Finalize,
+    ) -> impl Iterator<Item = (ClientId, Self::Reply)> {
+        finalize.commands.into_iter().filter_map(move |command| {
+            if matches!(self.replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq) {
+                tracing::warn!(?command, "duplicated finalize");
+                return None;
+            }
+            let reply = message::Reply {
+                seq: command.seq,
+                // a 0/0 service, extend to support arbitrary state machine later
+                result: Default::default(),
+                replica_id: self.replica_id,
+                view_num: finalize.view_num,
+            };
+            self.replies.insert(command.client_id, reply.clone());
+            Some((command.client_id, reply))
+        })
+    }
 }
 
 async fn replica_task(
@@ -252,103 +259,13 @@ async fn replica_task(
     }
 }
 
-async fn service_task(
-    replica_id: ReplicaId,
-    config: ServiceConfig,
-    request_sender: Sender<Command>,
-    mut finalize_receiver: Receiver<Finalize>,
-) -> anyhow::Result<()> {
-    let mut replies = HashMap::<ClientId, message::Reply>::new();
-    let external_endpoint = Endpoint::server(
-        server_config(),
-        config.server_external_addresses[replica_id as usize],
-    )?;
-    let mut read_tasks = JoinSet::new();
-    let mut client_egresses = HashMap::new();
-    let mut write_message = WriteMessage::new();
-    let (message_sender, mut message_receiver) = mpsc::channel(4096);
-    loop {
-        enum Select {
-            Accept(Option<Incoming>),
-            Message(Option<Command>),
-            Finalize(Option<Finalize>),
-            JoinNext(()),
-        }
-        use Select::{Accept, JoinNext, Message};
-        match tokio::select! {
-            accept = external_endpoint.accept() => Accept(accept),
-            message = message_receiver.recv() => Message(message),
-            finalize = finalize_receiver.recv() => Select::Finalize(finalize),
-            Some(result) = read_tasks.join_next() => JoinNext(result??),
-        } {
-            JoinNext(()) => {}
-            Accept(None) => anyhow::bail!("endpoint closed"),
-            Accept(Some(incoming)) => {
-                let connection = incoming.await?;
-                let mut client_id = [0; size_of::<ClientId>()];
-                connection
-                    .accept_uni()
-                    .await?
-                    .read_exact(&mut client_id)
-                    .await?;
-                let client_id = ClientId::from_le_bytes(client_id);
-                tracing::debug!(%client_id, "accept client connection");
-                read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), true));
-                let replaced = client_egresses.insert(client_id, connection);
-                anyhow::ensure!(replaced.is_none());
-            }
-            Message(command) => {
-                let Some(command) = command else {
-                    unreachable!()
-                };
-                match replies.get(&command.client_id) {
-                    Some(reply) if reply.seq > command.seq => {}
-                    Some(reply) if reply.seq == command.seq => {
-                        let egress = client_egresses.get(&command.client_id);
-                        anyhow::ensure!(
-                            egress.is_some(),
-                            "send to unexpected client {}",
-                            command.client_id
-                        );
-                        write_message.run(reply.clone(), egress).await?
-                    }
-                    _ => request_sender.send(command).await?,
-                }
-            }
-            Select::Finalize(finalize) => 'finalize: {
-                let Some(finalize) = finalize else {
-                    tracing::warn!("finalize channel closed");
-                    break 'finalize;
-                };
-                for command in finalize.commands {
-                    if matches!(replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq)
-                    {
-                        tracing::warn!(?command, "duplicated finalize");
-                        continue;
-                    }
-                    let reply = message::Reply {
-                        seq: command.seq,
-                        // a 0/0 service, extend to support arbitrary state machine later
-                        result: Default::default(),
-                        replica_id,
-                        view_num: finalize.view_num,
-                    };
-                    replies.insert(command.client_id, reply.clone());
-                    let egress = client_egresses.get(&command.client_id);
-                    anyhow::ensure!(
-                        egress.is_some(),
-                        "send to unexpected client {}",
-                        command.client_id
-                    );
-                    if let Err(err) = write_message.run(reply, egress).await {
-                        // TODO only suppress certain errors e.g. BrokenPipe and ApplicationClose
-                        tracing::info!(%err, "egress to client failed")
-                        // not removing from egress table to prevent the following
-                        // (failed) writing errors
-                        // may cause repeatedly logging but the pattern should be rare
-                    }
-                }
-            }
-        }
-    }
+pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
+    let (request_sender, request_receiver) = mpsc::channel(100);
+    let (finalize_sender, finalize_receiver) = mpsc::channel(100);
+
+    let service_task = Service::<ServiceKit>::new(replica.core.config.id, request_sender)
+        .run(config.service.clone(), finalize_receiver);
+    let replica_task = replica_task(replica, config, request_receiver, finalize_sender);
+    tokio::try_join!(service_task, replica_task)?;
+    unreachable!()
 }

@@ -25,7 +25,7 @@ use crate::{
 
 use crate::pbft::{ToReplica, message};
 
-use super::{AbstractEgress, BootReplica, Finalize, TaskConfig};
+use super::{AbstractEgress, Finalize, TaskConfig};
 
 async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     mut ingress: impl AsyncRead + Unpin,
@@ -229,6 +229,7 @@ pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result
     unreachable!()
 }
 
+type BootReplica = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, TcpStream>);
 // unlike QUIC, TCP transport use dual socket style interconnect. interconnect
 // streams are unidirectional, sending from ephemeral addresses to server
 // internal addresses. not sure about the exact implications of this
@@ -242,7 +243,7 @@ async fn boot_replica(
     replica_id: ReplicaId,
     config: ReplicaConfig,
     read_sender: Sender<ToReplica>,
-) -> anyhow::Result<BootReplica<TcpStream>> {
+) -> anyhow::Result<BootReplica> {
     let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
     let active_task = async {
         tracing::info!(

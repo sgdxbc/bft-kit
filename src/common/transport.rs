@@ -1,12 +1,17 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use bincode::{Decode, Encode};
-use quinn::{Connection, ConnectionError, Endpoint};
-use tokio::{sync::mpsc::Sender, task::JoinSet, time::sleep, try_join};
+use quinn::{Connection, ConnectionError, Endpoint, Incoming};
+use tokio::{
+    sync::mpsc::{self, Receiver, Sender},
+    task::JoinSet,
+    time::sleep,
+    try_join,
+};
 
 use crate::crypto::cert::quinn::{client_config, server_config};
 
-use super::{ClientId, ReplicaId};
+use super::{ClientId, ClientSeq, Command, ReplicaId};
 
 pub async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     ingress: Connection,
@@ -200,4 +205,123 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
         read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), false));
     }
     Ok((read_tasks, replica_egresses))
+}
+
+pub struct Service<P>
+where
+    Self: AbstractService,
+{
+    pub replies: HashMap<ClientId, <Self as AbstractService>::Reply>,
+    pub request_sender: Sender<Command>,
+    // TODO service state machine
+    pub replica_id: ReplicaId,
+}
+
+pub trait AbstractService {
+    type Reply;
+    type Finalize;
+    fn reply_seq(reply: &Self::Reply) -> ClientSeq;
+    fn on_finalize(
+        &mut self,
+        finalize: Self::Finalize,
+    ) -> impl Iterator<Item = (ClientId, Self::Reply)>;
+}
+
+impl<P> Service<P>
+where
+    Self: AbstractService,
+{
+    pub fn new(replica_id: ReplicaId, request_sender: Sender<Command>) -> Self {
+        Self {
+            replica_id,
+            request_sender,
+            replies: Default::default(),
+        }
+    }
+
+    pub async fn run(
+        mut self,
+        config: ServiceConfig,
+        mut finalize_receiver: Receiver<<Self as AbstractService>::Finalize>,
+    ) -> anyhow::Result<()>
+    where
+        <Self as AbstractService>::Reply: Encode,
+    {
+        let external_endpoint = Endpoint::server(
+            server_config(),
+            config.server_external_addresses[self.replica_id as usize],
+        )?;
+        let mut read_tasks = JoinSet::new();
+        let mut client_egresses = HashMap::new();
+        let mut write_message = WriteMessage::new();
+        let (message_sender, mut message_receiver) = mpsc::channel(1 << 12);
+        loop {
+            enum Select<F> {
+                Accept(Option<Incoming>),
+                Message(Option<Command>),
+                Finalize(Option<F>),
+                JoinNext(()),
+            }
+            use Select::{Accept, JoinNext, Message};
+            match tokio::select! {
+                accept = external_endpoint.accept() => Accept(accept),
+                message = message_receiver.recv() => Message(message),
+                finalize = finalize_receiver.recv() => Select::Finalize(finalize),
+                Some(result) = read_tasks.join_next() => JoinNext(result??),
+            } {
+                JoinNext(()) => {}
+                Accept(None) => anyhow::bail!("endpoint closed"),
+                Accept(Some(incoming)) => {
+                    let connection = incoming.await?;
+                    let mut client_id = [0; size_of::<ClientId>()];
+                    connection
+                        .accept_uni()
+                        .await?
+                        .read_exact(&mut client_id)
+                        .await?;
+                    let client_id = ClientId::from_le_bytes(client_id);
+                    tracing::debug!(%client_id, "accept client connection");
+                    read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), true));
+                    let replaced = client_egresses.insert(client_id, connection);
+                    anyhow::ensure!(replaced.is_none());
+                }
+                Message(command) => {
+                    let Some(command) = command else {
+                        unreachable!()
+                    };
+                    match self.replies.get(&command.client_id) {
+                        Some(reply) if Self::reply_seq(reply) > command.seq => {}
+                        Some(reply) if Self::reply_seq(reply) == command.seq => {
+                            let egress = client_egresses.get(&command.client_id);
+                            anyhow::ensure!(
+                                egress.is_some(),
+                                "send to unexpected client {}",
+                                command.client_id
+                            );
+                            write_message.run(reply, egress).await?
+                        }
+                        _ => self.request_sender.send(command).await?,
+                    }
+                }
+                Select::Finalize(finalize) => 'finalize: {
+                    let Some(finalize) = finalize else {
+                        tracing::warn!("finalize channel closed");
+                        break 'finalize;
+                    };
+                    for (client_id, reply) in self.on_finalize(finalize) {
+                        let egress = client_egresses.get(&client_id);
+                        anyhow::ensure!(egress.is_some(), "send to unexpected client {client_id}");
+                        if let Err(err) = write_message.run(reply, egress).await {
+                            // TODO only suppress certain errors e.g. BrokenPipe and
+                            // ApplicationClose
+                            tracing::info!(%err, "egress to client failed")
+                            // not removing from egress table to prevent the following
+                            // (failed) writing errors
+                            // may cause repeatedly logging but the pattern should be rare
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
