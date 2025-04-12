@@ -148,6 +148,10 @@ pub async fn boot_server<M: Decode<()> + Send + Sync + 'static>(
         config
     });
     let active_task = async {
+        tracing::info!(
+            "start server interconnect after {:?}",
+            config.server_interconnect_delay
+        );
         sleep(config.server_interconnect_delay).await;
         let mut connections = HashMap::new();
         for (i, &addr) in config

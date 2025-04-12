@@ -272,7 +272,7 @@ async fn service_task(
     let mut read_tasks = JoinSet::new();
     let mut client_egresses = HashMap::new();
     let mut write_message = WriteMessage::new();
-    let (client_read_sender, mut client_read_receiver) = mpsc::channel(4096);
+    let (message_sender, mut message_receiver) = mpsc::channel(4096);
     loop {
         let accept = async {
             external_endpoint
@@ -283,17 +283,18 @@ async fn service_task(
         };
         enum Select {
             Accept(Connection),
-            Read(Option<ToReplica>),
+            Message(Option<ToReplica>),
             Finalize(Option<Finalize>),
-            Join(()),
+            JoinNext(()),
         }
-        use Select::{Accept, Join, Read};
+        use Select::{Accept, JoinNext, Message};
         match tokio::select! {
             accept = accept => Accept(accept?),
-            message = client_read_receiver.recv() => Read(message),
+            message = message_receiver.recv() => Message(message),
             finalize = finalize_receiver.recv() => Select::Finalize(finalize),
-            Some(result) = read_tasks.join_next() => Join(result??),
+            Some(result) = read_tasks.join_next() => JoinNext(result??),
         } {
+            JoinNext(()) => {}
             Accept(connection) => {
                 let mut client_id = [0; size_of::<ClientId>()];
                 connection
@@ -303,15 +304,11 @@ async fn service_task(
                     .await?;
                 let client_id = ClientId::from_le_bytes(client_id);
                 tracing::debug!(%client_id, "accept client connection");
-                read_tasks.spawn(read_task(
-                    connection.clone(),
-                    client_read_sender.clone(),
-                    true,
-                ));
+                read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), true));
                 let replaced = client_egresses.insert(client_id, connection);
                 anyhow::ensure!(replaced.is_none());
             }
-            Read(message) => {
+            Message(message) => {
                 let Some(ToReplica::Request(command)) = message else {
                     unimplemented!()
                 };
@@ -363,7 +360,6 @@ async fn service_task(
                     }
                 }
             }
-            Join(()) => {}
         }
     }
 }
