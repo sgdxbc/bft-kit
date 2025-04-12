@@ -5,7 +5,7 @@ use std::{
 };
 
 use hdrhistogram::Histogram;
-use quinn::{Connection, Endpoint};
+use quinn::{Connection, Endpoint, Incoming};
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
@@ -275,28 +275,23 @@ async fn service_task(
     let mut write_message = WriteMessage::new();
     let (message_sender, mut message_receiver) = mpsc::channel(4096);
     loop {
-        let accept = async {
-            external_endpoint
-                .accept()
-                .await
-                .expect("endpoint not closed")
-                .await
-        };
         enum Select {
-            Accept(Connection),
+            Accept(Option<Incoming>),
             Message(Option<ToReplica>),
             Finalize(Option<Finalize>),
             JoinNext(()),
         }
         use Select::{Accept, JoinNext, Message};
         match tokio::select! {
-            accept = accept => Accept(accept?),
+            accept = external_endpoint.accept() => Accept(accept),
             message = message_receiver.recv() => Message(message),
             finalize = finalize_receiver.recv() => Select::Finalize(finalize),
             Some(result) = read_tasks.join_next() => JoinNext(result??),
         } {
             JoinNext(()) => {}
-            Accept(connection) => {
+            Accept(None) => anyhow::bail!("endpoint closed"),
+            Accept(Some(incoming)) => {
+                let connection = incoming.await?;
                 let mut client_id = [0; size_of::<ClientId>()];
                 connection
                     .accept_uni()

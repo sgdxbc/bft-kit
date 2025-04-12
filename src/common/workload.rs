@@ -51,9 +51,23 @@ impl ConcurrentClients {
         }
 
         let deadline = Instant::now() + duration;
-        while let Ok(client_id) = timeout_at(deadline, self.commit_receiver.recv()).await {
-            let Some(client_id) = client_id else {
-                anyhow::bail!("commit receive channel closed")
+        enum Select {
+            Commit(Option<ClientId>),
+            JoinNext,
+        }
+        while let Ok(select) = {
+            let task = async {
+                anyhow::Ok(tokio::select! {
+                    commit = self.commit_receiver.recv() => Select::Commit(commit),
+                    Some(result) = self.tasks.join_next() => { result??; Select::JoinNext },
+                })
+            };
+            timeout_at(deadline, task).await
+        } {
+            let client_id = match select? {
+                Select::JoinNext => unreachable!(),
+                Select::Commit(None) => anyhow::bail!("commit receive channel closed"),
+                Select::Commit(Some(client_id)) => client_id,
             };
             self.invoke_senders[&client_id]
                 .send((Default::default(), Some(Default::default())))

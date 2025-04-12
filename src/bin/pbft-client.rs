@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
     }
     .instrument(tracing::info_span!("concurrent close loops"))
     .await?;
+    let num_client_latencies = client_latencies.len();
     let mut latencies = Histogram::new(3)?;
     for client_latencies in client_latencies {
         let throughput = client_latencies.len() as f32
@@ -47,8 +48,8 @@ async fn main() -> anyhow::Result<()> {
         latencies.len() as f32 / (config.client_duration - WARMUP_DURATION).as_secs_f32();
     let latency_mean = latencies.mean() / 1_000_000.;
     tracing::info!(
-        "throughput {throughput:.2} ({:.2} = inverse of mean latency {:?})",
-        1. / latency_mean,
+        "throughput {throughput:.2} ({:.2} = {num_client_latencies} * inverse of mean latency {:?})",
+        num_client_latencies as f64 / latency_mean,
         Duration::from_secs_f64(latency_mean),
     );
     for value in latencies.iter_quantiles(1) {
