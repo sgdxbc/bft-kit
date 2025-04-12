@@ -18,9 +18,8 @@ async fn main() -> anyhow::Result<()> {
     if client_config_path.exists() {
         options.parse(&read_to_string(&client_config_path).await?);
     }
-    options.parse(&read_to_string(client_config_path.with_file_name("spec.conf")).await?);
+    options.parse(&read_to_string(client_config_path.with_file_name("common.conf")).await?);
     options.parse(&read_to_string(client_config_path.with_file_name("network.conf")).await?);
-    options.parse(&read_to_string(client_config_path.with_file_name("task.conf")).await?);
 
     let config = TaskConfig::try_from(options.clone())?;
     let client_latencies = if !config.use_tcp {

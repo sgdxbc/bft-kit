@@ -93,14 +93,18 @@ impl Default for ConcurrentClients {
 pub fn report_latencies(client_latencies: Vec<Latencies>, duration: Duration) {
     let num_client_latencies = client_latencies.len();
     let mut latencies = Histogram::new(3).expect("valid histogram parameter");
-    for client_latencies in client_latencies {
-        let throughput = client_latencies.len() as f32 / duration.as_secs_f32();
-        let latency_mean = client_latencies.mean() / 1_000_000.;
-        tracing::info!(
-            "client throughput {throughput:.2} ({:.2} = inverse of mean latency {:?})",
-            1. / latency_mean,
-            Duration::from_secs_f64(latency_mean),
-        );
+    for (i, client_latencies) in client_latencies.into_iter().enumerate() {
+        if i < 5 {
+            let throughput = client_latencies.len() as f32 / duration.as_secs_f32();
+            let latency_mean = client_latencies.mean() / 1_000_000.;
+            tracing::info!(
+                "client throughput {throughput:.2} ({:.2} = inverse of mean latency {:?})",
+                1. / latency_mean,
+                Duration::from_secs_f64(latency_mean),
+            )
+        } else if i == 5 {
+            tracing::info!("(omit the remaining per client latencies)")
+        }
         latencies += client_latencies
     }
     let throughput = latencies.len() as f32 / duration.as_secs_f32();
@@ -110,8 +114,8 @@ pub fn report_latencies(client_latencies: Vec<Latencies>, duration: Duration) {
         num_client_latencies as f64 / latency_mean,
         Duration::from_secs_f64(latency_mean),
     );
-    for value in latencies.iter_quantiles(1) {
-        if value.count_since_last_iteration() == 0 {
+    for (i, value) in latencies.iter_quantiles(1).enumerate() {
+        if value.count_since_last_iteration() == 0 || i >= 2 && value.quantile() < 0.99 {
             continue;
         }
         tracing::info!(

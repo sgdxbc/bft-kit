@@ -18,9 +18,8 @@ async fn main() -> anyhow::Result<()> {
     let replica_config_path = PathBuf::from(args().nth(1).unwrap_or("replica.conf".into()));
     let mut options = Options::new();
     options.parse(&read_to_string(&replica_config_path).await?);
-    options.parse(&read_to_string(replica_config_path.with_file_name("spec.conf")).await?);
+    options.parse(&read_to_string(replica_config_path.with_file_name("common.conf")).await?);
     options.parse(&read_to_string(replica_config_path.with_file_name("network.conf")).await?);
-    options.parse(&read_to_string(replica_config_path.with_file_name("task.conf")).await?);
     let replica = Replica::new(options.clone().try_into()?);
     let config = TaskConfig::try_from(options)?;
     let mut server = pin!(if !config.use_tcp {

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
+    time::Duration,
 };
 
 use bincode::{Decode, error::DecodeError};
@@ -113,6 +114,7 @@ pub async fn client_task(
     let (message_sender, mut message_receiver) = mpsc::channel(64);
     let (mut read_tasks, mut replica_egresses) =
         boot_client(id, service_config, message_sender).await?;
+    sleep(Duration::from_millis(100)).await;
 
     struct SeqScratch {
         results: Quorum<Vec<u8>>,

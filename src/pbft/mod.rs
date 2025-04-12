@@ -292,6 +292,18 @@ impl ReplicaCore {
     }
 }
 
+impl Drop for ReplicaCore {
+    fn drop(&mut self) {
+        let batch_size = self
+            .blocks
+            .values()
+            .map(|block| block.commands.len())
+            .sum::<usize>() as f32
+            / self.blocks.len() as f32;
+        tracing::info!("average batch size = {batch_size:.2}")
+    }
+}
+
 pub struct Replica {
     core: ReplicaCore,
     core_actions: ReplicaCoreActions,
