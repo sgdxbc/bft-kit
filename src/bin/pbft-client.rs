@@ -3,7 +3,7 @@ use std::{env::args, path::PathBuf};
 use bft_testbed::{
     init_logging,
     parse::Options,
-    pbft::transport::{TaskConfig, WARMUP_DURATION, run_close_loop_clients, tcp},
+    pbft::transport::{TaskConfig, WARMUP_DURATION, clients_task, tcp},
     workload::report_latencies,
 };
 use futures::FutureExt;
@@ -24,9 +24,9 @@ async fn main() -> anyhow::Result<()> {
 
     let config = TaskConfig::try_from(options.clone())?;
     let client_latencies = if !config.use_tcp {
-        run_close_loop_clients(options.try_into()?, config.clone()).left_future()
+        clients_task(options.try_into()?, config.clone()).left_future()
     } else {
-        tcp::run_close_loop_clients(options.try_into()?, config.clone()).right_future()
+        tcp::clients_task(options.try_into()?, config.clone()).right_future()
     }
     .instrument(tracing::info_span!("concurrent close loops"))
     .await?;

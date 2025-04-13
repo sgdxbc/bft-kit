@@ -206,8 +206,15 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
 }
 
 #[derive(Debug, Clone)]
-pub struct ClientConfig {
+pub enum ClientConfig {
+    CloseLoop,
+    OpenLoop(OpenLoopClientConfig),
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenLoopClientConfig {
     pub num_max_concurrent: usize,
+    pub sending_rate: f32,
 }
 
 // TODO extract client skeleton

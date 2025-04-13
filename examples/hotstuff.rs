@@ -33,9 +33,7 @@ async fn main() -> anyhow::Result<()> {
                 .collect(),
             server_interconnect_delay: Duration::from_millis(100),
         },
-        client: ClientConfig {
-            num_max_concurrent: 1,
-        },
+        client: ClientConfig::CloseLoop,
 
         // these two values unused. this example sends single request from one client
         num_client: 0,
@@ -51,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
         let core_config = ReplicaCoreConfig {
             spec: spec.clone(),
             id: i,
+            open_loop: false,
             max_batch_size: 1,
         };
         let crypto_config = CryptoConfig {

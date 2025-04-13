@@ -84,11 +84,11 @@ pub mod open_loop {
         const MAX_LEN: usize = 5000;
 
         pub fn push(&mut self, command: Command) -> bool {
+            self.num_push += 1;
             if matches!(self.client_seqs.get(&command.client_id), Some(&seq) if seq >= command.seq)
             {
                 return false;
             }
-            self.num_push += 1;
             self.client_seqs.insert(command.client_id, command.seq);
             if self.pending_buf.len() == Self::MAX_LEN {
                 self.pending_buf.pop_front();

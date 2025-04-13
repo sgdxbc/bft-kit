@@ -20,6 +20,7 @@ impl TryFrom<Options> for super::ReplicaCoreConfig {
         let mut config = super::ReplicaCoreConfig {
             spec: options.clone().try_into()?,
             id: options.get("replica_id")?,
+            open_loop: matches!(options.try_get("open_loop")?, Some(true)),
             max_batch_size: 1,
         };
         if let Some(max_batch_size) = options.try_get("max_batch_size")? {

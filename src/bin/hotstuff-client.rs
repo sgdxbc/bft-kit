@@ -1,7 +1,7 @@
 use std::{env::args, path::PathBuf};
 
 use bft_testbed::{
-    hotstuff::transport::{TaskConfig, WARMUP_DURATION, run_close_loop_clients},
+    hotstuff::transport::{TaskConfig, WARMUP_DURATION, clients_task},
     init_logging,
     parse::Options,
     workload::report_latencies,
@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(config_path.with_file_name("network.conf")).await?);
 
     let config = TaskConfig::try_from(options.clone())?;
-    let client_latencies = run_close_loop_clients(options.try_into()?, config.clone())
+    let client_latencies = clients_task(options.try_into()?, config.clone())
         .instrument(tracing::info_span!("concurrent close loops"))
         .await?;
 

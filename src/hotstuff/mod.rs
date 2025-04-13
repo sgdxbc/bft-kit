@@ -39,6 +39,7 @@ pub struct ReplicaCoreConfig {
     pub spec: Spec, // unused for now but probably useful for a (responsible) pacemaker.getLeader
     pub id: ReplicaId,
 
+    pub open_loop: bool,
     pub max_batch_size: usize,
 }
 
@@ -144,6 +145,11 @@ impl ReplicaCore {
             node: genesis_key,
             sig: Sig::Vec(Default::default()),
         });
+        let pool = if config.open_loop {
+            CommandPool::open_loop()
+        } else {
+            CommandPool::close_loop()
+        };
         Self {
             config,
             vote_height: 0,
@@ -151,7 +157,7 @@ impl ReplicaCore {
             block_execute: genesis_key,
             block_leaf: genesis_key,
             quorum_cert_high: genesis_justify_key,
-            pool: CommandPool::close_loop(), // TODO configurable
+            pool,
             nodes,
             node_index: [(genesis_digest.clone(), genesis_key)].into(),
             quorum_certs,

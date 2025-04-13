@@ -26,9 +26,8 @@ async fn main() -> anyhow::Result<()> {
         num_replica: 4,
     };
     let task_config = TaskConfig {
-        client: ClientConfig {
-            num_max_concurrent: 1,
-        },
+        client: ClientConfig::CloseLoop,
+
         replica: ReplicaConfig {
             server_internal_addresses: (0..spec.num_replica)
                 .map(|i| ([127, 0, 0, 1], 8000 + i as u16).into())

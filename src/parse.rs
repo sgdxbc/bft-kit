@@ -79,8 +79,13 @@ impl TryFrom<Options> for super::transport::ClientConfig {
     type Error = anyhow::Error;
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
-        Ok(Self {
-            num_max_concurrent: options.get("num_max_concurrent")?,
+        Ok(if !matches!(options.try_get("open_loop")?, Some(true)) {
+            Self::CloseLoop
+        } else {
+            Self::OpenLoop(super::transport::OpenLoopClientConfig {
+                num_max_concurrent: options.get("num_max_concurrent")?,
+                sending_rate: options.get("sending_rate")?,
+            })
         })
     }
 }

@@ -19,7 +19,7 @@ use crate::{
     common::{ClientId, Quorum, ReplicaId},
     pbft::{Command, Replica, ReplicaAction, Spec, ToClient},
     transport::{ClientConfig, ReplicaConfig, ServiceConfig, WriteMessage},
-    workload::{ConcurrentClients, Invoke},
+    workload::{ConcurrentClients, Invoke, Latencies},
 };
 
 use crate::pbft::{ToReplica, message};
@@ -150,9 +150,14 @@ pub async fn client_task(
                         [&mut replica_egresses[spec.primary(view_num) as usize]],
                     )
                     .await?;
-                // resend for close loop?
-                if seq_scratch.len() == config.num_max_concurrent {
-                    seq_scratch.pop_first();
+                match &config {
+                    // resend for close loop?
+                    ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),
+                    ClientConfig::OpenLoop(config) => {
+                        if seq_scratch.len() == config.num_max_concurrent {
+                            seq_scratch.pop_first();
+                        }
+                    }
                 }
                 seq_scratch.insert(
                     seq,
@@ -193,10 +198,7 @@ pub async fn client_task(
     }
 }
 
-pub async fn run_close_loop_clients(
-    spec: Spec,
-    config: TaskConfig,
-) -> anyhow::Result<Vec<Histogram<u32>>> {
+pub async fn clients_task(spec: Spec, config: TaskConfig) -> anyhow::Result<Vec<Latencies>> {
     let mut concurrent_clients = ConcurrentClients::new();
     for _ in 0..config.num_client {
         concurrent_clients.spawn(|id, invoke_receiver, commit_sender| {
@@ -210,7 +212,14 @@ pub async fn run_close_loop_clients(
             )
         })
     }
-    concurrent_clients.close_loop(config.client_duration).await
+    match config.client {
+        ClientConfig::CloseLoop => concurrent_clients.close_loop(config.client_duration).await,
+        ClientConfig::OpenLoop(client_config) => {
+            concurrent_clients
+                .open_loop(config.client_duration, client_config.sending_rate)
+                .await
+        }
+    }
 }
 
 pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result<()> {

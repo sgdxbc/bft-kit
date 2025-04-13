@@ -18,6 +18,7 @@ impl System {
                     ReplicaCoreConfig {
                         spec: spec.clone(),
                         id: i,
+                        open_loop: false,
                         max_batch_size: 1,
                     },
                     CryptoConfig {

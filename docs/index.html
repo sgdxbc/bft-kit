@@ -15,22 +15,24 @@
 # Cowsay's BFT Testbed
 
 <div class="abstract"><h2>Abstract</h2>
-$$BFT\ Evaluations\ Made\ Simple$$
+$$BFT\ Benchmarks\ Made\ Simple$$
 
 [View codebase](https://github.com/sgdxbc/bft-testbed).
 </div>
 
 ## Introduction
 
-The Cowsay's BFT Testbed effort provides the prototype implementations and evaluation scaffolding of a selective collection of distributed protocols that relate to tolerating Byzantine faults, most of which are replication protocols. <span style="color:gray">TODO: a listing of provided protocols and prototype status.</span>
+The Cowsay's BFT Testbed effort provides the prototype implementations and evaluation scaffolding of a selective collection of distributed protocols that relate to tolerating Byzantine faults. The development starts with a list of well known atomic broadcast protocols, while later will be extended to distributed hash tables and transactional stores. <span style="color:gray">TODO: a listing of provided protocols and prototype status.</span>
 
-The prototypes prioritize *canonical*, *intuitive* and *comprehensive*. The implementations truthfully reflect the intentions of paper texts, and we don't introduce obscurity (or simply more lines of code) for extreme performance e.g. minimal data copies. The goal is to become the *reference implementations* that are easy to reason about and to "manageably" mess around by applying experimental modifications.
+The prototypes prioritize *canonical*, *intuitive* and *comprehensive*. The implementations truthfully reflect the intentions of paper texts. We don't invent homemade optimizations, we don't introduce extra presumptions, and we don't prefer obscurity (or simply more lines of code) for extreme performance e.g. minimal data copies. The goal is to formulate the *reference implementations* that are easy to reason about and to "manageably" mess around by applying experimental modifications.
+
+The evaluation scaffolding proposes a standard methodology to study the performance implications of the prototypes. It contains reusable components for framing the prototypes into simulated or realistic environments, based on idiomatic practices from my previous experiences. Realizing and benchmarking your next state of the art network protocol idea becomes easy: implement the core protocol with few hundred of lines of code, import or copy the rest heavy lifting from the common modules, make a copy of the examples, binaries and configurations and make some tweaks, and you are good to start looking at performance metrics.
 
 ### Features
 
 One codebase for all protocols. Just need to suffer once for the pains of setting up development environment (as a standard Rust codebase, probably not actually painful!) and everything you need is up and just working. Having all implementations sharing the same setup and set of peripherals (e.g. programming language, IO solution, cryptographic libraries, etc.) enables perfect apple to apple comparison.
 
-Ergonomics for rapid development and evaluation iteration. Include useful building blocks for benchmarking protocol performance under various conditions, featuring solutions for orchestrating configurable concurrent clients to perform RPCs and aggregate SLO metrics, in close loop and open loop (planned) fashions. The codebase includes configured certificates for QUIC endpoints and protocol layer signature schemes. The secret keys are all ready.<span class="sidenote">The secret key for QUIC endpoints is stored (deliberately) in clear text at `src/crypto/cert/key_pair.pem` and embedded in compiled artifacts during building. Do not use it in production (like everything else in the codebase). If you would like to use another private key, run `rotate-cert` example in project root folder to override it.</span>
+Ergonomics for rapid development and evaluation iteration. Include useful building blocks for benchmarking protocol performance under various conditions, featuring solutions for orchestrating configurable concurrent clients to perform RPCs and aggregate SLO metrics, in close loop and open loop fashions. The codebase includes configured certificates for QUIC endpoints and protocol layer signature schemes. The secret keys are all ready.<span class="sidenote">The secret key for QUIC endpoints is stored (deliberately) in clear text at `src/crypto/cert/key_pair.pem` and embedded in compiled artifacts during building. Do not use it in production (like everything else in the codebase). If you would like to use another private key, run `rotate-cert` example in project root folder to override it.</span>
 
 (On mobile devices, click the numbered superscripts to toggle the sidenotes.)
 
