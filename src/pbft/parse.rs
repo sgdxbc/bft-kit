@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::common::parse::Options;
+use crate::parse::Options;
 
 impl TryFrom<Options> for super::Spec {
     type Error = anyhow::Error; // TODO

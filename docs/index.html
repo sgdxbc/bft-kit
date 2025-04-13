@@ -54,26 +54,25 @@ The tests mostly check for liveness, so that as long as all tests are passed, if
 
 **Loopback examples.** The `src/pbft/transport.rs` provides a network transport to run PBFT clients and replicas in asynchronous tasks (or coroutines). The `pbft` example runs multiple client and replica tasks in the same process with loopback network. The configurations are hardcoded in the example.
 
-**Manual cluster-scale deployment.** The `pbft-client` and `pbft` binaries run *a group of close loop clients* and a replica according to a set of configuration files
-- `spec.conf` universal parameters for all participating clients and replica e.g. number of tolerated faulty replicas
-- `replica[N].conf` exclusive settings for replica N e.g. replica ID
-- `task.conf` settings for the evaluation instead of the protocol e.g. the number of concurrent clients spawned by a single client process
-
-Execute
+**Manual cluster-scale deployment.** The `pbft-client` and `pbft` binaries run *a group of close loop clients* and a replica according to a set of configuration files. Execute
 
     $ cargo run -r --bin pbft -- configs/pbft/replica0.conf
 
-to run a PBFT replica#0 that is configured with `configs/pbft/replica0.conf`, and `spec.conf` and `task.conf` will be discovered in the same folder of the replica configuration file, which is `configs/pbft` in this case. Then, either on the same machine or other machine with identical compiled binaries and configurations (a network file system would be convenient), execute the same command with `configs/pbft/replica1.conf` to run replica#1 with its corresponding configuration file and the same specification and task configuration files as replica#0. Repeat two more times for replica#2 and replica#3. 
+to run a PBFT replica#0 that is configured with `configs/pbft/replica0.conf`, and it will further discover `common.conf` and `network.conf` in the same folder of the replica configuration, which is `configs/pbft` in this case. Then, either on the same machine or other machine with identical compiled binaries and configurations (a network file system would be convenient), execute the same command with `configs/pbft/replica1.conf` to run replica#1 configured by it and the same other two configurations as replica#0. Repeat two more times for replica#2 and replica#3. 
 
 Wait a while until the replicas report "replica ready" in the logs. Execute
 
-    $ cargo run -r --bin pbft-client -- configs/pbft/task.conf
+    $ cargo run -r --bin pbft-client -- configs/pbft/client.conf
 
-to run PBFT clients with the same task and specification configurations as the replicas. The clients will exit after report the performance statistics. It is possible to rerun clients against the same replica network, but start with a fresh network is recommended. Execute
+to run PBFT clients configured by `configs/pbft/client.conf` if it exists (which is not the case currently). The `common.conf` and `network.conf` are discovered as same as the replicas. The clients will exit after report the performance statistics. It is possible to rerun clients against the same replica network, but start with a fresh network is recommended. Send Ctrl-C to one replica to exit it, and the other replicas will exit (kind of crash actually) after their connections to the exited one closed (unexpectedly). Alternatively, execute
 
     $ pkill -INT pbft
 
-to shutdown current running replicas.
+to shutdown all current running replicas.
+
+The taxonomy of configurations. `replicaN.conf` and `client.conf` exclusively configure replica#N or a client process, at the same time locates the other two configures. `common.conf` and `network.conf` holds shared items for all participants. They two are not essentially different, just `network.conf` are usually dedicated to store network addresses.
+
+The configuration layout is relatively flexible: the binaries merge the three relevant configurations into one single configuration store, then extract all kinds of configuration structures from it. The above description of which configuration is for what is just convention.
 
 **Automated deployment.** Work in progress.
 

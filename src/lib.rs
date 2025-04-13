@@ -1,7 +1,14 @@
+pub mod command_pool;
+pub use command_pool::CommandPool;
 pub mod common;
 pub mod crypto;
 pub mod hotstuff;
+pub mod parse;
 pub mod pbft;
+#[cfg(test)]
+pub mod testing; // no test inside, common infrastructure for writing tests
+pub mod transport;
+pub mod workload;
 
 // similar to tracing_subscriber::fmt::init() but reports spans
 // why init() defaults to not report spans? i don't understand

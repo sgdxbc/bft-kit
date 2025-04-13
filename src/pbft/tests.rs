@@ -2,11 +2,11 @@ use std::iter::{once, repeat};
 
 use test_log::test;
 
-use crate::common::testing::{Action, Actions, Effect, Event, is_finalized};
+use crate::testing::{Action, Actions, Effect, Event, is_finalized};
 
 use super::*;
 
-type System = crate::common::testing::System<Replica, ToReplica>;
+type System = crate::testing::System<Replica, ToReplica>;
 
 impl System {
     fn new(spec: Spec) -> Self {

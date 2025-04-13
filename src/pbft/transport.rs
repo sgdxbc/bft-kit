@@ -7,15 +7,13 @@ use tokio::{
 };
 
 use crate::{
-    common::{
-        ClientId, ClientSeq, Quorum, ReplicaId,
-        transport::{
-            AbstractEgress, AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, Service,
-            ServiceConfig, WriteMessage, boot_client, replica_task,
-        },
-        workload::{ConcurrentClients, Invoke, Latencies},
-    },
+    common::{ClientId, ClientSeq, Quorum, ReplicaId},
     pbft::{Command, ToClient, ViewNum},
+    transport::{
+        AbstractEgress, AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, Service,
+        ServiceConfig, WriteMessage, boot_client, replica_task,
+    },
+    workload::{ConcurrentClients, Invoke, Latencies},
 };
 
 use super::{Replica, Spec, message};

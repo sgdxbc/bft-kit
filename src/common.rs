@@ -4,15 +4,6 @@ use bincode::{Decode, Encode};
 
 use crate::crypto::UpdateHash;
 
-pub mod command_pool;
-pub use command_pool::CommandPool;
-
-pub mod parse;
-#[cfg(test)]
-pub mod testing; // no test inside, common infrastructure for writing tests
-pub mod transport;
-pub mod workload;
-
 // pub type ClientId = u32;
 pub use client::Id as ClientId;
 pub use client::Seq as ClientSeq;

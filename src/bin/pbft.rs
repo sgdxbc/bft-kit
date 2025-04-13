@@ -1,8 +1,8 @@
 use std::{env::args, path::PathBuf, pin::pin, time::Duration};
 
 use bft_testbed::{
-    common::parse::Options,
     init_logging,
+    parse::Options,
     pbft::{
         Replica,
         transport::{TaskConfig, server_task, tcp},

@@ -6,8 +6,8 @@ use tokio::{
     time::Instant,
 };
 
-use crate::common::{
-    ClientId, ClientSeq, Command, Quorum, ReplicaId,
+use crate::{
+    common::{ClientId, ClientSeq, Command, Quorum, ReplicaId},
     transport::{
         AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, Service, ServiceConfig,
         WriteMessage, boot_client, replica_task,

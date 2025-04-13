@@ -1,13 +1,13 @@
 use test_log::test;
 
 use crate::{
-    common::testing::{Action, Actions, Effect, Event},
     crypto::threshold::givre_replica_key_shares,
+    testing::{Action, Actions, Effect, Event},
 };
 
 use super::*;
 
-type System = crate::common::testing::System<Replica, ToReplica>;
+type System = crate::testing::System<Replica, ToReplica>;
 
 impl System {
     fn new(spec: Spec) -> Self {

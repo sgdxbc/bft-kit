@@ -1,16 +1,14 @@
 use std::{pin::pin, time::Duration};
 
 use bft_testbed::{
-    common::{
-        ClientId,
-        transport::{ReplicaConfig, ClientConfig, ServiceConfig},
-    },
+    common::ClientId,
     crypto::threshold::givre_replica_key_shares,
     hotstuff::{
         CryptoConfig, Replica, ReplicaCoreConfig, Spec,
         transport::{TaskConfig, client_task, server_task},
     },
     init_logging,
+    transport::{ClientConfig, ReplicaConfig, ServiceConfig},
 };
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 use tracing::Instrument;

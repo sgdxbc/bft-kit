@@ -16,12 +16,10 @@ use tokio::{
 };
 
 use crate::{
-    common::{
-        ClientId, Quorum, ReplicaId,
-        transport::{ClientConfig, ReplicaConfig, ServiceConfig, WriteMessage},
-        workload::{ConcurrentClients, Invoke},
-    },
+    common::{ClientId, Quorum, ReplicaId},
     pbft::{Command, Replica, ReplicaAction, Spec, ToClient},
+    transport::{ClientConfig, ReplicaConfig, ServiceConfig, WriteMessage},
+    workload::{ConcurrentClients, Invoke},
 };
 
 use crate::pbft::{ToReplica, message};

@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, fmt::Debug, iter::repeat, mem::take};
 
-use super::{AbstractReplica, ClientSeq, Command, ReplicaId};
+use crate::common::{AbstractReplica, ClientSeq, Command, ReplicaId};
 
 pub struct System<R, M> {
     pub replicas: Vec<R>,

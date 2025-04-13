@@ -9,9 +9,12 @@ use tokio::{
     try_join,
 };
 
-use crate::crypto::cert::quinn::{client_config, server_config};
+use crate::{
+    common::ReplicaAction,
+    crypto::cert::quinn::{client_config, server_config},
+};
 
-use super::{ClientId, ClientSeq, Command, ReplicaId};
+use crate::common::{ClientId, ClientSeq, Command, ReplicaId};
 
 pub async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     ingress: Connection,
@@ -326,14 +329,14 @@ where
     }
 }
 
-pub trait AbstractReplica: super::AbstractReplica {
+pub trait AbstractReplica: crate::common::AbstractReplica {
     type Finalize;
 
     fn finalize(&self, commands: Vec<Command>) -> Self::Finalize;
 }
 
 pub async fn replica_task<
-    R: AbstractReplica<Action = super::ReplicaAction<M>, Message = M>,
+    R: AbstractReplica<Action = ReplicaAction<M>, Message = M>,
     M: Encode + Decode<()> + Send + Sync + 'static,
 >(
     replica_id: ReplicaId,
@@ -358,7 +361,7 @@ where
     loop {
         for action in actions.drain(..) {
             match action {
-                super::ReplicaAction::SendToReplica(replica_id, message) => {
+                ReplicaAction::SendToReplica(replica_id, message) => {
                     let egress = replica_egresses.get(&replica_id);
                     anyhow::ensure!(
                         egress.is_some(),
@@ -366,12 +369,12 @@ where
                     );
                     write_message.run(message, egress).await?
                 }
-                super::ReplicaAction::SendToAllReplicas(message) => {
+                ReplicaAction::SendToAllReplicas(message) => {
                     write_message
                         .run(message, replica_egresses.values())
                         .await?
                 }
-                super::ReplicaAction::Finalize(commands) => {
+                ReplicaAction::Finalize(commands) => {
                     finalize_sender.send(replica.finalize(commands)).await?
                 }
             }

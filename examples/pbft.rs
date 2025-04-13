@@ -1,15 +1,13 @@
 use std::{env::args, pin::pin, time::Duration};
 
 use bft_testbed::{
-    common::{
-        ClientId,
-        transport::{ReplicaConfig, ServiceConfig},
-    },
+    common::ClientId,
     init_logging,
     pbft::{
         Replica, ReplicaCoreConfig, Spec,
         transport::{TaskConfig, client_task, server_task, tcp},
     },
+    transport::{ClientConfig, ReplicaConfig, ServiceConfig},
 };
 use futures::FutureExt;
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
@@ -28,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         num_replica: 4,
     };
     let task_config = TaskConfig {
-        client: bft_testbed::common::transport::ClientConfig {
+        client: ClientConfig {
             num_max_concurrent: 1,
         },
         replica: ReplicaConfig {

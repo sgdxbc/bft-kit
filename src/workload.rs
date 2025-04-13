@@ -1,4 +1,8 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    cmp::Ordering::{Equal, Less},
+    collections::HashMap,
+    time::Duration,
+};
 
 use hdrhistogram::Histogram;
 use rand::random;
@@ -8,7 +12,7 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 
-use super::ClientId;
+use crate::common::ClientId;
 
 pub type Invoke = (Vec<u8>, Option<Vec<u8>>);
 
@@ -94,16 +98,20 @@ pub fn report_latencies(client_latencies: Vec<Latencies>, duration: Duration) {
     let num_client_latencies = client_latencies.len();
     let mut latencies = Histogram::new(3).expect("valid histogram parameter");
     for (i, client_latencies) in client_latencies.into_iter().enumerate() {
-        if i < 5 {
-            let throughput = client_latencies.len() as f32 / duration.as_secs_f32();
-            let latency_mean = client_latencies.mean() / 1_000_000.;
-            tracing::info!(
-                "client throughput {throughput:.2} ({:.2} = inverse of mean latency {:?})",
-                1. / latency_mean,
-                Duration::from_secs_f64(latency_mean),
-            )
-        } else if i == 5 {
-            tracing::info!("(omit the remaining per client latencies)")
+        match i.cmp(&5) {
+            Less => {
+                let throughput = client_latencies.len() as f32 / duration.as_secs_f32();
+                let latency_mean = client_latencies.mean() / 1_000_000.;
+                tracing::info!(
+                    "client throughput {throughput:.2} ({:.2} = inverse of mean latency {:?})",
+                    1. / latency_mean,
+                    Duration::from_secs_f64(latency_mean),
+                )
+            }
+            Equal => {
+                tracing::info!("(omit the remaining per client latencies)")
+            }
+            _ => {}
         }
         latencies += client_latencies
     }

@@ -1,4 +1,4 @@
-use super::{ClientId, ClientSeq, Command};
+use crate::common::{ClientId, ClientSeq, Command};
 
 // "mempool" in cryptocurrency term
 // assist (primary) replica to propose blocks with sensible commands

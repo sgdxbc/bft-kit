@@ -4,7 +4,8 @@ use std::{
 };
 
 use crate::{
-    common::{AbstractReplica, CommandPool, Quorum, ReplicaId},
+    CommandPool,
+    common::{AbstractReplica, Quorum, ReplicaId},
     crypto::{self, Digest, Sha256Hash, sign, verify},
 };
 

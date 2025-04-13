@@ -9,7 +9,8 @@ use bincode::{Decode, Encode};
 use slab::Slab;
 
 use crate::{
-    common::{AbstractReplica, CommandPool, ReplicaId},
+    CommandPool,
+    common::{AbstractReplica, ReplicaId},
     crypto::{
         Digest, Sha256Hash,
         threshold::{

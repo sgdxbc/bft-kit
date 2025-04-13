@@ -1,9 +1,10 @@
 use std::{env::args, path::PathBuf};
 
 use bft_testbed::{
-    common::{parse::Options, workload::report_latencies},
     init_logging,
+    parse::Options,
     pbft::transport::{TaskConfig, WARMUP_DURATION, run_close_loop_clients, tcp},
+    workload::report_latencies,
 };
 use futures::FutureExt;
 use tokio::fs::read_to_string;
