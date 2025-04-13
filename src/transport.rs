@@ -120,11 +120,6 @@ pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
 }
 
 #[derive(Debug, Clone)]
-pub struct ClientConfig {
-    pub num_max_concurrent: usize,
-}
-
-#[derive(Debug, Clone)]
 pub struct ReplicaConfig {
     pub server_internal_addresses: Vec<SocketAddr>,
     // how long should replicas wait before attempting to connect each other's
@@ -210,6 +205,16 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     Ok((read_tasks, replica_egresses))
 }
 
+#[derive(Debug, Clone)]
+pub struct ClientConfig {
+    pub num_max_concurrent: usize,
+}
+
+// TODO extract client skeleton
+// not sure whether that is possible or not since (simple) clients are inline
+// implemented in transport
+
+// feels weird (maybe it's over engineered)
 pub struct Service<P>
 where
     Self: AbstractService,
@@ -223,14 +228,16 @@ where
 pub trait AbstractService {
     type Reply;
     type Finalize;
+
     fn reply_seq(reply: &Self::Reply) -> ClientSeq;
+
     fn on_finalize(
         &mut self,
         finalize: Self::Finalize,
     ) -> impl Iterator<Item = (ClientId, Self::Reply)>;
 }
 
-impl<P> Service<P>
+impl<K> Service<K>
 where
     Self: AbstractService,
 {

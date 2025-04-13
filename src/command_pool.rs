@@ -72,6 +72,8 @@ pub mod open_loop {
     pub struct CommandPool {
         pending_buf: VecDeque<Command>,
         client_seqs: HashMap<ClientId, ClientSeq>,
+        num_push: usize,
+        num_commit: usize,
     }
 
     impl CommandPool {
@@ -86,6 +88,7 @@ pub mod open_loop {
             {
                 return false;
             }
+            self.num_push += 1;
             self.client_seqs.insert(command.client_id, command.seq);
             if self.pending_buf.len() == Self::MAX_LEN {
                 self.pending_buf.pop_front();
@@ -108,6 +111,7 @@ pub mod open_loop {
         }
 
         pub fn commit(&mut self, command: &Command) {
+            self.num_commit += 1;
             let seq = self.client_seqs.entry(command.client_id).or_default();
             *seq = (*seq).max(command.seq)
             // it is possible to achieve "high resolution" command purging here, based on
@@ -115,6 +119,13 @@ pub mod open_loop {
             // commands from the same client with lower sequence numbers
             // however, based on how open loop works (e.g. implied by the `close_batch`
             // logic), those older commands are probably not in the buffer already
+        }
+    }
+
+    impl Drop for CommandPool {
+        fn drop(&mut self) {
+            let commit_rate = self.num_commit as f32 / self.num_push as f32;
+            tracing::info!(%commit_rate)
         }
     }
 }

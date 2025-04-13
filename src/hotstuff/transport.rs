@@ -132,6 +132,28 @@ pub async fn run_close_loop_clients(
     concurrent_clients.close_loop(config.client_duration).await
 }
 
+pub async fn run_open_loop_clients(
+    spec: Spec,
+    config: TaskConfig,
+) -> anyhow::Result<Vec<Histogram<u32>>> {
+    let mut concurrent_clients = ConcurrentClients::new();
+    for _ in 0..config.num_client {
+        concurrent_clients.spawn(|id, invoke_receiver, commit_sender| {
+            client_task(
+                spec.clone(),
+                config.client.clone(),
+                config.service.clone(),
+                id,
+                invoke_receiver,
+                commit_sender,
+            )
+        })
+    }
+    concurrent_clients
+        .open_loop(config.client_duration, 1.) // TODO
+        .await
+}
+
 pub struct ServiceKit;
 impl AbstractService for Service<ServiceKit> {
     type Reply = message::Reply;

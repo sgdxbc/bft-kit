@@ -1,15 +1,17 @@
 use std::{
     cmp::Ordering::{Equal, Less},
     collections::HashMap,
+    pin::pin,
     time::Duration,
 };
 
 use hdrhistogram::Histogram;
 use rand::random;
+use rand_distr::{Distribution, Exp};
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
-    time::{Instant, timeout_at},
+    time::{Instant, sleep_until, timeout_at},
 };
 
 use crate::common::ClientId;
@@ -70,13 +72,65 @@ impl ConcurrentClients {
             timeout_at(deadline, task).await
         } {
             let client_id = match select? {
-                Select::JoinNext => unreachable!(),
-                Select::Commit(None) => anyhow::bail!("commit receive channel closed"),
+                Select::JoinNext | Select::Commit(None) => unreachable!(),
                 Select::Commit(Some(client_id)) => client_id,
             };
             self.invoke_senders[&client_id]
+                // TODO
                 .send((Default::default(), Some(Default::default())))
                 .await?
+        }
+
+        drop(self.invoke_senders);
+        let mut latencies = Vec::new();
+        while let Some(client_latencies) = self.tasks.join_next().await {
+            latencies.push(client_latencies??)
+        }
+        Ok(latencies)
+    }
+
+    pub async fn open_loop(
+        mut self,
+        duration: Duration,
+        sending_rate: f32,
+    ) -> anyhow::Result<Vec<Latencies>> {
+        let now = Instant::now();
+        let mut invoke_senders = self.invoke_senders.values().cycle();
+        let mut sleep = pin!(sleep_until(now));
+        let interval = Exp::new(sending_rate)?;
+
+        enum Select {
+            Sleep,
+            Commit(Option<ClientId>),
+            JoinNext,
+        }
+        let deadline = now + duration;
+        while let Ok(select) = {
+            let task = async {
+                anyhow::Ok(tokio::select! {
+                    () = &mut sleep => Select::Sleep,
+                    commit = self.commit_receiver.recv() => Select::Commit(commit),
+                    Some(result) = self.tasks.join_next() => { result??; Select::JoinNext },
+                })
+            };
+            timeout_at(deadline, task).await
+        } {
+            match select? {
+                Select::JoinNext | Select::Commit(None) => unreachable!(),
+                Select::Sleep => {
+                    invoke_senders
+                        .next()
+                        .unwrap()
+                        // TODO
+                        .send((Default::default(), Some(Default::default())))
+                        .await?;
+                    let deadline = sleep.deadline();
+                    sleep.as_mut().reset(
+                        deadline + Duration::from_secs_f32(interval.sample(&mut rand::rng())),
+                    )
+                }
+                Select::Commit(Some(_)) => {}
+            }
         }
 
         drop(self.invoke_senders);
