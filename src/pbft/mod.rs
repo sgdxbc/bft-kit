@@ -10,7 +10,7 @@ use crate::{
 };
 
 mod message;
-pub mod parse;
+mod parse;
 pub mod transport;
 
 type ViewNum = u32;
@@ -31,19 +31,6 @@ impl Spec {
 pub type ToClient = message::Reply;
 
 pub use crate::common::Command;
-
-#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
-pub enum ToReplica {
-    Request(Command),
-    PrePrepare(message::PrePrepare, Vec<Command>),
-    // this is kind of a secure bug: malformed replica can "repackage" a Prepare of
-    // any other replica into a Commit to pretend that replica has sent Commit
-    // can be easily addressed by e.g. adding a nonce in Commit messages
-    // deliberately left unresolved to remind this is a prototype implementation
-    Prepare(message::Vote),
-    Commit(message::Vote),
-    // TODO recover path messages
-}
 
 #[derive(Debug)]
 pub struct ReplicaCoreConfig {
@@ -335,6 +322,19 @@ impl Replica {
 
 fn block_digest(commands: &[Command]) -> Digest {
     commands.sha256().into()
+}
+
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+pub enum ToReplica {
+    Request(Command),
+    PrePrepare(message::PrePrepare, Vec<Command>),
+    // this is kind of a secure bug: malformed replica can "repackage" a Prepare of
+    // any other replica into a Commit to pretend that replica has sent Commit
+    // can be easily addressed by e.g. adding a nonce in Commit messages
+    // deliberately left unresolved to remind this is a prototype implementation
+    Prepare(message::Vote),
+    Commit(message::Vote),
+    // TODO recover path messages
 }
 
 type ReplicaAction = crate::common::ReplicaAction<ToReplica>;

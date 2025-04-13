@@ -1,14 +1,10 @@
 use std::{env::args, path::PathBuf, pin::pin, time::Duration};
 
 use bft_testbed::{
+    hotstuff::{CryptoConfig, Replica, transport::server_task},
     init_logging,
     parse::Options,
-    pbft::{
-        Replica,
-        transport::{TaskConfig, server_task, tcp},
-    },
 };
-use futures::FutureExt;
 use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep};
 
 #[tokio::main]
@@ -20,13 +16,12 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(&config_path).await?);
     options.parse(&read_to_string(config_path.with_file_name("common.conf")).await?);
     options.parse(&read_to_string(config_path.with_file_name("network.conf")).await?);
-    let replica = Replica::new(options.clone().try_into()?);
-    let config = TaskConfig::try_from(options)?;
-    let mut server = pin!(if !config.use_tcp {
-        server_task(replica, config).left_future()
-    } else {
-        tcp::server_task(replica, config).right_future()
-    });
+
+    let replica = Replica::new(
+        options.clone().try_into()?,
+        CryptoConfig::new(options.clone())?,
+    );
+    let mut server = pin!(server_task(replica, options.try_into()?));
     'server: {
         tokio::select! {
             result = &mut server => result?,

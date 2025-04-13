@@ -1,12 +1,11 @@
 use std::{env::args, path::PathBuf};
 
 use bft_testbed::{
+    hotstuff::transport::{TaskConfig, WARMUP_DURATION, run_close_loop_clients},
     init_logging,
     parse::Options,
-    pbft::transport::{TaskConfig, WARMUP_DURATION, run_close_loop_clients, tcp},
     workload::report_latencies,
 };
-use futures::FutureExt;
 use tokio::fs::read_to_string;
 use tracing::Instrument;
 
@@ -23,13 +22,9 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(config_path.with_file_name("network.conf")).await?);
 
     let config = TaskConfig::try_from(options.clone())?;
-    let client_latencies = if !config.use_tcp {
-        run_close_loop_clients(options.try_into()?, config.clone()).left_future()
-    } else {
-        tcp::run_close_loop_clients(options.try_into()?, config.clone()).right_future()
-    }
-    .instrument(tracing::info_span!("concurrent close loops"))
-    .await?;
+    let client_latencies = run_close_loop_clients(options.try_into()?, config.clone())
+        .instrument(tracing::info_span!("concurrent close loops"))
+        .await?;
 
     report_latencies(client_latencies, config.client_duration - WARMUP_DURATION);
     Ok(())

@@ -22,6 +22,7 @@ use crate::{
 };
 
 mod message;
+mod parse;
 pub mod transport;
 
 pub use crate::common::Command;
@@ -337,21 +338,22 @@ impl ReplicaCore {
     }
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
-pub enum ToReplica {
-    // latency optimization: inline dissemination of block content for new blocks
-    Generic(message::Generic, message::Block),
-    VoteGeneric(message::VoteGeneric),
-    // TODO targeted fetch for missing block
-
-    // background periodical message required by givre
-    PublicCommitmentsSupply(givre::SignerIndex, Vec<GivrePublicCommitments>),
+impl Drop for ReplicaCore {
+    fn drop(&mut self) {
+        let batch_size = self
+            .nodes
+            .iter()
+            .map(|(_, block)| block.commands.len())
+            .sum::<usize>() as f32
+            / self.nodes.len() as f32;
+        tracing::info!("average batch size = {batch_size:.2}")
+    }
 }
 
 pub struct CryptoConfig {
     pub key_share: GivreKeyShare,
-    pub num_supply_commit: usize,
-    pub num_refill_threshold: usize,
+    pub supply_size: usize,
+    pub refill_threshold: usize,
 }
 
 pub struct Replica {
@@ -377,6 +379,17 @@ pub struct Replica {
 struct QuorumCertScratch {
     partial_sigs: PartialSigs,
     signers: Vec<(givre::SignerIndex, GivrePublicCommitments)>,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub enum ToReplica {
+    // latency optimization: inline dissemination of block content for new blocks
+    Generic(message::Generic, message::Block),
+    VoteGeneric(message::VoteGeneric),
+    // TODO targeted fetch for missing block
+
+    // background periodical message required by givre
+    PublicCommitmentsSupply(givre::SignerIndex, Vec<GivrePublicCommitments>),
 }
 
 pub type ReplicaAction = crate::common::ReplicaAction<ToReplica>;
@@ -417,7 +430,7 @@ impl Replica {
                 );
             (GivrePublicCommitments(public_commitments), secret_nones)
         })
-        .take(self.crypto_config.num_supply_commit)
+        .take(self.crypto_config.supply_size)
         .collect::<HashMap<_, _>>();
         let public_commitments = supply.keys().copied().collect();
         if self.is_primary() {
@@ -637,7 +650,7 @@ impl Replica {
                                 ToReplica::VoteGeneric(vote_generic),
                             ))
                         }
-                        if self.nonces.len() < self.crypto_config.num_refill_threshold {
+                        if self.nonces.len() < self.crypto_config.refill_threshold {
                             self.refill_nonces(actions)
                         }
                     }

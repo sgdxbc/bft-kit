@@ -55,8 +55,8 @@ async fn main() -> anyhow::Result<()> {
         };
         let crypto_config = CryptoConfig {
             key_share: key_shares[i as usize].clone(),
-            num_supply_commit: 10,
-            num_refill_threshold: 10,
+            supply_size: 10,
+            refill_threshold: 10,
         };
         let replica = Replica::new(core_config, crypto_config);
         server_tasks.spawn(server_task(replica, task_config.clone()));

@@ -22,8 +22,8 @@ impl System {
                     },
                     CryptoConfig {
                         key_share: key_shares[i as usize].clone(),
-                        num_supply_commit: 10,
-                        num_refill_threshold: 10,
+                        supply_size: 10,
+                        refill_threshold: 10,
                     },
                 )
             })
