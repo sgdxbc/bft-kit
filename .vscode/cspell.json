@@ -4,6 +4,7 @@
     "dictionaryDefinitions": [],
     "dictionaries": [],
     "words": [
+        "asonnino",
         "ciphersuite",
         "Cowsay",
         "Demikernel",
@@ -18,6 +19,7 @@
         "permissionless",
         "Pkcs8",
         "pkill",
+        "PODC",
         "proptest",
         "quantiles",
         "QUIC",
@@ -29,6 +31,7 @@
         "seqs",
         "sidenote",
         "sidenotes",
+        "Sonnino",
         "specpaxos"
     ],
     "ignoreWords": [],

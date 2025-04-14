@@ -22,7 +22,12 @@ $$BFT\ Benchmarks\ Made\ Simple$$
 
 ## Introduction
 
-The Cowsay's BFT Testbed effort provides the prototype implementations and evaluation scaffolding of a selective collection of distributed protocols that relate to tolerating Byzantine faults. The development starts with a list of well known atomic broadcast protocols, while later will be extended to distributed hash tables and transactional stores. <span style="color:gray">TODO: a listing of provided protocols and prototype status.</span>
+The Cowsay's BFT Testbed effort provides the prototype implementations and evaluation scaffolding of a selective collection of distributed protocols that relate to tolerating Byzantine faults. The development starts with a list of well known atomic broadcast protocols, while later will be extended to distributed hash tables and transactional stores.
+
+|Module|Work|Official Implementation|
+|-|-|-|
+|`pbft`|[PBFT (OSDI'99)](https://pmg.csail.mit.edu/papers/osdi99.pdf)|[BFT project](https://pmg.csail.mit.edu/bft/#sw)|
+|`hotstuff`|[HotStuff (PODC'19)](https://dl.acm.org/doi/pdf/10.1145/3293611.3331591) [(arxiv)](https://arxiv.org/pdf/1803.05069)|[hot-stuff/libhotstuff](https://github.com/hot-stuff/libhotstuff)|
 
 The prototypes prioritize *canonical*, *intuitive* and *comprehensive*. The implementations truthfully reflect the intentions of paper texts. We don't invent homemade optimizations, we don't introduce extra presumptions, and we don't prefer obscurity (or simply more lines of code) for extreme performance e.g. minimal data copies. The goal is to formulate the *reference implementations* that are easy to reason about and to "manageably" mess around by applying experimental modifications.
 

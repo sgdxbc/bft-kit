@@ -12,6 +12,7 @@ pub mod workload;
 
 // similar to tracing_subscriber::fmt::init() but reports spans
 // why init() defaults to not report spans? i don't understand
+// if this further grows move it into dedicated module
 pub fn init_logging() {
     use std::{env, str::FromStr as _};
 
