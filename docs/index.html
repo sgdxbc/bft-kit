@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cowsay's BFT Testbed</title>
+    <title>Cowsay's BFT Dev Kit</title>
     <link rel="stylesheet" href="https://latex.vercel.app/style.css">
 </head>
 
@@ -12,17 +12,17 @@
 <body class="libertinus", style="max-width: calc(800px - (30px * 2));">
     <div id="placeholder">Rendering markdown</div>
     <div id="content" style="display: none;">
-# Cowsay's BFT Testbed
+# Cowsay's BFT Dev Kit
 
 <div class="abstract"><h2>Abstract</h2>
-$$BFT\ Benchmarks\ Made\ Simple$$
+$$BFT\ Prototyping\ Made\ Simple$$
 
-[View codebase](https://github.com/sgdxbc/bft-testbed).
+[View codebase](https://github.com/sgdxbc/bft-kit).
 </div>
 
 ## Introduction
 
-The Cowsay's BFT Testbed effort provides the prototype implementations and evaluation scaffolding of a selective collection of distributed protocols that relate to tolerating Byzantine faults. The development starts with a list of well known atomic broadcast protocols, while later will be extended to distributed hash tables and transactional stores.
+The Cowsay's BFT Development Kit effort provides the prototype implementations and evaluation scaffolding of a selective collection of distributed protocols that relate to tolerating Byzantine faults. The development starts with a list of well known atomic broadcast protocols (or approximately, blockchains), while later will be extended to include distributed hash tables and transactional stores.
 
 |Module|Work|Official Implementation|
 |-|-|-|
@@ -45,7 +45,7 @@ Thorough and consistent logging. Annotate on all slow path entrances with `WARN`
 
 Network transport with QUIC. Messages are sent with ephemeral streams that multiplexing the underlying connections, enjoying the desirable properties of QUIC protocol: reliable (i.e. automatic retransmission), while being free from head of line blocking by allowing the (streams of the) messages to be delivered out of order.
 
-**Technology Stack.** Build with the greatest from the ecosystem. The testbed uses `tokio` for IO transport and timers, `quinn` for QUIC network layer, `bincode` for serialization/deserialization, `sha2` and `secp256k1` (`threshold_crypto` and `givre`) for hashing and (threshold) digital signatures, `tracing` and `tracing-subscriber` for logging, and `hdrhistogram` for metrics statistics.
+**Technology Stack.** Build with the greatest from the ecosystem. The dev kit uses `tokio` for IO transport and timers, `quinn` for QUIC network layer, `bincode` for serialization/deserialization, `sha2` and `secp256k1` (`threshold_crypto` and `givre`) for hashing and (threshold) digital signatures, `tracing` and `tracing-subscriber` for logging, and `hdrhistogram` for metrics statistics.
 
 ## Quick Start: Ways to Run PBFT
 
@@ -57,7 +57,7 @@ We show various ways to run the same implementation of PBFT (`pbft::Replica`), e
 
 to run all PBFT tests. You may want to pass environment variables `RUST_LOG` and `RUST_BACKTRACE` as well.
 
-The tests mostly check for liveness, so that as long as all tests are passed, if a protocol gets stuck in the real deployment, it's probably not the protocol implementation but rather the network transport to blame. This testbed is not good at ensuring correctness; you may still want to look into approaches like model checking for that (maybe will add it to the codebase in the future). Also, the simulated transports may not deliver the messages in a realistic order. The simulated order is just a *reasonable* one that the protocol prototype should be able to work with.<span class="sidenote">Utilizing `proptest` for simulation is desirable, but I'm a little worried about whether the randomized order will be reasonable or how to enforce that.</span>
+The tests mostly check for liveness, so that as long as all tests are passed, if a protocol gets stuck in the real deployment, it's probably not the protocol implementation but rather the network transport to blame. This dev kit is not good at ensuring correctness; you may still want to look into approaches like model checking for that (maybe will add it to the codebase in the future). Also, the simulated transports may not deliver the messages in a realistic order. The simulated order is just a *reasonable* one that the protocol prototype should be able to work with.<span class="sidenote">Utilizing `proptest` for simulation is desirable, but I'm a little worried about whether the randomized order will be reasonable or how to enforce that.</span>
 
 **Loopback examples.** The `src/pbft/transport.rs` provides a network transport to run PBFT clients and replicas in asynchronous tasks (or coroutines). The `pbft` example runs multiple client and replica tasks in the same process with loopback network. The configurations are hardcoded in the example.
 
@@ -95,7 +95,7 @@ If you only want to experiment with this codebase this section will not be usefu
 
 However, this is not the optimal solution at least for *simplicity*. In particular of Rust, cyclic (mutable) references between receivers and runtime cannot be elegantly expressed. If we don't want to involve `dyn`<span class="sidenote">Not elaborate on inconveniences caused by it for brevity, but Niko has [a series of blogs](https://smallcultfollowing.com/babysteps/series/dyn-async-traits/) that is kind of on them.</span>, the receiver and runtime types will lock into each other through generic parameters. The root cause of these troubles is to interleave code of protocol logic and calling runtime context methods.
 
-Sans I/O has been the preferred practice to implement protocol recently. Different from its original proposed setup where protocols interact with outside world with receiving and sending binary buffers, in this testbed we would like to design a rather higher level interface e.g. for better testing ergonomics. The receiving buffer is replaced by calling into two methods `receive_message` and `tick`, and the sending buffer is replaced by an "action" buffer where actions are like "send a message to each one of these replicas", etc.<span class="sidenote">Alternatively, `tick` could be an active `SetTimer` action, but with that I was struggling with designing a proper abstraction for canceling timers.</span>
+Sans I/O has been the preferred practice to implement protocol recently. Different from its original proposed setup where protocols interact with outside world with receiving and sending binary buffers, in this dev kit we would like to design a rather higher level interface e.g. for better testing ergonomics. The receiving buffer is replaced by calling into two methods `receive_message` and `tick`, and the sending buffer is replaced by an "action" buffer where actions are like "send a message to each one of these replicas", etc.<span class="sidenote">Alternatively, `tick` could be an active `SetTimer` action, but with that I was struggling with designing a proper abstraction for canceling timers.</span>
 
 The `common::ReplicaAction` is an enumeration of common actions of BFT replicas. It may looks like simply applying command design pattern to materialize the calls to runtimes and realize *inversion of control*. However, note that the `SendTo` and `Finalize` will probably be "called" on different components: network transport and the service state machine driven by order commands. The enumeration is an aggregation of replica's *intents*, not some outside component's *capabilities*.
 

@@ -1,6 +1,6 @@
 use std::{env::args, path::PathBuf, pin::pin, time::Duration};
 
-use bft_testbed::{
+use bft_kit::{
     init_logging,
     parse::Options,
     pbft::{

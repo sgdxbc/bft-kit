@@ -1,6 +1,6 @@
 use std::{env::args, pin::pin, time::Duration};
 
-use bft_testbed::{
+use bft_kit::{
     common::ClientId,
     init_logging,
     pbft::{

@@ -1,6 +1,6 @@
 use std::{env::args, path::PathBuf};
 
-use bft_testbed::{
+use bft_kit::{
     hotstuff::transport::{TaskConfig, WARMUP_DURATION, clients_task},
     init_logging,
     parse::Options,

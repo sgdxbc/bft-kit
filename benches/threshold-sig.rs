@@ -1,7 +1,7 @@
 #![allow(clippy::unit_arg)]
 use std::iter::repeat_with;
 
-use bft_testbed::crypto::{
+use bft_kit::crypto::{
     SecretKey, sign,
     threshold::{self, ThresholdCryptoSigShare},
     verify,

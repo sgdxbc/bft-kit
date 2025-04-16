@@ -1,6 +1,6 @@
 use std::{env::args, path::PathBuf, pin::pin, time::Duration};
 
-use bft_testbed::{
+use bft_kit::{
     hotstuff::{CryptoConfig, Replica, transport::server_task},
     init_logging,
     parse::Options,

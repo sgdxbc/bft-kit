@@ -1,6 +1,6 @@
 use std::{pin::pin, time::Duration};
 
-use bft_testbed::{
+use bft_kit::{
     common::ClientId,
     crypto::threshold::givre_replica_key_shares,
     hotstuff::{
