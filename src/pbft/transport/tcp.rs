@@ -24,7 +24,7 @@ use crate::{
 
 use crate::pbft::{ToReplica, message};
 
-use super::{AbstractEgress, Finalize, TaskConfig};
+use super::{AbstractEgress, Finalized, TaskConfig};
 
 async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     mut ingress: impl AsyncRead + Unpin,
@@ -303,7 +303,7 @@ async fn replica_task(
     mut replica: Replica,
     config: TaskConfig,
     mut request_receiver: Receiver<Command>,
-    finalize_sender: Sender<Finalize>,
+    finalize_sender: Sender<Finalized>,
 ) -> anyhow::Result<()> {
     let (message_sender, mut message_receiver) = mpsc::channel(100);
     let (mut read_tasks, mut replica_egresses) = boot_replica(
@@ -335,7 +335,7 @@ async fn replica_task(
                 }
                 ReplicaAction::Finalize(commands) => {
                     finalize_sender
-                        .send(Finalize {
+                        .send(Finalized {
                             commands,
                             view_num: replica.core.view_num,
                         })
@@ -380,7 +380,7 @@ async fn service_task(
     replica_id: ReplicaId,
     config: ServiceConfig,
     request_sender: Sender<Command>,
-    mut finalize_receiver: Receiver<Finalize>,
+    mut finalize_receiver: Receiver<Finalized>,
 ) -> anyhow::Result<()> {
     let mut replies = HashMap::<ClientId, message::Reply>::new();
     let external_listener =
@@ -393,7 +393,7 @@ async fn service_task(
         enum Select {
             Accept((TcpStream, SocketAddr)),
             Message(Option<Command>),
-            Finalize(Option<Finalize>),
+            Finalize(Option<Finalized>),
             JoinNext(anyhow::Result<()>),
         }
         use Select::{Accept, JoinNext, Message};

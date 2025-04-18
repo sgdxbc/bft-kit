@@ -153,7 +153,7 @@ pub async fn clients_task(spec: Spec, config: TaskConfig) -> anyhow::Result<Vec<
     }
 }
 
-pub struct Finalize {
+pub struct Finalized {
     commands: Vec<super::Command>,
     view_num: ViewNum,
 }
@@ -161,17 +161,17 @@ pub struct Finalize {
 pub struct ServiceKit;
 impl AbstractService for Service<ServiceKit> {
     type Reply = message::Reply;
-    type Finalize = Finalize;
+    type Finalized = Finalized;
 
     fn reply_seq(reply: &Self::Reply) -> ClientSeq {
         reply.seq
     }
 
-    fn on_finalize(
+    fn on_finalized(
         &mut self,
-        finalize: Self::Finalize,
+        finalized: Self::Finalized,
     ) -> impl Iterator<Item = (ClientId, Self::Reply)> {
-        finalize.commands.into_iter().filter_map(move |command| {
+        finalized.commands.into_iter().filter_map(move |command| {
             if matches!(self.replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq) {
                 tracing::warn!(?command, "duplicated finalize");
                 return None;
@@ -181,7 +181,7 @@ impl AbstractService for Service<ServiceKit> {
                 // a 0/0 service, extend to support arbitrary state machine later
                 result: Default::default(),
                 replica_id: self.replica_id,
-                view_num: finalize.view_num,
+                view_num: finalized.view_num,
             };
             self.replies.insert(command.client_id, reply.clone());
             Some((command.client_id, reply))
@@ -190,10 +190,10 @@ impl AbstractService for Service<ServiceKit> {
 }
 
 impl AbstractReplica for Replica {
-    type Finalize = Finalize;
+    type Finalized = Finalized;
 
-    fn finalize(&self, commands: Vec<Command>) -> Self::Finalize {
-        Finalize {
+    fn finalized(&self, commands: Vec<Command>) -> Self::Finalized {
+        Finalized {
             commands,
             view_num: self.core.view_num,
         }

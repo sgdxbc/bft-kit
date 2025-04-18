@@ -215,7 +215,7 @@ pub struct OpenLoopClientConfig {
 // not sure whether that is possible or not since (simple) clients are inline
 // implemented in transport
 
-// feels weird (maybe it's over engineered)
+// this abstraction feels weird (maybe it's over engineered)
 pub struct Service<P>
 where
     Self: AbstractService,
@@ -228,13 +228,13 @@ where
 
 pub trait AbstractService {
     type Reply;
-    type Finalize;
+    type Finalized;
 
     fn reply_seq(reply: &Self::Reply) -> ClientSeq;
 
-    fn on_finalize(
+    fn on_finalized(
         &mut self,
-        finalize: Self::Finalize,
+        finalized: Self::Finalized,
     ) -> impl Iterator<Item = (ClientId, Self::Reply)>;
 }
 
@@ -253,7 +253,7 @@ where
     pub async fn run(
         mut self,
         config: ServiceConfig,
-        mut finalize_receiver: Receiver<<Self as AbstractService>::Finalize>,
+        mut finalized_receiver: Receiver<<Self as AbstractService>::Finalized>,
     ) -> anyhow::Result<()>
     where
         <Self as AbstractService>::Reply: Encode,
@@ -270,25 +270,24 @@ where
             enum Select<F> {
                 Accept(Option<Incoming>),
                 Message(Option<Command>),
-                Finalize(Option<F>),
+                Finalized(Option<F>),
                 JoinNext(anyhow::Result<()>),
             }
-            use Select::{Accept, JoinNext, Message};
+            use Select::*;
             match tokio::select! {
                 accept = external_endpoint.accept() => Accept(accept),
                 message = message_receiver.recv() => Message(message),
-                finalize = finalize_receiver.recv() => Select::Finalize(finalize),
+                finalize = finalized_receiver.recv() => Finalized(finalize),
                 Some(result) = read_tasks.join_next() => JoinNext(result?),
             } {
-                JoinNext(result) => 'join_next: {
-                    if let Err(err) = result {
-                        if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
-                            break 'join_next;
-                        }
-                        // TODO suppress certain errors
-                        // tracing::info!(%err, "client read task failed")
-                        anyhow::bail!(err)
+                JoinNext(Ok(())) => unreachable!(),
+                JoinNext(Err(err)) => 'join_next: {
+                    if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
+                        break 'join_next;
                     }
+                    // TODO suppress certain errors
+                    // tracing::info!(%err, "client read task failed")
+                    anyhow::bail!(err)
                 }
                 Accept(None) => anyhow::bail!("endpoint closed"),
                 Accept(Some(incoming)) => {
@@ -305,10 +304,8 @@ where
                     let replaced = client_egresses.insert(client_id, connection);
                     anyhow::ensure!(replaced.is_none());
                 }
-                Message(command) => {
-                    let Some(command) = command else {
-                        unreachable!()
-                    };
+                Message(None) => unreachable!(),
+                Message(Some(command)) => {
                     match self.replies.get(&command.client_id) {
                         Some(reply) if Self::reply_seq(reply) > command.seq => {}
                         Some(reply) if Self::reply_seq(reply) == command.seq => {
@@ -329,12 +326,12 @@ where
                         _ => self.request_sender.send(command).await?,
                     }
                 }
-                Select::Finalize(finalize) => 'finalize: {
-                    let Some(finalize) = finalize else {
-                        tracing::warn!("finalize channel closed");
-                        break 'finalize;
-                    };
-                    for (client_id, reply) in self.on_finalize(finalize) {
+                Finalized(None) => {
+                    tracing::warn!("finalized channel closed");
+                    break Ok(());
+                }
+                Finalized(Some(finalized)) => {
+                    for (client_id, reply) in self.on_finalized(finalized) {
                         let egress = client_egresses.get(&client_id);
                         anyhow::ensure!(egress.is_some(), "send to unexpected client {client_id}");
                         if let Err(err) = write_message.run(reply, egress).await {
@@ -352,9 +349,9 @@ where
 }
 
 pub trait AbstractReplica: crate::common::AbstractReplica {
-    type Finalize;
+    type Finalized;
 
-    fn finalize(&self, commands: Vec<Command>) -> Self::Finalize;
+    fn finalized(&self, commands: Vec<Command>) -> Self::Finalized;
 }
 
 pub async fn replica_task<
@@ -366,10 +363,10 @@ pub async fn replica_task<
     config: ReplicaConfig,
     tick_interval: Duration,
     mut request_receiver: Receiver<Command>,
-    finalize_sender: Sender<R::Finalize>,
+    finalized_sender: Sender<R::Finalized>,
 ) -> anyhow::Result<()>
 where
-    R::Finalize: Send + Sync + 'static,
+    R::Finalized: Send + Sync + 'static,
 {
     let (message_sender, mut message_receiver) = mpsc::channel(100);
     let (mut read_tasks, replica_egresses) =
@@ -397,7 +394,7 @@ where
                         .await?
                 }
                 ReplicaAction::Finalize(commands) => {
-                    finalize_sender.send(replica.finalize(commands)).await?
+                    finalized_sender.send(replica.finalized(commands)).await?
                 }
             }
         }

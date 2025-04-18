@@ -167,19 +167,19 @@ pub async fn run_open_loop_clients(
 pub struct ServiceKit;
 impl AbstractService for Service<ServiceKit> {
     type Reply = message::Reply;
-    type Finalize = Vec<Command>;
+    type Finalized = Vec<Command>;
 
     fn reply_seq(reply: &Self::Reply) -> ClientSeq {
         reply.seq
     }
 
-    fn on_finalize(
+    fn on_finalized(
         &mut self,
-        finalize: Self::Finalize,
+        finalized: Self::Finalized,
     ) -> impl Iterator<Item = (ClientId, Self::Reply)> {
-        finalize.into_iter().filter_map(move |command| {
+        finalized.into_iter().filter_map(move |command| {
             if matches!(self.replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq) {
-                tracing::warn!(?command, "duplicated finalize");
+                tracing::warn!(?command, "duplicated finalized");
                 return None;
             }
             let reply = message::Reply {
@@ -195,9 +195,9 @@ impl AbstractService for Service<ServiceKit> {
 }
 
 impl AbstractReplica for Replica {
-    type Finalize = Vec<Command>;
+    type Finalized = Vec<Command>;
 
-    fn finalize(&self, commands: Vec<Command>) -> Self::Finalize {
+    fn finalized(&self, commands: Vec<Command>) -> Self::Finalized {
         commands
     }
 }
