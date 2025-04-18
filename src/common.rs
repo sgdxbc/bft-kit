@@ -105,6 +105,7 @@ pub trait AbstractReplica {
     fn init(&mut self, actions: &mut Vec<Self::Action>);
     fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>);
     fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>);
+    fn tick(&mut self, actions: &mut Vec<Self::Action>);
 }
 
 pub type Quorum<T> = std::collections::HashMap<ReplicaId, T>;

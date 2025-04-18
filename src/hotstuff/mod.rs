@@ -680,6 +680,10 @@ impl AbstractReplica for Replica {
     fn receive(&mut self, message: Self::Message, actions: &mut Vec<Self::Action>) {
         Self::receive(self, message, actions)
     }
+
+    fn tick(&mut self, _actions: &mut Vec<Self::Action>) {
+        // TODO implement tick
+    }
 }
 
 #[cfg(test)]

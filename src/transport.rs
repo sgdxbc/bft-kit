@@ -19,17 +19,11 @@ use crate::common::{ClientId, ClientSeq, Command, ReplicaId};
 pub async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     ingress: Connection,
     read_sender: Sender<M>,
-    remote_close: bool,
 ) -> anyhow::Result<()> {
     let mut decode_bytes = vec![0; 1 << 16];
     loop {
         let mut stream = match ingress.accept_uni().await {
             Ok(stream) => stream,
-            Err(ConnectionError::ApplicationClosed(_)) => {
-                anyhow::ensure!(remote_close);
-                tracing::debug!("remote closed");
-                return Ok(());
-            }
             Err(err) => anyhow::bail!(err),
         };
         let mut offset = 0;
@@ -106,7 +100,7 @@ pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
     endpoint.set_default_client_config(client_config());
     for &addr in &service_config.server_external_addresses {
         let connection = endpoint.connect(addr, "server.example")?.await?;
-        read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), false));
+        read_tasks.spawn(read_task(connection.clone(), message_sender.clone()));
         replica_egresses.push(connection);
     }
     for egress in &mut replica_egresses {
@@ -200,7 +194,7 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     let replica_egresses = connections;
     let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
     for connection in replica_egresses.values() {
-        read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), false));
+        read_tasks.spawn(read_task(connection.clone(), message_sender.clone()));
     }
     Ok((read_tasks, replica_egresses))
 }
@@ -277,16 +271,25 @@ where
                 Accept(Option<Incoming>),
                 Message(Option<Command>),
                 Finalize(Option<F>),
-                JoinNext(()),
+                JoinNext(anyhow::Result<()>),
             }
             use Select::{Accept, JoinNext, Message};
             match tokio::select! {
                 accept = external_endpoint.accept() => Accept(accept),
                 message = message_receiver.recv() => Message(message),
                 finalize = finalize_receiver.recv() => Select::Finalize(finalize),
-                Some(result) = read_tasks.join_next() => JoinNext(result??),
+                Some(result) = read_tasks.join_next() => JoinNext(result?),
             } {
-                JoinNext(()) => {}
+                JoinNext(result) => 'join_next: {
+                    if let Err(err) = result {
+                        if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
+                            break 'join_next;
+                        }
+                        // TODO suppress certain errors
+                        // tracing::info!(%err, "client read task failed")
+                        anyhow::bail!(err)
+                    }
+                }
                 Accept(None) => anyhow::bail!("endpoint closed"),
                 Accept(Some(incoming)) => {
                     let connection = incoming.await?;
@@ -298,7 +301,7 @@ where
                         .await?;
                     let client_id = ClientId::from_le_bytes(client_id);
                     tracing::debug!(%client_id, "accept client connection");
-                    read_tasks.spawn(read_task(connection.clone(), message_sender.clone(), true));
+                    read_tasks.spawn(read_task(connection.clone(), message_sender.clone()));
                     let replaced = client_egresses.insert(client_id, connection);
                     anyhow::ensure!(replaced.is_none());
                 }
@@ -315,7 +318,13 @@ where
                                 "send to unexpected client {}",
                                 command.client_id
                             );
-                            write_message.run(reply, egress).await?
+                            if let Err(err) = write_message.run(reply, egress).await {
+                                // TODO only suppress certain errors e.g. ApplicationClose
+                                tracing::info!(%err, "egress to client failed")
+                                // not removing from egress table to prevent the following
+                                // (failed) writing errors
+                                // may cause repeatedly logging but the pattern should be rare
+                            }
                         }
                         _ => self.request_sender.send(command).await?,
                     }
@@ -329,8 +338,7 @@ where
                         let egress = client_egresses.get(&client_id);
                         anyhow::ensure!(egress.is_some(), "send to unexpected client {client_id}");
                         if let Err(err) = write_message.run(reply, egress).await {
-                            // TODO only suppress certain errors e.g. BrokenPipe and
-                            // ApplicationClose
+                            // TODO only suppress certain errors e.g. ApplicationClose
                             tracing::info!(%err, "egress to client failed")
                             // not removing from egress table to prevent the following
                             // (failed) writing errors
@@ -407,8 +415,7 @@ where
             message = message_receiver.recv() => Message(message),
             Some(result) = read_tasks.join_next() => JoinNext(result??)
         } {
-            // Sleep => replica.tick(&mut actions),
-            Sleep => {} // TODO impl tick on replica
+            Sleep => replica.tick(&mut actions),
             Request(command) => {
                 let Some(command) = command else {
                     break Ok(()); // think about whether this is correct
