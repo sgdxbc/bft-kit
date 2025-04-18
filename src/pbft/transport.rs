@@ -10,8 +10,8 @@ use crate::{
     common::{ClientId, ClientSeq, Quorum, ReplicaId},
     pbft::{Command, ToClient, ViewNum},
     transport::{
-        AbstractEgress, AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, Service,
-        ServiceConfig, WriteMessage, boot_client, replica_task,
+        AbstractEgress, AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask,
+        ServiceConfig, ServiceTask, WriteMessage, boot_client,
     },
     workload::{ConcurrentClients, Invoke, Latencies},
 };
@@ -159,7 +159,7 @@ pub struct Finalized {
 }
 
 pub struct ServiceKit;
-impl AbstractService for Service<ServiceKit> {
+impl AbstractService for ServiceTask<ServiceKit> {
     type Reply = message::Reply;
     type Finalized = Finalized;
 
@@ -202,17 +202,16 @@ impl AbstractReplica for Replica {
 
 pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
     let (request_sender, request_receiver) = mpsc::channel(100);
-    let (finalize_sender, finalize_receiver) = mpsc::channel(100);
+    let (finalized_sender, finalized_receiver) = mpsc::channel(100);
 
-    let service_task = Service::<ServiceKit>::new(replica.core.config.id, request_sender)
-        .run(config.service.clone(), finalize_receiver);
-    let replica_task = replica_task(
-        replica.core.config.id,
-        replica,
+    let service_task = ServiceTask::<ServiceKit>::new(replica.core.config.id, request_sender)
+        .run(config.service.clone(), finalized_receiver);
+    let replica_id = replica.core.config.id;
+    let replica_task = ReplicaTask::new(replica, finalized_sender).run(
+        replica_id,
         config.replica,
         config.tick_interval,
         request_receiver,
-        finalize_sender,
     );
     tokio::try_join!(service_task, replica_task)?;
     unreachable!()

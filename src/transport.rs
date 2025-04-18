@@ -216,7 +216,7 @@ pub struct OpenLoopClientConfig {
 // implemented in transport
 
 // this abstraction feels weird (maybe it's over engineered)
-pub struct Service<P>
+pub struct ServiceTask<P>
 where
     Self: AbstractService,
 {
@@ -238,7 +238,7 @@ pub trait AbstractService {
     ) -> impl Iterator<Item = (ClientId, Self::Reply)>;
 }
 
-impl<K> Service<K>
+impl<K> ServiceTask<K>
 where
     Self: AbstractService,
 {
@@ -354,78 +354,112 @@ pub trait AbstractReplica: crate::common::AbstractReplica {
     fn finalized(&self, commands: Vec<Command>) -> Self::Finalized;
 }
 
-pub async fn replica_task<
-    R: AbstractReplica<Action = ReplicaAction<M>, Message = M>,
-    M: Encode + Decode<()> + Send + Sync + 'static,
->(
-    replica_id: ReplicaId,
-    mut replica: R,
-    config: ReplicaConfig,
-    tick_interval: Duration,
-    mut request_receiver: Receiver<Command>,
-    finalized_sender: Sender<R::Finalized>,
-) -> anyhow::Result<()>
+pub struct ReplicaTask<R: AbstractReplica> {
+    pub replica_egresses: HashMap<ReplicaId, Connection>,
+    pub finalized_sender: Sender<R::Finalized>,
+    pub replica: R,
+    pub write_message: WriteMessage,
+}
+
+pub trait Effect<R>
+where
+    R: AbstractReplica,
+{
+    fn effect(self, task: &mut ReplicaTask<R>) -> impl Future<Output = anyhow::Result<()>>;
+}
+
+impl<R: AbstractReplica> ReplicaTask<R> {
+    pub fn new(replica: R, finalized_sender: Sender<R::Finalized>) -> Self {
+        Self {
+            replica_egresses: Default::default(),
+            finalized_sender,
+            replica,
+            write_message: WriteMessage::new(),
+        }
+    }
+
+    pub async fn run(
+        mut self,
+        replica_id: ReplicaId,
+        config: ReplicaConfig,
+        tick_interval: Duration,
+        mut request_receiver: Receiver<Command>,
+    ) -> anyhow::Result<()>
+    where
+        R::Action: Effect<R>,
+        R::Message: Decode<()> + Send + Sync + 'static,
+    {
+        let (message_sender, mut message_receiver) = mpsc::channel(100);
+        let mut read_tasks;
+        (read_tasks, self.replica_egresses) =
+            boot_replica(replica_id, config, message_sender.clone()).await?;
+        tracing::info!("replica ready");
+
+        let mut actions = Vec::new();
+
+        self.replica.init(&mut actions);
+        loop {
+            for action in actions.drain(..) {
+                action.effect(&mut self).await?
+            }
+
+            enum Select<M> {
+                Sleep,
+                Request(Option<Command>),
+                Message(Option<M>),
+                JoinNext(()),
+            }
+            use Select::*;
+            match tokio::select! {
+                () = sleep(tick_interval) => Sleep,
+                request = request_receiver.recv() => Request(request),
+                message = message_receiver.recv() => Message(message),
+                Some(result) = read_tasks.join_next() => JoinNext(result??)
+            } {
+                Sleep => self.replica.tick(&mut actions),
+                Request(command) => {
+                    let Some(command) = command else {
+                        break Ok(()); // think about whether this is correct
+                    };
+                    self.replica.request(command, &mut actions)
+                }
+                Message(message) => {
+                    let Some(message) = message else {
+                        anyhow::bail!("message receive channel close")
+                    };
+                    self.replica.receive(message, &mut actions)
+                }
+                JoinNext(()) => unreachable!(),
+            }
+        }
+    }
+}
+
+impl<R: AbstractReplica<Action = Self>, M: Encode> Effect<R> for ReplicaAction<M>
 where
     R::Finalized: Send + Sync + 'static,
 {
-    let (message_sender, mut message_receiver) = mpsc::channel(100);
-    let (mut read_tasks, replica_egresses) =
-        boot_replica(replica_id, config, message_sender.clone()).await?;
-    tracing::info!("replica ready");
-
-    let mut write_message = WriteMessage::new();
-    let mut actions = Vec::new();
-
-    replica.init(&mut actions);
-    loop {
-        for action in actions.drain(..) {
-            match action {
-                ReplicaAction::SendToReplica(replica_id, message) => {
-                    let egress = replica_egresses.get(&replica_id);
-                    anyhow::ensure!(
-                        egress.is_some(),
-                        "send to unexpected replica id {replica_id}"
-                    );
-                    write_message.run(message, egress).await?
-                }
-                ReplicaAction::SendToAllReplicas(message) => {
-                    write_message
-                        .run(message, replica_egresses.values())
-                        .await?
-                }
-                ReplicaAction::Finalize(commands) => {
-                    finalized_sender.send(replica.finalized(commands)).await?
-                }
+    async fn effect(self, task: &mut ReplicaTask<R>) -> anyhow::Result<()> {
+        match self {
+            ReplicaAction::SendToReplica(replica_id, message) => {
+                let egress = task.replica_egresses.get(&replica_id);
+                anyhow::ensure!(
+                    egress.is_some(),
+                    "send to unexpected replica id {replica_id}"
+                );
+                task.write_message.run(message, egress).await?
+            }
+            ReplicaAction::SendToAllReplicas(message) => {
+                task.write_message
+                    .run(message, task.replica_egresses.values())
+                    .await?
+            }
+            ReplicaAction::Finalize(commands) => {
+                task.finalized_sender
+                    .send(task.replica.finalized(commands))
+                    .await?
             }
         }
-
-        enum Select<M> {
-            Sleep,
-            Request(Option<Command>),
-            Message(Option<M>),
-            JoinNext(()),
-        }
-        use Select::*;
-        match tokio::select! {
-            () = sleep(tick_interval) => Sleep,
-            request = request_receiver.recv() => Request(request),
-            message = message_receiver.recv() => Message(message),
-            Some(result) = read_tasks.join_next() => JoinNext(result??)
-        } {
-            Sleep => replica.tick(&mut actions),
-            Request(command) => {
-                let Some(command) = command else {
-                    break Ok(()); // think about whether this is correct
-                };
-                replica.request(command, &mut actions)
-            }
-            Message(message) => {
-                let Some(message) = message else {
-                    anyhow::bail!("message receive channel close")
-                };
-                replica.receive(message, &mut actions)
-            }
-            JoinNext(()) => unreachable!(),
-        }
+        Ok(())
     }
 }
