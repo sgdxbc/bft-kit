@@ -28,8 +28,8 @@ jobs:
           target/
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}    
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --verbose --release --lib --bins --examples
     - name: Run tests
       run: cargo test --verbose --lib
     - name: Run example (PBFT)
-      run: RUST_LOG=info cargo run --verbose --release --example pbft
+      run: cargo run --verbose --release --example pbft

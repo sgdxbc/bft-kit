@@ -71,11 +71,11 @@ Wait a while until the replicas report "replica ready" in the logs. Execute
 
     $ cargo run -r --bin pbft-client -- configs/pbft/client.conf
 
-to run PBFT clients configured by `configs/pbft/client.conf` if it exists (which is not the case currently). The `common.conf` and `network.conf` are discovered as same as the replicas. The clients will exit after report the performance statistics. It is possible to rerun clients against the same replica network, but start with a fresh network is recommended. Send Ctrl-C to one replica to exit it, and the other replicas will exit (kind of crash actually) after their connections to the exited one closed (unexpectedly). Alternatively, execute
+to run PBFT clients configured by `configs/pbft/client.conf` if it exists (which is not the case currently). The `common.conf` and `network.conf` are discovered as same as the replicas. The clients will exit after report the performance statistics. It is possible to rerun clients against the same replica network, but start with a fresh network is recommended. Send Ctrl-C to one replica to exit it, and the other replicas will exit (kind of crash actually) after their connections to the exited one closed (unexpectedly). Alternatively, if all replicas are running on the same machine, execute
 
     $ pkill -INT pbft
 
-to shutdown all current running replicas.
+to shutdown all of them.
 
 The taxonomy of configurations. `replicaN.conf` and `client.conf` exclusively configure replica#N or a client process, at the same time locates the other two configures. `common.conf` and `network.conf` holds shared items for all participants. They two are not essentially different, just `network.conf` are usually dedicated to store network addresses.
 
