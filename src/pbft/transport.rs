@@ -204,9 +204,9 @@ pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result
     let (request_sender, request_receiver) = mpsc::channel(100);
     let (finalized_sender, finalized_receiver) = mpsc::channel(100);
 
-    let service_task = ServiceTask::<ServiceKit>::new(replica.core.config.id, request_sender)
-        .run(config.service.clone(), finalized_receiver);
     let replica_id = replica.core.config.id;
+    let service_task = ServiceTask::<ServiceKit>::new(replica_id, request_sender)
+        .run(config.service, finalized_receiver);
     let replica_task = ReplicaTask::new(replica, finalized_sender).run(
         replica_id,
         config.replica,

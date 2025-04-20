@@ -273,6 +273,7 @@ async fn boot_replica(
     };
     let internal_listener =
         TcpListener::bind(config.server_internal_addresses[replica_id as usize]).await?;
+    tracing::info!(addr = ?internal_listener.local_addr(), "start listening");
     let passive_task = async {
         let mut connections = HashMap::new();
         for _ in 0..config.server_internal_addresses.len() - 1 {
@@ -426,13 +427,10 @@ async fn service_task(
                 match replies.get(&command.client_id) {
                     Some(reply) if reply.seq > command.seq => {}
                     Some(reply) if reply.seq == command.seq => {
-                        let egress = client_egresses.get_mut(&command.client_id);
-                        anyhow::ensure!(
-                            egress.is_some(),
-                            "send to unexpected client id {}",
-                            command.client_id
-                        );
-                        write_message.run(reply.clone(), egress).await?
+                        let Some(egress) = client_egresses.get_mut(&command.client_id) else {
+                            anyhow::bail!("send to unexpected client id {}", command.client_id)
+                        };
+                        write_message.reply_client(reply, egress).await?
                     }
                     _ => request_sender.send(command).await?,
                 }
@@ -452,18 +450,10 @@ async fn service_task(
                     };
                     let replaced = replies.insert(command.client_id, reply.clone());
                     assert!(replaced.map(|reply| reply.seq) < Some(reply.seq));
-                    let egress = client_egresses.get_mut(&command.client_id);
-                    anyhow::ensure!(
-                        egress.is_some(),
-                        "send to unexpected client id {}",
-                        command.client_id
-                    );
-                    if let Err(err) = write_message.run(reply, egress).await {
-                        tracing::info!(%err, "egress to client failed")
-                        // not removing from egress table to prevent the following
-                        // (failed) writing errors
-                        // may cause repeatedly logging but the pattern should be rare
-                    }
+                    let Some(egress) = client_egresses.get_mut(&command.client_id) else {
+                        anyhow::bail!("send to unexpected client id {}", command.client_id)
+                    };
+                    write_message.reply_client(reply, egress).await?
                 }
             }
         }

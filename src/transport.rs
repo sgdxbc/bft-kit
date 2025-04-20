@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint, Incoming};
@@ -66,6 +66,23 @@ impl WriteMessage {
             egress.write_bytes(&self.encode_bytes[..len]).await?
         }
         Ok(())
+    }
+
+    pub async fn reply_client<C: AbstractEgress>(
+        &mut self,
+        message: impl Encode,
+        egress: C,
+    ) -> anyhow::Result<()> {
+        self.run(message, [egress]).await.or_else(|err| {
+            if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
+                return Ok(());
+            } else if let Some(err) = err.downcast_ref::<std::io::Error>() {
+                if err.kind() == ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+            }
+            Err(err)
+        })
     }
 }
 
@@ -160,6 +177,7 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
             .skip(replica_id as usize + 1)
         {
             let connection = internal_endpoint.connect(addr, "server.example")?.await?;
+            tracing::debug!(remote = ?connection.remote_address(), "connect");
             connection
                 .open_uni()
                 .await?
@@ -171,6 +189,7 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
         anyhow::Ok(connections)
     };
     let passive_task = async {
+        tracing::info!(addr = ?internal_endpoint.local_addr(), "start listening");
         let mut connections = HashMap::new();
         for _ in 0..replica_id {
             let connection = internal_endpoint
@@ -178,6 +197,7 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
                 .await
                 .expect("endpoint not closed")
                 .await?;
+            tracing::debug!(remote = ?connection.remote_address(), "accept");
             let mut replica_id = [0; size_of::<ReplicaId>()];
             connection
                 .accept_uni()
@@ -305,42 +325,26 @@ where
                     anyhow::ensure!(replaced.is_none());
                 }
                 Message(None) => unreachable!(),
-                Message(Some(command)) => {
-                    match self.replies.get(&command.client_id) {
-                        Some(reply) if Self::reply_seq(reply) > command.seq => {}
-                        Some(reply) if Self::reply_seq(reply) == command.seq => {
-                            let egress = client_egresses.get(&command.client_id);
-                            anyhow::ensure!(
-                                egress.is_some(),
-                                "send to unexpected client {}",
-                                command.client_id
-                            );
-                            if let Err(err) = write_message.run(reply, egress).await {
-                                // TODO only suppress certain errors e.g. ApplicationClose
-                                tracing::info!(%err, "egress to client failed")
-                                // not removing from egress table to prevent the following
-                                // (failed) writing errors
-                                // may cause repeatedly logging but the pattern should be rare
-                            }
-                        }
-                        _ => self.request_sender.send(command).await?,
+                Message(Some(command)) => match self.replies.get(&command.client_id) {
+                    Some(reply) if Self::reply_seq(reply) > command.seq => {}
+                    Some(reply) if Self::reply_seq(reply) == command.seq => {
+                        let Some(egress) = client_egresses.get(&command.client_id) else {
+                            anyhow::bail!("send to unexpected client id {}", command.client_id)
+                        };
+                        write_message.reply_client(reply, egress).await?
                     }
-                }
+                    _ => self.request_sender.send(command).await?,
+                },
                 Finalized(None) => {
                     tracing::warn!("finalized channel closed");
                     break Ok(());
                 }
                 Finalized(Some(finalized)) => {
                     for (client_id, reply) in self.on_finalized(finalized) {
-                        let egress = client_egresses.get(&client_id);
-                        anyhow::ensure!(egress.is_some(), "send to unexpected client {client_id}");
-                        if let Err(err) = write_message.run(reply, egress).await {
-                            // TODO only suppress certain errors e.g. ApplicationClose
-                            tracing::info!(%err, "egress to client failed")
-                            // not removing from egress table to prevent the following
-                            // (failed) writing errors
-                            // may cause repeatedly logging but the pattern should be rare
-                        }
+                        let Some(egress) = client_egresses.get(&client_id) else {
+                            anyhow::bail!("send to unexpected client id {client_id}")
+                        };
+                        write_message.reply_client(&reply, egress).await?
                     }
                 }
             }
