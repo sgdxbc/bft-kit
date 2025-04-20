@@ -1,11 +1,12 @@
-use std::{env::args, path::PathBuf, pin::pin, time::Duration};
+use std::{env::args, path::PathBuf, pin::pin};
 
 use bft_kit::{
     hotstuff::{CryptoConfig, Replica, transport::server_task},
     init_logging,
     parse::Options,
 };
-use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep};
+use tokio::{fs::read_to_string, signal::ctrl_c};
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,7 +22,8 @@ async fn main() -> anyhow::Result<()> {
         options.clone().try_into()?,
         CryptoConfig::new(options.clone())?,
     );
-    let mut server = pin!(server_task(replica, options.try_into()?));
+    let cancel = CancellationToken::new();
+    let mut server = pin!(server_task(replica, options.try_into()?, cancel.clone()));
     'server: {
         tokio::select! {
             result = &mut server => result?,
@@ -30,8 +32,5 @@ async fn main() -> anyhow::Result<()> {
         unreachable!()
     }
     tracing::info!("exit");
-    // before dropping `server` (and breaking every established connections), wait a
-    // while until every server stop polling (hopefully)
-    sleep(Duration::from_secs(1)).await;
-    Ok(())
+    server.await
 }

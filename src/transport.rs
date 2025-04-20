@@ -8,6 +8,7 @@ use tokio::{
     time::sleep,
     try_join,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::ReplicaAction,
@@ -19,12 +20,14 @@ use crate::common::{ClientId, ClientSeq, Command, ReplicaId};
 pub async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     ingress: Connection,
     read_sender: Sender<M>,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut decode_bytes = vec![0; 1 << 16];
     loop {
-        let mut stream = match ingress.accept_uni().await {
-            Ok(stream) => stream,
-            Err(err) => anyhow::bail!(err),
+        let mut stream = match cancel.run_until_cancelled(ingress.accept_uni()).await {
+            None => break Ok(()),
+            Some(Ok(stream)) => stream,
+            Some(Err(err)) => anyhow::bail!(err),
         };
         let mut offset = 0;
         while let Some(len) = stream.read(&mut decode_bytes).await? {
@@ -117,7 +120,11 @@ pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
     endpoint.set_default_client_config(client_config());
     for &addr in &service_config.server_external_addresses {
         let connection = endpoint.connect(addr, "server.example")?.await?;
-        read_tasks.spawn(read_task(connection.clone(), message_sender.clone()));
+        read_tasks.spawn(read_task(
+            connection.clone(),
+            message_sender.clone(),
+            CancellationToken::new(), // TODO properly cancel?
+        ));
         replica_egresses.push(connection);
     }
     for egress in &mut replica_egresses {
@@ -145,6 +152,7 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     replica_id: ReplicaId,
     config: ReplicaConfig,
     message_sender: Sender<M>,
+    cancel: CancellationToken,
 ) -> anyhow::Result<BootReplica> {
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(None);
@@ -214,7 +222,11 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     let replica_egresses = connections;
     let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
     for connection in replica_egresses.values() {
-        read_tasks.spawn(read_task(connection.clone(), message_sender.clone()));
+        read_tasks.spawn(read_task(
+            connection.clone(),
+            message_sender.clone(),
+            cancel.clone(),
+        ));
     }
     Ok((read_tasks, replica_egresses))
 }
@@ -274,6 +286,7 @@ where
         mut self,
         config: ServiceConfig,
         mut finalized_receiver: Receiver<<Self as AbstractService>::Finalized>,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()>
     where
         <Self as AbstractService>::Reply: Encode,
@@ -292,6 +305,7 @@ where
                 Message(Option<Command>),
                 Finalized(Option<F>),
                 JoinNext(anyhow::Result<()>),
+                Cancel,
             }
             use Select::*;
             match tokio::select! {
@@ -299,14 +313,16 @@ where
                 message = message_receiver.recv() => Message(message),
                 finalize = finalized_receiver.recv() => Finalized(finalize),
                 Some(result) = read_tasks.join_next() => JoinNext(result?),
+                () = cancel.cancelled() => Cancel,
             } {
-                JoinNext(Ok(())) => unreachable!(),
-                JoinNext(Err(err)) => 'join_next: {
+                Cancel | JoinNext(Ok(())) | Finalized(None) => {
+                    anyhow::ensure!(cancel.is_cancelled());
+                    break;
+                }
+                JoinNext(Err(err)) => 'join_err: {
                     if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
-                        break 'join_next;
+                        break 'join_err;
                     }
-                    // TODO suppress certain errors
-                    // tracing::info!(%err, "client read task failed")
                     anyhow::bail!(err)
                 }
                 Accept(None) => anyhow::bail!("endpoint closed"),
@@ -320,7 +336,11 @@ where
                         .await?;
                     let client_id = ClientId::from_le_bytes(client_id);
                     tracing::debug!(%client_id, "accept client connection");
-                    read_tasks.spawn(read_task(connection.clone(), message_sender.clone()));
+                    read_tasks.spawn(read_task(
+                        connection.clone(),
+                        message_sender.clone(),
+                        cancel.clone(),
+                    ));
                     let replaced = client_egresses.insert(client_id, connection);
                     anyhow::ensure!(replaced.is_none());
                 }
@@ -335,10 +355,6 @@ where
                     }
                     _ => self.request_sender.send(command).await?,
                 },
-                Finalized(None) => {
-                    tracing::warn!("finalized channel closed");
-                    break Ok(());
-                }
                 Finalized(Some(finalized)) => {
                     for (client_id, reply) in self.on_finalized(finalized) {
                         let Some(egress) = client_egresses.get(&client_id) else {
@@ -349,6 +365,10 @@ where
                 }
             }
         }
+        while let Some(result) = read_tasks.join_next().await {
+            result??
+        }
+        Ok(())
     }
 }
 
@@ -388,6 +408,7 @@ impl<R: AbstractReplica> ReplicaTask<R> {
         config: ReplicaConfig,
         tick_interval: Duration,
         mut request_receiver: Receiver<Command>,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()>
     where
         R::Action: Effect<R>,
@@ -396,7 +417,7 @@ impl<R: AbstractReplica> ReplicaTask<R> {
         let (message_sender, mut message_receiver) = mpsc::channel(100);
         let mut read_tasks;
         (read_tasks, self.replica_egresses) =
-            boot_replica(replica_id, config, message_sender.clone()).await?;
+            boot_replica(replica_id, config, message_sender, cancel.clone()).await?;
         tracing::info!("replica ready");
 
         let mut actions = Vec::new();
@@ -412,30 +433,32 @@ impl<R: AbstractReplica> ReplicaTask<R> {
                 Request(Option<Command>),
                 Message(Option<M>),
                 JoinNext(()),
+                Cancel,
             }
             use Select::*;
             match tokio::select! {
                 () = sleep(tick_interval) => Sleep,
                 request = request_receiver.recv() => Request(request),
                 message = message_receiver.recv() => Message(message),
-                Some(result) = read_tasks.join_next() => JoinNext(result??)
+                Some(result) = read_tasks.join_next() => JoinNext(result??),
+                () = cancel.cancelled() => Cancel,
             } {
+                Cancel | Message(None) | Request(None) | JoinNext(()) => {
+                    anyhow::ensure!(cancel.is_cancelled());
+                    break;
+                }
                 Sleep => self.replica.tick(&mut actions),
-                Request(command) => {
-                    let Some(command) = command else {
-                        break Ok(()); // think about whether this is correct
-                    };
-                    self.replica.request(command, &mut actions)
-                }
-                Message(message) => {
-                    let Some(message) = message else {
-                        anyhow::bail!("message receive channel close")
-                    };
-                    self.replica.receive(message, &mut actions)
-                }
-                JoinNext(()) => unreachable!(),
+                Request(Some(command)) => self.replica.request(command, &mut actions),
+                Message(Some(message)) => self.replica.receive(message, &mut actions),
             }
         }
+        while let Some(result) = read_tasks.join_next().await {
+            result??
+        }
+        // delay releasing self.replica_egresses until remote replicas are canceled and
+        // actively close the connection from read_task side
+        sleep(Duration::from_secs(1)).await;
+        Ok(())
     }
 }
 

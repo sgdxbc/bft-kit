@@ -10,6 +10,7 @@ use bft_kit::{
 };
 use futures::FutureExt;
 use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep};
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,8 +23,10 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(config_path.with_file_name("network.conf")).await?);
     let replica = Replica::new(options.clone().try_into()?);
     let config = TaskConfig::try_from(options)?;
-    let mut server = pin!(if !config.use_tcp {
-        server_task(replica, config).left_future()
+    let use_tcp = config.use_tcp;
+    let cancel = CancellationToken::new();
+    let mut server = pin!(if !use_tcp {
+        server_task(replica, config, cancel.clone()).left_future()
     } else {
         tcp::server_task(replica, config).right_future()
     });
@@ -35,8 +38,13 @@ async fn main() -> anyhow::Result<()> {
         unreachable!()
     }
     tracing::info!("exit");
-    // before dropping `server` (and breaking every established connections), wait a
-    // while until every server stop polling (hopefully)
-    sleep(Duration::from_secs(1)).await;
-    Ok(())
+    if !use_tcp {
+        cancel.cancel();
+        server.await
+    } else {
+        // before dropping `server` (and breaking every established connections), wait a
+        // while until every server stop polling (hopefully)
+        sleep(Duration::from_secs(1)).await;
+        Ok(())
+    }
 }

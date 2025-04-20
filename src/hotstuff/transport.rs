@@ -5,6 +5,7 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     time::Instant,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::{ClientId, ClientSeq, Command, Quorum, ReplicaId},
@@ -202,20 +203,27 @@ impl AbstractReplica for Replica {
     }
 }
 
-pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
+pub async fn server_task(
+    replica: Replica,
+    config: TaskConfig,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
     let (request_sender, request_receiver) = mpsc::channel(100);
     let (finalized_sender, finalized_receiver) = mpsc::channel(100);
 
     let replica_id = replica.core.config.id;
-    let service_task = ServiceTask::<ServiceKit>::new(replica_id, request_sender)
-        .run(config.service, finalized_receiver);
+    let service_task = ServiceTask::<ServiceKit>::new(replica_id, request_sender).run(
+        config.service,
+        finalized_receiver,
+        cancel.clone(),
+    );
     let replica_task = ReplicaTask::new(replica, finalized_sender).run(
         replica_id,
         config.replica,
         config.tick_interval,
         request_receiver,
+        cancel,
     );
-
     tokio::try_join!(service_task, replica_task)?;
-    unreachable!()
+    Ok(())
 }

@@ -165,7 +165,7 @@ pub fn report_latencies(client_latencies: Vec<Latencies>, duration: Duration) {
             Equal => {
                 tracing::info!(
                     "(omit the remaining {} per client latencies)",
-                    num_client_latencies - 5 + 1
+                    num_client_latencies - 5
                 )
             }
             _ => {}
