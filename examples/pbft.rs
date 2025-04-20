@@ -11,6 +11,7 @@ use bft_kit::{
 };
 use futures::FutureExt;
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 #[tokio::main]
@@ -49,11 +50,12 @@ async fn main() -> anyhow::Result<()> {
         tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
     };
     let mut server_tasks = JoinSet::new();
+    let cancel = CancellationToken::new();
     for i in 0..spec.num_replica {
         let config = ReplicaCoreConfig::new_basic(spec.clone(), i);
         let replica = Replica::new(config);
         server_tasks.spawn(if !task_config.use_tcp {
-            server_task(replica, task_config.clone()).left_future()
+            server_task(replica, task_config.clone(), cancel.clone()).left_future()
         } else {
             tcp::server_task(replica, task_config.clone()).right_future()
         });

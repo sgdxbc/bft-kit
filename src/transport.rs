@@ -103,6 +103,23 @@ impl AbstractEgress for &'_ Connection {
 }
 
 #[derive(Debug, Clone)]
+pub enum ClientConfig {
+    CloseLoop,
+    OpenLoop(OpenLoopClientConfig),
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenLoopClientConfig {
+    pub num_max_concurrent: usize,
+    pub sending_rate: f32,
+}
+
+// TODO extract client skeleton
+// not sure whether that is possible or not since (simple) clients are inline
+// implemented in transport
+// nonetheless, bootstrapping part is extracted below
+
+#[derive(Debug, Clone)]
 pub struct ServiceConfig {
     pub server_external_addresses: Vec<SocketAddr>,
 }
@@ -136,116 +153,6 @@ pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
     }
     Ok((read_tasks, replica_egresses))
 }
-
-#[derive(Debug, Clone)]
-pub struct ReplicaConfig {
-    pub server_internal_addresses: Vec<SocketAddr>,
-    // how long should replicas wait before attempting to connect each other's
-    // internal addresses. set longer in higher latency environments (or human
-    // action is involved)
-    pub server_interconnect_delay: Duration,
-}
-
-type BootReplica = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>);
-
-pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
-    replica_id: ReplicaId,
-    config: ReplicaConfig,
-    message_sender: Sender<M>,
-    cancel: CancellationToken,
-) -> anyhow::Result<BootReplica> {
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(None);
-    let transport = Arc::new(transport);
-    let mut internal_endpoint = Endpoint::server(
-        // server_config(),
-        {
-            let mut config = server_config();
-            config.transport_config(transport.clone());
-            config
-        },
-        config.server_internal_addresses[replica_id as usize],
-    )?;
-    internal_endpoint.set_default_client_config({
-        let mut config = client_config();
-        config.transport_config(transport);
-        config
-    });
-    let active_task = async {
-        tracing::info!(
-            "start server interconnect after {:?}",
-            config.server_interconnect_delay
-        );
-        sleep(config.server_interconnect_delay).await;
-        let mut connections = HashMap::new();
-        for (i, &addr) in config
-            .server_internal_addresses
-            .iter()
-            .enumerate()
-            .skip(replica_id as usize + 1)
-        {
-            let connection = internal_endpoint.connect(addr, "server.example")?.await?;
-            tracing::debug!(remote = ?connection.remote_address(), "connect");
-            connection
-                .open_uni()
-                .await?
-                // to need to `to_le_bytes()` for current u8 based ReplicaId, just future proof
-                .write_all(&replica_id.to_le_bytes())
-                .await?;
-            connections.insert(i as ReplicaId, connection);
-        }
-        anyhow::Ok(connections)
-    };
-    let passive_task = async {
-        tracing::info!(addr = ?internal_endpoint.local_addr(), "start listening");
-        let mut connections = HashMap::new();
-        for _ in 0..replica_id {
-            let connection = internal_endpoint
-                .accept()
-                .await
-                .expect("endpoint not closed")
-                .await?;
-            tracing::debug!(remote = ?connection.remote_address(), "accept");
-            let mut replica_id = [0; size_of::<ReplicaId>()];
-            connection
-                .accept_uni()
-                .await?
-                .read_exact(&mut replica_id)
-                .await?;
-            connections.insert(ReplicaId::from_le_bytes(replica_id), connection);
-        }
-        Ok(connections)
-    };
-    let (mut connections, other_connections) = try_join!(active_task, passive_task)?;
-    connections.extend(other_connections);
-    anyhow::ensure!(connections.len() == config.server_internal_addresses.len() - 1);
-    let replica_egresses = connections;
-    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
-    for connection in replica_egresses.values() {
-        read_tasks.spawn(read_task(
-            connection.clone(),
-            message_sender.clone(),
-            cancel.clone(),
-        ));
-    }
-    Ok((read_tasks, replica_egresses))
-}
-
-#[derive(Debug, Clone)]
-pub enum ClientConfig {
-    CloseLoop,
-    OpenLoop(OpenLoopClientConfig),
-}
-
-#[derive(Debug, Clone)]
-pub struct OpenLoopClientConfig {
-    pub num_max_concurrent: usize,
-    pub sending_rate: f32,
-}
-
-// TODO extract client skeleton
-// not sure whether that is possible or not since (simple) clients are inline
-// implemented in transport
 
 // this abstraction feels weird (maybe it's over engineered)
 pub struct ServiceTask<P>
@@ -291,8 +198,17 @@ where
     where
         <Self as AbstractService>::Reply: Encode,
     {
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_idle_timeout(None);
+        transport.max_concurrent_uni_streams((1u32 << 12).into());
+        let transport = Arc::new(transport);
         let external_endpoint = Endpoint::server(
-            server_config(),
+            // server_config(),
+            {
+                let mut config = server_config();
+                config.transport_config(transport.clone());
+                config
+            },
             config.server_external_addresses[self.replica_id as usize],
         )?;
         let mut read_tasks = JoinSet::new();
@@ -368,8 +284,109 @@ where
         while let Some(result) = read_tasks.join_next().await {
             result??
         }
+        let path_stats = client_egresses
+            .values()
+            .map(|connection| connection.stats().path)
+            .collect::<Vec<_>>();
+        tracing::info!(lost_sum = path_stats.iter().map(|stats| stats.lost_packets).sum::<u64>(), lost_max = ?path_stats.iter().map(|stats| stats.lost_packets).max(), "service");
+        tracing::info!(sent_sum = path_stats.iter().map(|stats| stats.sent_packets).sum::<u64>(), sent_max = ?path_stats.iter().map(|stats| stats.sent_packets).max(), "service");
         Ok(())
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplicaConfig {
+    pub server_internal_addresses: Vec<SocketAddr>,
+    // how long should replicas wait before attempting to connect each other's
+    // internal addresses. set longer in higher latency environments (or human
+    // action is involved)
+    pub server_interconnect_delay: Duration,
+}
+
+type BootReplica = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>);
+
+pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
+    replica_id: ReplicaId,
+    config: ReplicaConfig,
+    message_sender: Sender<M>,
+    cancel: CancellationToken,
+) -> anyhow::Result<BootReplica> {
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(None);
+    transport.max_concurrent_uni_streams((1u32 << 12).into());
+    let transport = Arc::new(transport);
+    let mut internal_endpoint = Endpoint::server(
+        // server_config(),
+        {
+            let mut config = server_config();
+            config.transport_config(transport.clone());
+            config
+        },
+        config.server_internal_addresses[replica_id as usize],
+    )?;
+    internal_endpoint.set_default_client_config({
+        let mut config = client_config();
+        config.transport_config(transport);
+        config
+    });
+    let active_task = async {
+        tracing::info!(
+            "start server interconnect after {:?}",
+            config.server_interconnect_delay
+        );
+        sleep(config.server_interconnect_delay).await;
+        let mut connections = HashMap::new();
+        for (i, &addr) in config
+            .server_internal_addresses
+            .iter()
+            .enumerate()
+            .skip(replica_id as usize + 1)
+        {
+            let connection = internal_endpoint.connect(addr, "server.example")?.await?;
+            tracing::debug!(remote = ?connection.remote_address(), "connect");
+            connection
+                .open_uni()
+                .await?
+                // to need to `to_le_bytes()` for current u8 based ReplicaId, just future proof
+                .write_all(&replica_id.to_le_bytes())
+                .await?;
+            connections.insert(i as ReplicaId, connection);
+        }
+        anyhow::Ok(connections)
+    };
+    let passive_task = async {
+        tracing::info!(addr = ?internal_endpoint.local_addr(), "start listening");
+        let mut connections = HashMap::new();
+        for _ in 0..replica_id {
+            let connection = internal_endpoint
+                .accept()
+                .await
+                .expect("endpoint not closed")
+                .await?;
+            tracing::debug!(remote = ?connection.remote_address(), "accept");
+            let mut replica_id = [0; size_of::<ReplicaId>()];
+            connection
+                .accept_uni()
+                .await?
+                .read_exact(&mut replica_id)
+                .await?;
+            connections.insert(ReplicaId::from_le_bytes(replica_id), connection);
+        }
+        Ok(connections)
+    };
+    let (mut connections, other_connections) = try_join!(active_task, passive_task)?;
+    connections.extend(other_connections);
+    anyhow::ensure!(connections.len() == config.server_internal_addresses.len() - 1);
+    let replica_egresses = connections;
+    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
+    for connection in replica_egresses.values() {
+        read_tasks.spawn(read_task(
+            connection.clone(),
+            message_sender.clone(),
+            cancel.clone(),
+        ));
+    }
+    Ok((read_tasks, replica_egresses))
 }
 
 pub trait AbstractReplica: crate::common::AbstractReplica {
@@ -455,6 +472,13 @@ impl<R: AbstractReplica> ReplicaTask<R> {
         while let Some(result) = read_tasks.join_next().await {
             result??
         }
+        let path_stats = self
+            .replica_egresses
+            .values()
+            .map(|connection| connection.stats().path)
+            .collect::<Vec<_>>();
+        tracing::info!(lost_sum = path_stats.iter().map(|stats| stats.lost_packets).sum::<u64>(), lost_max = ?path_stats.iter().map(|stats| stats.lost_packets).max(), "replica");
+        tracing::info!(sent_sum = path_stats.iter().map(|stats| stats.sent_packets).sum::<u64>(), sent_max = ?path_stats.iter().map(|stats| stats.sent_packets).max(), "replica");
         // delay releasing self.replica_egresses until remote replicas are canceled and
         // actively close the connection from read_task side
         sleep(Duration::from_secs(1)).await;

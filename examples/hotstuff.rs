@@ -11,6 +11,7 @@ use bft_kit::{
     transport::{ClientConfig, ReplicaConfig, ServiceConfig},
 };
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 #[tokio::main]
@@ -45,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let key_shares = givre_replica_key_shares(spec.num_replica, spec.num_faulty);
 
     let mut server_tasks = JoinSet::new();
+    let cancel = CancellationToken::new();
     for i in 0..spec.num_replica {
         let core_config = ReplicaCoreConfig {
             spec: spec.clone(),
@@ -58,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
             refill_threshold: 10,
         };
         let replica = Replica::new(core_config, crypto_config);
-        server_tasks.spawn(server_task(replica, task_config.clone()));
+        server_tasks.spawn(server_task(replica, task_config.clone(), cancel.clone()));
     }
     tracing::info!("wait servers up");
     match timeout(Duration::from_secs(1), server_tasks.join_next()).await {
