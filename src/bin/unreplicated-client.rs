@@ -21,8 +21,7 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(config_path.with_file_name("common.conf")).await?);
     options.parse(&read_to_string(config_path.with_file_name("network.conf")).await?);
 
-    let mut config = TaskConfig::try_from(options.clone())?;
-    config.service.server_external_addresses.truncate(1);
+    let config = TaskConfig::try_from(options.clone())?;
     let client_latencies = clients_task(config.clone())
         .instrument(tracing::info_span!("concurrent close loops"))
         .await?;

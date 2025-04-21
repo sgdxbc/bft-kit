@@ -57,7 +57,12 @@ impl TryFrom<Options> for super::transport::ReplicaConfig {
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(Self {
-            server_internal_addresses: options.get_values("server_internal_address")?,
+            server_internal_addresses: options
+                .get_values("server_internal_address")?
+                .into_iter()
+                .enumerate()
+                .map(|(i, addr)| (i as _, addr))
+                .collect(),
             server_interconnect_delay: Duration::from_secs_f32(
                 options.get("server_interconnect_delay")?,
             ),
@@ -70,7 +75,12 @@ impl TryFrom<Options> for super::transport::ServiceConfig {
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(Self {
-            server_external_addresses: options.get_values("server_external_address")?,
+            server_external_addresses: options
+                .get_values("server_external_address")?
+                .into_iter()
+                .enumerate()
+                .map(|(i, addr)| (i as _, addr))
+                .collect(),
         })
     }
 }

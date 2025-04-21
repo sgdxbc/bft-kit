@@ -1,4 +1,7 @@
-use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, future::pending, io::ErrorKind, net::SocketAddr, sync::Arc,
+    time::Duration,
+};
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint, Incoming, TransportConfig};
@@ -8,7 +11,7 @@ use tokio::{
     time::sleep,
     try_join,
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
 use crate::{
     common::ReplicaAction,
@@ -16,6 +19,86 @@ use crate::{
 };
 
 use crate::common::{ClientId, ClientSeq, Command, ReplicaId};
+
+pub mod tcp;
+
+pub struct Transport {
+    read_tasks: JoinSet<anyhow::Result<()>>,
+    write_tasks: JoinSet<anyhow::Result<()>>,
+}
+
+impl Transport {
+    pub fn new() -> Self {
+        Self {
+            read_tasks: JoinSet::new(),
+            write_tasks: JoinSet::new(),
+        }
+    }
+
+    pub fn add_connection<RM: Decode<()> + Send + Sync + 'static>(
+        &mut self,
+        connection: Connection,
+        read_sender: Sender<RM>,
+        mut write_receiver: Receiver<Bytes>,
+    ) {
+        self.read_tasks.spawn({
+            let connection = connection.clone();
+            async move {
+                loop {
+                    let mut stream = connection.accept_uni().await?;
+                    let bytes = stream.read_to_end(1 << 16).await?;
+                    let (message, len) =
+                        bincode::decode_from_slice(&bytes, bincode::config::standard())?;
+                    anyhow::ensure!(len == bytes.len());
+                    if !checked_send(&read_sender, message).await? {
+                        tracing::warn!("read channel full")
+                    }
+                }
+            }
+        });
+        self.write_tasks.spawn(async move {
+            while let Some(message) = write_receiver.recv().await {
+                let mut stream = connection.open_uni().await?;
+                // TODO figure a way to concurrently write into a connection (via multiple
+                // streams) if that matters to performance
+                stream.write_chunk(message).await?
+            }
+            Ok(())
+        });
+    }
+
+    pub async fn write<WM: Encode>(
+        message: WM,
+        senders: impl IntoIterator<Item = &'_ Sender<Bytes>>,
+    ) -> anyhow::Result<()> {
+        let bytes = Bytes::from(bincode::encode_to_vec(
+            message,
+            bincode::config::standard(),
+        )?);
+        for sender in senders {
+            if !checked_send(sender, bytes.clone()).await? {
+                tracing::warn!("write channel full")
+            }
+        }
+        Ok(())
+    }
+
+    // change to return anyhow::Result<!> after ! is stabilized
+    pub async fn join_next(&mut self) -> anyhow::Result<()> {
+        tokio::select! {
+            Some(result) = self.read_tasks.join_next() => result??,
+            Some(result) = self.write_tasks.join_next() => result??,
+            else => pending().await
+        }
+        unreachable!()
+    }
+}
+
+impl Default for Transport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     ingress: Connection,
@@ -124,37 +207,32 @@ pub struct OpenLoopClientConfig {
 
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
-    pub server_external_addresses: Vec<SocketAddr>,
+    pub server_external_addresses: HashMap<ReplicaId, SocketAddr>,
 }
 
-type BootClient = (JoinSet<Result<(), anyhow::Error>>, Vec<Connection>);
+type TransportAndSenders = (Transport, HashMap<ReplicaId, Sender<Bytes>>);
 
 pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
     id: ClientId,
     service_config: ServiceConfig,
     message_sender: Sender<M>,
-) -> anyhow::Result<BootClient> {
-    let mut replica_egresses = Vec::new();
-    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
+) -> anyhow::Result<TransportAndSenders> {
+    let mut transport = Transport::new();
+    let mut write_senders = HashMap::new();
     let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(client_config());
-    for &addr in &service_config.server_external_addresses {
+    for (&replica_id, &addr) in &service_config.server_external_addresses {
         let connection = endpoint.connect(addr, "server.example")?.await?;
-        read_tasks.spawn(read_task(
-            connection.clone(),
-            message_sender.clone(),
-            CancellationToken::new(), // TODO properly cancel?
-        ));
-        replica_egresses.push(connection);
-    }
-    for egress in &mut replica_egresses {
-        egress
+        connection
             .open_uni()
             .await?
             .write_all(&id.to_le_bytes())
             .await?;
+        let (write_sender, write_receiver) = mpsc::channel(100);
+        transport.add_connection(connection, message_sender.clone(), write_receiver);
+        write_senders.insert(replica_id, write_sender);
     }
-    Ok((read_tasks, replica_egresses))
+    Ok((transport, write_senders))
 }
 
 // this abstraction feels weird (maybe it's over engineered)
@@ -203,7 +281,6 @@ where
     {
         let mut transport = TransportConfig::default();
         transport.max_idle_timeout(None);
-        transport.max_concurrent_uni_streams((1u32 << 12).into());
         let external_endpoint = Endpoint::server(
             // server_config(),
             {
@@ -211,18 +288,17 @@ where
                 config.transport_config(transport.into());
                 config
             },
-            config.server_external_addresses[self.replica_id as usize],
+            config.server_external_addresses[&self.replica_id],
         )?;
-        let mut read_tasks = JoinSet::new();
-        let mut client_egresses = HashMap::new();
-        let mut write_message = WriteMessage::new();
         let (message_sender, mut message_receiver) = mpsc::channel(1 << 12);
+        let mut transport = Transport::new();
+        let mut write_senders = HashMap::new();
         loop {
             enum Select<F> {
                 Accept(Option<Incoming>),
                 Message(Option<Command>),
                 Finalized(Option<F>),
-                JoinNext(anyhow::Result<()>),
+                TransportJoinNext(anyhow::Result<()>),
                 Cancel,
             }
             use Select::*;
@@ -230,19 +306,11 @@ where
                 accept = external_endpoint.accept() => Accept(accept),
                 message = message_receiver.recv() => Message(message),
                 finalize = finalized_receiver.recv() => Finalized(finalize),
-                Some(result) = read_tasks.join_next() => JoinNext(result?),
+                result = transport.join_next() => TransportJoinNext(result),
                 () = cancel.cancelled() => Cancel,
             } {
-                Cancel | JoinNext(Ok(())) | Finalized(None) => {
-                    anyhow::ensure!(cancel.is_cancelled());
-                    break;
-                }
-                JoinNext(Err(err)) => 'join_err: {
-                    if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
-                        break 'join_err;
-                    }
-                    anyhow::bail!(err)
-                }
+                Finalized(None) | TransportJoinNext(Ok(())) => unreachable!(),
+                Cancel => break Ok(()),
                 Accept(None) => anyhow::bail!("endpoint closed"),
                 Accept(Some(incoming)) => {
                     let connection = incoming.await?;
@@ -254,22 +322,22 @@ where
                         .await?;
                     let client_id = ClientId::from_le_bytes(client_id);
                     tracing::debug!(%client_id, "accept client connection");
-                    read_tasks.spawn(read_task(
-                        connection.clone(),
-                        message_sender.clone(),
-                        cancel.clone(),
-                    ));
-                    let replaced = client_egresses.insert(client_id, connection);
+                    let (write_sender, write_receiver) = mpsc::channel(100);
+                    transport.add_connection(connection, message_sender.clone(), write_receiver);
+                    let replaced = write_senders.insert(client_id, write_sender);
                     anyhow::ensure!(replaced.is_none());
                 }
                 Message(None) => unreachable!(),
                 Message(Some(command)) => match self.replies.get(&command.client_id) {
                     Some(reply) if Self::reply_seq(reply) > command.seq => {}
                     Some(reply) if Self::reply_seq(reply) == command.seq => {
-                        let Some(egress) = client_egresses.get(&command.client_id) else {
-                            anyhow::bail!("send to unexpected client id {}", command.client_id)
-                        };
-                        write_message.reply_client(reply, egress).await?
+                        let sender = write_senders.get(&command.client_id);
+                        anyhow::ensure!(
+                            sender.is_some(),
+                            "send to unexpected client id {}",
+                            command.client_id
+                        );
+                        Transport::write(reply, sender).await?
                     }
                     // _ => self.request_sender.send(command).await?,
                     _ => {
@@ -280,59 +348,51 @@ where
                 },
                 Finalized(Some(finalized)) => {
                     for (client_id, reply) in self.on_finalized(finalized) {
-                        let Some(egress) = client_egresses.get(&client_id) else {
-                            anyhow::bail!("send to unexpected client id {client_id}")
-                        };
-                        write_message.reply_client(&reply, egress).await?
+                        let sender = write_senders.get(&client_id);
+                        anyhow::ensure!(
+                            sender.is_some(),
+                            "send to unexpected client id {client_id}",
+                        );
+                        Transport::write(reply, sender).await?
                     }
+                }
+                TransportJoinNext(Err(err)) => {
+                    tracing::info!(%err)
                 }
             }
         }
-        while let Some(result) = read_tasks.join_next().await {
-            result??
-        }
-        let path_stats = client_egresses
-            .values()
-            .map(|connection| connection.stats().path)
-            .collect::<Vec<_>>();
-        tracing::info!(lost_sum = path_stats.iter().map(|stats| stats.lost_packets).sum::<u64>(), lost_max = ?path_stats.iter().map(|stats| stats.lost_packets).max(), "service");
-        tracing::info!(sent_sum = path_stats.iter().map(|stats| stats.sent_packets).sum::<u64>(), sent_max = ?path_stats.iter().map(|stats| stats.sent_packets).max(), "service");
-        Ok(())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ReplicaConfig {
-    pub server_internal_addresses: Vec<SocketAddr>,
+    pub server_internal_addresses: HashMap<ReplicaId, SocketAddr>,
     // how long should replicas wait before attempting to connect each other's
     // internal addresses. set longer in higher latency environments (or human
     // action is involved)
     pub server_interconnect_delay: Duration,
 }
 
-type BootReplica = (JoinSet<anyhow::Result<()>>, HashMap<ReplicaId, Connection>);
-
 pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     replica_id: ReplicaId,
     config: ReplicaConfig,
     message_sender: Sender<M>,
-    cancel: CancellationToken,
-) -> anyhow::Result<BootReplica> {
-    let mut transport = TransportConfig::default();
-    transport.max_idle_timeout(None);
-    let transport = Arc::new(transport);
+) -> anyhow::Result<TransportAndSenders> {
+    let mut transport_config = TransportConfig::default();
+    transport_config.max_idle_timeout(None);
+    let transport_config = Arc::new(transport_config);
     let mut internal_endpoint = Endpoint::server(
         // server_config(),
         {
             let mut config = server_config();
-            config.transport_config(transport.clone());
+            config.transport_config(transport_config.clone());
             config
         },
-        config.server_internal_addresses[replica_id as usize],
+        config.server_internal_addresses[&replica_id],
     )?;
     internal_endpoint.set_default_client_config({
         let mut config = client_config();
-        config.transport_config(transport);
+        config.transport_config(transport_config);
         config
     });
     let active_task = async {
@@ -342,12 +402,10 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
         );
         sleep(config.server_interconnect_delay).await;
         let mut connections = HashMap::new();
-        for (i, &addr) in config
-            .server_internal_addresses
-            .iter()
-            .enumerate()
-            .skip(replica_id as usize + 1)
-        {
+        for (&i, &addr) in &config.server_internal_addresses {
+            if i <= replica_id {
+                continue;
+            }
             let connection = internal_endpoint.connect(addr, "server.example")?.await?;
             tracing::debug!(remote = ?connection.remote_address(), "connect");
             connection
@@ -383,16 +441,15 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     let (mut connections, other_connections) = try_join!(active_task, passive_task)?;
     connections.extend(other_connections);
     anyhow::ensure!(connections.len() == config.server_internal_addresses.len() - 1);
-    let replica_egresses = connections;
-    let mut read_tasks = JoinSet::<anyhow::Result<()>>::new();
-    for connection in replica_egresses.values() {
-        read_tasks.spawn(read_task(
-            connection.clone(),
-            message_sender.clone(),
-            cancel.clone(),
-        ));
+
+    let mut transport = Transport::new();
+    let mut write_senders = HashMap::new();
+    for (id, connection) in connections {
+        let (write_sender, write_receiver) = mpsc::channel(100);
+        transport.add_connection(connection, message_sender.clone(), write_receiver);
+        write_senders.insert(id, write_sender);
     }
-    Ok((read_tasks, replica_egresses))
+    Ok((transport, write_senders))
 }
 
 pub trait AbstractReplica: crate::common::AbstractReplica {
@@ -402,10 +459,9 @@ pub trait AbstractReplica: crate::common::AbstractReplica {
 }
 
 pub struct ReplicaTask<R: AbstractReplica> {
-    pub replica_egresses: HashMap<ReplicaId, Connection>,
+    pub write_senders: HashMap<ReplicaId, Sender<Bytes>>,
     pub finalized_sender: Sender<R::Finalized>,
     pub replica: R,
-    pub write_message: WriteMessage,
 }
 
 pub trait Effect<R>
@@ -418,10 +474,9 @@ where
 impl<R: AbstractReplica> ReplicaTask<R> {
     pub fn new(replica: R, finalized_sender: Sender<R::Finalized>) -> Self {
         Self {
-            replica_egresses: Default::default(),
+            write_senders: Default::default(),
             finalized_sender,
             replica,
-            write_message: WriteMessage::new(),
         }
     }
 
@@ -430,19 +485,31 @@ impl<R: AbstractReplica> ReplicaTask<R> {
         replica_id: ReplicaId,
         config: ReplicaConfig,
         tick_interval: Duration,
-        mut request_receiver: Receiver<Command>,
-        cancel: CancellationToken,
+        request_receiver: Receiver<Command>,
     ) -> anyhow::Result<()>
     where
         R::Action: Effect<R>,
         R::Message: Decode<()> + Send + Sync + 'static,
     {
-        let (message_sender, mut message_receiver) = mpsc::channel(100);
-        let mut read_tasks;
-        (read_tasks, self.replica_egresses) =
-            boot_replica(replica_id, config, message_sender, cancel.clone()).await?;
+        let (message_sender, message_receiver) = mpsc::channel(100);
+        let transport;
+        (transport, self.write_senders) = boot_replica(replica_id, config, message_sender).await?;
         tracing::info!("replica ready");
 
+        self.run_internal(tick_interval, request_receiver, message_receiver, transport)
+            .await
+    }
+
+    pub async fn run_internal(
+        mut self,
+        tick_interval: Duration,
+        mut request_receiver: Receiver<Command>,
+        mut message_receiver: Receiver<R::Message>,
+        mut transport: Transport,
+    ) -> Result<(), anyhow::Error>
+    where
+        R::Action: Effect<R>,
+    {
         let mut actions = Vec::new();
 
         self.replica.init(&mut actions);
@@ -456,37 +523,24 @@ impl<R: AbstractReplica> ReplicaTask<R> {
                 Request(Option<Command>),
                 Message(Option<M>),
                 JoinNext(()),
-                Cancel,
             }
             use Select::*;
             match tokio::select! {
                 () = sleep(tick_interval) => Sleep,
                 request = request_receiver.recv() => Request(request),
                 message = message_receiver.recv() => Message(message),
-                Some(result) = read_tasks.join_next() => JoinNext(result??),
-                () = cancel.cancelled() => Cancel,
+                result = transport.join_next() => JoinNext(result?),
             } {
-                Cancel | Message(None) | Request(None) | JoinNext(()) => {
-                    anyhow::ensure!(cancel.is_cancelled());
-                    break;
-                }
+                Message(None) | JoinNext(()) => unreachable!(),
+                Request(None) => break,
                 Sleep => self.replica.tick(&mut actions),
                 Request(Some(command)) => self.replica.request(command, &mut actions),
                 Message(Some(message)) => self.replica.receive(message, &mut actions),
             }
         }
-        while let Some(result) = read_tasks.join_next().await {
-            result??
-        }
-        let path_stats = self
-            .replica_egresses
-            .values()
-            .map(|connection| connection.stats().path)
-            .collect::<Vec<_>>();
-        tracing::info!(lost_sum = path_stats.iter().map(|stats| stats.lost_packets).sum::<u64>(), lost_max = ?path_stats.iter().map(|stats| stats.lost_packets).max(), "replica");
-        tracing::info!(sent_sum = path_stats.iter().map(|stats| stats.sent_packets).sum::<u64>(), sent_max = ?path_stats.iter().map(|stats| stats.sent_packets).max(), "replica");
-        // delay releasing self.replica_egresses until remote replicas are canceled and
-        // actively close the connection from read_task side
+        transport.read_tasks.abort_all();
+        // delay releasing transport until remote replicas are canceled and actively close
+        // close the connection from read_task side (as above)
         sleep(Duration::from_secs(1)).await;
         Ok(())
     }
@@ -499,17 +553,15 @@ where
     async fn effect(self, task: &mut ReplicaTask<R>) -> anyhow::Result<()> {
         match self {
             ReplicaAction::SendToReplica(replica_id, message) => {
-                let egress = task.replica_egresses.get(&replica_id);
+                let write_sender = task.write_senders.get(&replica_id);
                 anyhow::ensure!(
-                    egress.is_some(),
+                    write_sender.is_some(),
                     "send to unexpected replica id {replica_id}"
                 );
-                task.write_message.run(message, egress).await?
+                Transport::write(message, write_sender).await?
             }
             ReplicaAction::SendToAllReplicas(message) => {
-                task.write_message
-                    .run(message, task.replica_egresses.values())
-                    .await?
+                Transport::write(message, task.write_senders.values()).await?
             }
             ReplicaAction::Finalize(commands) => {
                 // task.finalized_sender

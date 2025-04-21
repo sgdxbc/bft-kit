@@ -25,7 +25,7 @@ pub mod transport {
     use crate::{
         common::{ClientId, ClientSeq, Command},
         transport::{
-            AbstractService, ClientConfig, ServiceConfig, ServiceTask, WriteMessage, boot_client,
+            AbstractService, ClientConfig, ServiceConfig, ServiceTask, Transport, boot_client,
             checked_send,
         },
         workload::{ConcurrentClients, Invoke, Latencies},
@@ -51,11 +51,10 @@ pub mod transport {
         commit_sender: Sender<ClientId>,
     ) -> anyhow::Result<Latencies> {
         let (message_sender, mut message_receiver) = mpsc::channel(64);
-        let (mut read_tasks, replica_egresses) =
+        let (mut transport, replica_egresses) =
             boot_client(id, service_config, message_sender).await?;
 
         let mut seq = 0;
-        let mut write_message = WriteMessage::new();
         let mut latencies = Latencies::new(3)?;
         let start = Instant::now();
         struct SeqScratch {
@@ -67,14 +66,14 @@ pub mod transport {
             enum Select {
                 Invoke(Option<Invoke>),
                 Message(Option<ToClient>),
-                JoinNext(()),
+                TransportJoinNext(()),
             }
             match tokio::select! {
                 invoke = invoke_receiver.recv() => Select::Invoke(invoke),
                 message = message_receiver.recv() => Select::Message(message),
-                Some(result) = read_tasks.join_next() => Select::JoinNext(result??)
+                result = transport.join_next() => Select::TransportJoinNext(result?)
             } {
-                Select::JoinNext(()) => unreachable!(),
+                Select::TransportJoinNext(()) => unreachable!(),
                 Select::Invoke(None) => break Ok(latencies),
                 Select::Invoke(Some((op, result))) => {
                     seq += 1;
@@ -83,7 +82,9 @@ pub mod transport {
                         seq,
                         op,
                     };
-                    write_message.run(command, &replica_egresses).await?;
+                    let egress = replica_egresses.get(&0);
+                    anyhow::ensure!(egress.is_some());
+                    Transport::write(command, egress).await?;
                     match &config {
                         // resend for close loop?
                         ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),

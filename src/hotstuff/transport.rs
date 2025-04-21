@@ -11,7 +11,7 @@ use crate::{
     common::{ClientId, ClientSeq, Command, Quorum, ReplicaId},
     transport::{
         AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask, ServiceConfig,
-        ServiceTask, WriteMessage, boot_client,
+        ServiceTask, Transport, boot_client,
     },
     workload::{ConcurrentClients, Invoke, Latencies},
 };
@@ -39,11 +39,9 @@ pub async fn client_task(
     commit_sender: Sender<ClientId>,
 ) -> anyhow::Result<Histogram<u32>> {
     let (message_sender, mut message_receiver) = mpsc::channel(64);
-    let (mut read_tasks, replica_egresses) =
-        boot_client(id, service_config, message_sender).await?;
+    let (mut transport, replica_egresses) = boot_client(id, service_config, message_sender).await?;
 
     let mut seq = 0;
-    let mut write_message = WriteMessage::new();
     let mut latencies = Histogram::new(3)?;
     let start = Instant::now();
     struct SeqScratch {
@@ -56,14 +54,14 @@ pub async fn client_task(
         enum Select {
             Invoke(Option<Invoke>),
             Message(Option<ToClient>),
-            JoinNext(()),
+            TransportJoinNext(()),
         }
         match tokio::select! {
             invoke = invoke_receiver.recv() => Select::Invoke(invoke),
             message = message_receiver.recv() => Select::Message(message),
-            Some(result) = read_tasks.join_next() => Select::JoinNext(result??)
+            result = transport.join_next() => Select::TransportJoinNext(result?)
         } {
-            Select::JoinNext(()) => unreachable!(),
+            Select::TransportJoinNext(()) => unreachable!(),
             Select::Invoke(None) => break Ok(latencies),
             Select::Invoke(Some((op, result))) => {
                 seq += 1;
@@ -72,7 +70,7 @@ pub async fn client_task(
                     seq,
                     op,
                 };
-                write_message.run(command, &replica_egresses).await?;
+                Transport::write(command, replica_egresses.values()).await?;
                 match &config {
                     // resend for close loop?
                     ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),
@@ -204,7 +202,6 @@ pub async fn server_task(
         config.replica,
         config.tick_interval,
         request_receiver,
-        cancel,
     );
     tokio::try_join!(service_task, replica_task)?;
     Ok(())

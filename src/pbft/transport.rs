@@ -12,7 +12,7 @@ use crate::{
     pbft::{Command, ToClient, ViewNum},
     transport::{
         AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask, ServiceConfig,
-        ServiceTask, WriteMessage, boot_client,
+        ServiceTask, Transport, boot_client,
     },
     workload::{ConcurrentClients, Invoke, Latencies},
 };
@@ -39,13 +39,35 @@ pub async fn client_task(
     config: ClientConfig,
     service_config: ServiceConfig,
     id: ClientId,
-    mut invoke_receiver: Receiver<Invoke>,
+    invoke_receiver: Receiver<Invoke>,
     commit_sender: Sender<ClientId>,
 ) -> anyhow::Result<Histogram<u32>> {
-    let (message_sender, mut message_receiver) = mpsc::channel(64);
-    let (mut read_tasks, replica_egresses) =
-        boot_client(id, service_config, message_sender).await?;
+    let (message_sender, message_receiver) = mpsc::channel(100);
+    let (transport, replica_egresses) = boot_client(id, service_config, message_sender).await?;
 
+    client_task_internal(
+        spec,
+        config,
+        id,
+        invoke_receiver,
+        commit_sender,
+        message_receiver,
+        transport,
+        replica_egresses,
+    )
+    .await
+}
+
+async fn client_task_internal(
+    spec: Spec,
+    config: ClientConfig,
+    id: ClientId,
+    mut invoke_receiver: Receiver<Invoke>,
+    commit_sender: Sender<ClientId>,
+    mut message_receiver: Receiver<message::Reply>,
+    mut transport: Transport,
+    replica_egresses: std::collections::HashMap<u8, Sender<tokio_util::bytes::Bytes>>,
+) -> Result<Histogram<u32>, anyhow::Error> {
     struct SeqScratch {
         results: Quorum<Vec<u8>>,
         expected_result: Option<Vec<u8>>,
@@ -54,21 +76,20 @@ pub async fn client_task(
     let mut seq = 0;
     let mut seq_scratch = BTreeMap::new();
     let mut view_num = 0;
-    let mut write_message = WriteMessage::new();
     let mut latencies = Histogram::new(3)?;
     let start = Instant::now();
     loop {
         enum Select {
             Invoke(Option<Invoke>),
             Message(Option<ToClient>),
-            JoinNext(()),
+            TransportJoinNext(()),
         }
         match tokio::select! {
             invoke = invoke_receiver.recv() => Select::Invoke(invoke),
             message = message_receiver.recv() => Select::Message(message),
-            Some(result) = read_tasks.join_next() => Select::JoinNext(result??)
+            result = transport.join_next() => Select::TransportJoinNext(result?)
         } {
-            Select::JoinNext(()) => unreachable!(),
+            Select::TransportJoinNext(()) => unreachable!(),
             Select::Invoke(None) => break Ok(latencies),
             Select::Invoke(Some((op, result))) => {
                 seq += 1;
@@ -77,12 +98,9 @@ pub async fn client_task(
                     seq,
                     op,
                 };
-                write_message
-                    .run(
-                        command,
-                        [&replica_egresses[spec.primary(view_num) as usize]],
-                    )
-                    .await?;
+                let egress = replica_egresses.get(&spec.primary(view_num));
+                anyhow::ensure!(egress.is_some());
+                Transport::write(command, egress).await?;
                 match &config {
                     // resend for close loop?
                     ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),
@@ -224,7 +242,6 @@ pub async fn server_task(
         config.replica,
         config.tick_interval,
         request_receiver,
-        cancel,
     );
     tokio::try_join!(service_task, replica_task)?;
     Ok(())
