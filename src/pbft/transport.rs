@@ -11,8 +11,8 @@ use crate::{
     common::{ClientId, ClientSeq, Quorum, ReplicaId},
     pbft::{Command, ToClient, ViewNum},
     transport::{
-        AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask, ServiceConfig,
-        ServiceTask, WriteMessage, boot_client,
+        AbstractEgress, AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask,
+        ServiceConfig, ServiceTask, WriteMessage, boot_client,
     },
     workload::{ConcurrentClients, Invoke, Latencies},
 };
@@ -54,6 +54,7 @@ pub async fn client_task(
     let mut seq = 0;
     let mut seq_scratch = BTreeMap::new();
     let mut view_num = 0;
+    let mut write_message = WriteMessage::new();
     let mut latencies = Histogram::new(3)?;
     loop {
         enum Select {
@@ -75,8 +76,11 @@ pub async fn client_task(
                     seq,
                     op,
                 };
-                WriteMessage::new(command)?
-                    .run(&replica_egresses[spec.primary(view_num) as usize])?
+                write_message
+                    .run(
+                        command,
+                        [&replica_egresses[spec.primary(view_num) as usize]],
+                    )
                     .await?;
                 match &config {
                     // resend for close loop?

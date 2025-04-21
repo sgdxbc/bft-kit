@@ -1,11 +1,10 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    io::ErrorKind,
     net::SocketAddr,
     time::Duration,
 };
 
-use bincode::{Decode, Encode, error::DecodeError};
+use bincode::{Decode, error::DecodeError};
 use hdrhistogram::Histogram;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -19,13 +18,13 @@ use tokio::{
 use crate::{
     common::{ClientId, Quorum, ReplicaId},
     pbft::{Command, Replica, ReplicaAction, Spec, ToClient},
-    transport::{ClientConfig, ReplicaConfig, ServiceConfig},
+    transport::{ClientConfig, ReplicaConfig, ServiceConfig, WriteMessage},
     workload::{ConcurrentClients, Invoke, Latencies},
 };
 
 use crate::pbft::{ToReplica, message};
 
-use super::{Finalized, TaskConfig};
+use super::{AbstractEgress, Finalized, TaskConfig};
 
 async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     mut ingress: impl AsyncRead + Unpin,
@@ -458,61 +457,5 @@ async fn service_task(
                 }
             }
         }
-    }
-}
-
-pub struct WriteMessage {
-    encode_bytes: Vec<u8>,
-}
-
-pub trait AbstractEgress {
-    fn write_bytes(self, encode_bytes: &[u8]) -> impl Future<Output = anyhow::Result<()>> + Send;
-}
-
-impl WriteMessage {
-    pub fn new() -> Self {
-        Self {
-            encode_bytes: vec![0; 1 << 16],
-        }
-    }
-
-    pub async fn run<C: AbstractEgress>(
-        &mut self,
-        message: impl Encode,
-        egresses: impl IntoIterator<Item = C>,
-    ) -> anyhow::Result<()> {
-        let len = bincode::encode_into_slice(
-            message,
-            &mut self.encode_bytes,
-            bincode::config::standard(),
-        )?;
-        for egress in egresses {
-            egress.write_bytes(&self.encode_bytes[..len]).await?
-        }
-        Ok(())
-    }
-
-    pub async fn reply_client<C: AbstractEgress>(
-        &mut self,
-        message: impl Encode,
-        egress: C,
-    ) -> anyhow::Result<()> {
-        self.run(message, [egress]).await.or_else(|err| {
-            // if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
-            //     return Ok(());
-            // } else
-            if let Some(err) = err.downcast_ref::<std::io::Error>() {
-                if err.kind() == ErrorKind::BrokenPipe {
-                    return Ok(());
-                }
-            }
-            Err(err)
-        })
-    }
-}
-
-impl Default for WriteMessage {
-    fn default() -> Self {
-        Self::new()
     }
 }

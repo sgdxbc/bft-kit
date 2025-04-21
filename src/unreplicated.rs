@@ -55,13 +55,13 @@ pub mod transport {
             boot_client(id, service_config, message_sender).await?;
 
         let mut seq = 0;
+        let mut write_message = WriteMessage::new();
         let mut latencies = Latencies::new(3)?;
         struct SeqScratch {
             expected_result: Option<Vec<u8>>,
             start: Instant,
         }
         let mut seq_scratch = BTreeMap::new();
-        let start = Instant::now();
         loop {
             enum Select {
                 Invoke(Option<Invoke>),
@@ -82,10 +82,7 @@ pub mod transport {
                         seq,
                         op,
                     };
-                    let write_message = WriteMessage::new(command)?;
-                    for egress in &replica_egresses {
-                        write_message.run(egress)?.await?
-                    }
+                    write_message.run(command, &replica_egresses).await?;
                     match &config {
                         // resend for close loop?
                         ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),
@@ -113,9 +110,7 @@ pub mod transport {
                     if let Some(result) = scratch.expected_result {
                         anyhow::ensure!(reply.result == result)
                     }
-                    if start.elapsed() > WARMUP_DURATION {
-                        latencies += scratch.start.elapsed().as_micros() as u64;
-                    }
+                    latencies += scratch.start.elapsed().as_micros() as u64;
                     commit_sender.send(id).await?
                 }
             }
@@ -175,8 +170,8 @@ pub mod transport {
     }
 
     pub async fn server_task(config: TaskConfig, cancel: CancellationToken) -> anyhow::Result<()> {
-        let (request_sender, mut request_receiver) = mpsc::channel(1000);
-        let (finalized_sender, finalized_receiver) = mpsc::channel(1000);
+        let (request_sender, mut request_receiver) = mpsc::channel(100);
+        let (finalized_sender, finalized_receiver) = mpsc::channel(100);
 
         let service_task = ServiceTask::<ServiceKit>::new(0, request_sender).run(
             config.service,

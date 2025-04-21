@@ -43,6 +43,7 @@ pub async fn client_task(
         boot_client(id, service_config, message_sender).await?;
 
     let mut seq = 0;
+    let mut write_message = WriteMessage::new();
     let mut latencies = Histogram::new(3)?;
     struct SeqScratch {
         results: Quorum<Vec<u8>>,
@@ -70,10 +71,7 @@ pub async fn client_task(
                     seq,
                     op,
                 };
-                let write_message = WriteMessage::new(command)?;
-                for egress in &replica_egresses {
-                    write_message.run(egress)?.await?
-                }
+                write_message.run(command, &replica_egresses).await?;
                 match &config {
                     // resend for close loop?
                     ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),
