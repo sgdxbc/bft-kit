@@ -45,6 +45,7 @@ pub async fn client_task(
     let mut seq = 0;
     let mut write_message = WriteMessage::new();
     let mut latencies = Histogram::new(3)?;
+    let start = Instant::now();
     struct SeqScratch {
         results: Quorum<Vec<u8>>,
         expected_result: Option<Vec<u8>>,
@@ -111,7 +112,10 @@ pub async fn client_task(
                     if let Some(result) = scratch.expected_result {
                         anyhow::ensure!(reply.result == result)
                     }
-                    latencies += scratch.start.elapsed().as_micros() as u64;
+                    let end = Instant::now();
+                    if end.duration_since(start) >= WARMUP_DURATION {
+                        latencies += end.duration_since(scratch.start).as_micros() as u64;
+                    }
                     commit_sender.send(id).await?
                 }
             }

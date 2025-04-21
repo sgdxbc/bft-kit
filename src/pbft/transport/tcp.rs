@@ -1,10 +1,11 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    io::ErrorKind,
     net::SocketAddr,
     time::Duration,
 };
 
-use bincode::{Decode, error::DecodeError};
+use bincode::{Decode, Encode, error::DecodeError};
 use hdrhistogram::Histogram;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -17,14 +18,12 @@ use tokio::{
 
 use crate::{
     common::{ClientId, Quorum, ReplicaId},
-    pbft::{Command, Replica, ReplicaAction, Spec, ToClient},
-    transport::{ClientConfig, ReplicaConfig, ServiceConfig, WriteMessage},
+    pbft::{Command, Replica, ReplicaAction, Spec, ToClient, ToReplica, message},
+    transport::{ClientConfig, ReplicaConfig, ServiceConfig},
     workload::{ConcurrentClients, Invoke, Latencies},
 };
 
-use crate::pbft::{ToReplica, message};
-
-use super::{AbstractEgress, Finalized, TaskConfig};
+use super::{Finalized, TaskConfig, WARMUP_DURATION};
 
 async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     mut ingress: impl AsyncRead + Unpin,
@@ -124,6 +123,7 @@ pub async fn client_task(
     let mut view_num = 0;
     let mut write_message = WriteMessage::new();
     let mut latencies = Histogram::new(3)?;
+    let start = Instant::now();
     loop {
         enum Select {
             Invoke(Option<Invoke>),
@@ -190,7 +190,10 @@ pub async fn client_task(
                     if let Some(result) = scratch.expected_result {
                         anyhow::ensure!(reply.result == result)
                     }
-                    latencies += scratch.start.elapsed().as_micros() as u64;
+                    let end = Instant::now();
+                    if end.duration_since(start) >= WARMUP_DURATION {
+                        latencies += end.duration_since(scratch.start).as_micros() as u64;
+                    }
                     commit_sender.send(id).await?
                 }
             }
@@ -457,5 +460,61 @@ async fn service_task(
                 }
             }
         }
+    }
+}
+
+pub struct WriteMessage {
+    encode_bytes: Vec<u8>,
+}
+
+pub trait AbstractEgress {
+    fn write_bytes(self, encode_bytes: &[u8]) -> impl Future<Output = anyhow::Result<()>> + Send;
+}
+
+impl WriteMessage {
+    pub fn new() -> Self {
+        Self {
+            encode_bytes: vec![0; 1 << 16],
+        }
+    }
+
+    pub async fn run<C: AbstractEgress>(
+        &mut self,
+        message: impl Encode,
+        egresses: impl IntoIterator<Item = C>,
+    ) -> anyhow::Result<()> {
+        let len = bincode::encode_into_slice(
+            message,
+            &mut self.encode_bytes,
+            bincode::config::standard(),
+        )?;
+        for egress in egresses {
+            egress.write_bytes(&self.encode_bytes[..len]).await?
+        }
+        Ok(())
+    }
+
+    pub async fn reply_client<C: AbstractEgress>(
+        &mut self,
+        message: impl Encode,
+        egress: C,
+    ) -> anyhow::Result<()> {
+        self.run(message, [egress]).await.or_else(|err| {
+            // if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
+            //     return Ok(());
+            // } else
+            if let Some(err) = err.downcast_ref::<std::io::Error>() {
+                if err.kind() == ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+            }
+            Err(err)
+        })
+    }
+}
+
+impl Default for WriteMessage {
+    fn default() -> Self {
+        Self::new()
     }
 }

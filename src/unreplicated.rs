@@ -57,6 +57,7 @@ pub mod transport {
         let mut seq = 0;
         let mut write_message = WriteMessage::new();
         let mut latencies = Latencies::new(3)?;
+        let start = Instant::now();
         struct SeqScratch {
             expected_result: Option<Vec<u8>>,
             start: Instant,
@@ -110,7 +111,10 @@ pub mod transport {
                     if let Some(result) = scratch.expected_result {
                         anyhow::ensure!(reply.result == result)
                     }
-                    latencies += scratch.start.elapsed().as_micros() as u64;
+                    let end = Instant::now();
+                    if end.duration_since(start) >= WARMUP_DURATION {
+                        latencies += end.duration_since(scratch.start).as_micros() as u64;
+                    }
                     commit_sender.send(id).await?
                 }
             }
@@ -170,8 +174,8 @@ pub mod transport {
     }
 
     pub async fn server_task(config: TaskConfig, cancel: CancellationToken) -> anyhow::Result<()> {
-        let (request_sender, mut request_receiver) = mpsc::channel(100);
-        let (finalized_sender, finalized_receiver) = mpsc::channel(100);
+        let (request_sender, mut request_receiver) = mpsc::channel(1000);
+        let (finalized_sender, finalized_receiver) = mpsc::channel(1000);
 
         let service_task = ServiceTask::<ServiceKit>::new(0, request_sender).run(
             config.service,

@@ -11,8 +11,8 @@ use crate::{
     common::{ClientId, ClientSeq, Quorum, ReplicaId},
     pbft::{Command, ToClient, ViewNum},
     transport::{
-        AbstractEgress, AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask,
-        ServiceConfig, ServiceTask, WriteMessage, boot_client,
+        AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask, ServiceConfig,
+        ServiceTask, WriteMessage, boot_client,
     },
     workload::{ConcurrentClients, Invoke, Latencies},
 };
@@ -56,6 +56,7 @@ pub async fn client_task(
     let mut view_num = 0;
     let mut write_message = WriteMessage::new();
     let mut latencies = Histogram::new(3)?;
+    let start = Instant::now();
     loop {
         enum Select {
             Invoke(Option<Invoke>),
@@ -122,7 +123,10 @@ pub async fn client_task(
                     if let Some(result) = scratch.expected_result {
                         anyhow::ensure!(reply.result == result)
                     }
-                    latencies += scratch.start.elapsed().as_micros() as u64;
+                    let end = Instant::now();
+                    if end.duration_since(start) >= WARMUP_DURATION {
+                        latencies += end.duration_since(scratch.start).as_micros() as u64;
+                    }
                     commit_sender.send(id).await?
                 }
             }
