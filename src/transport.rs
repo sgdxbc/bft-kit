@@ -1,9 +1,9 @@
 use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
 
 use bincode::{Decode, Encode};
-use quinn::{AckFrequencyConfig, Connection, ConnectionError, Endpoint, Incoming};
+use quinn::{Connection, ConnectionError, Endpoint, Incoming, TransportConfig};
 use tokio::{
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Receiver, Sender, error::TrySendError},
     task::JoinSet,
     time::sleep,
     try_join,
@@ -36,7 +36,10 @@ pub async fn read_task<M: Decode<()> + Send + Sync + 'static>(
         let (message, len) =
             bincode::decode_from_slice(&decode_bytes[..offset], bincode::config::standard())?;
         anyhow::ensure!(len == offset); //
-        read_sender.send(message).await?;
+        // read_sender.send(message).await?;
+        if !checked_send(&read_sender, message).await? {
+            tracing::warn!("request channel full");
+        }
     }
 }
 
@@ -198,14 +201,9 @@ where
     where
         <Self as AbstractService>::Reply: Encode,
     {
-        let mut transport = quinn::TransportConfig::default();
+        let mut transport = TransportConfig::default();
         transport.max_idle_timeout(None);
         transport.max_concurrent_uni_streams((1u32 << 12).into());
-        transport.ack_frequency_config({
-            let mut config = AckFrequencyConfig::default();
-            config.ack_eliciting_threshold(0u32.into());
-            Some(config)
-        });
         let external_endpoint = Endpoint::server(
             // server_config(),
             {
@@ -273,7 +271,12 @@ where
                         };
                         write_message.reply_client(reply, egress).await?
                     }
-                    _ => self.request_sender.send(command).await?,
+                    // _ => self.request_sender.send(command).await?,
+                    _ => {
+                        if !checked_send(&self.request_sender, command).await? {
+                            tracing::warn!("request channel full");
+                        }
+                    }
                 },
                 Finalized(Some(finalized)) => {
                     for (client_id, reply) in self.on_finalized(finalized) {
@@ -315,14 +318,8 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     message_sender: Sender<M>,
     cancel: CancellationToken,
 ) -> anyhow::Result<BootReplica> {
-    let mut transport = quinn::TransportConfig::default();
+    let mut transport = TransportConfig::default();
     transport.max_idle_timeout(None);
-    transport.max_concurrent_uni_streams((1u32 << 12).into());
-    transport.ack_frequency_config({
-        let mut config = AckFrequencyConfig::default();
-        config.ack_eliciting_threshold(0u32.into());
-        Some(config)
-    });
     let transport = Arc::new(transport);
     let mut internal_endpoint = Endpoint::server(
         // server_config(),
@@ -515,11 +512,28 @@ where
                     .await?
             }
             ReplicaAction::Finalize(commands) => {
-                task.finalized_sender
-                    .send(task.replica.finalized(commands))
-                    .await?
+                // task.finalized_sender
+                //     .send(task.replica.finalized(commands))
+                //     .await?
+                if !checked_send(&task.finalized_sender, task.replica.finalized(commands)).await? {
+                    tracing::warn!("finalized channel full");
+                }
             }
         }
         Ok(())
     }
+}
+
+pub async fn checked_send<T: Send + Sync + 'static>(
+    sender: &Sender<T>,
+    value: T,
+) -> anyhow::Result<bool> {
+    let Err(err) = sender.try_send(value) else {
+        return Ok(true);
+    };
+    let TrySendError::Full(value) = err else {
+        anyhow::bail!(err)
+    };
+    sender.send(value).await?;
+    Ok(false)
 }

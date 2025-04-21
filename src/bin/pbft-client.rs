@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config_path = PathBuf::from(args().nth(1).unwrap_or("client.conf".into()));
     let mut options = Options::new();
-    if config_path.exists() {
+    if config_path.is_file() {
         options.parse(&read_to_string(&config_path).await?);
     }
     options.parse(&read_to_string(config_path.with_file_name("common.conf")).await?);

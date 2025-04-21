@@ -25,8 +25,8 @@ pub mod transport {
     use crate::{
         common::{ClientId, ClientSeq, Command},
         transport::{
-            AbstractService, ClientConfig, ReplicaConfig, ServiceConfig, ServiceTask, WriteMessage,
-            boot_client,
+            AbstractService, ClientConfig, ServiceConfig, ServiceTask, WriteMessage, boot_client,
+            checked_send,
         },
         workload::{ConcurrentClients, Invoke, Latencies},
     };
@@ -36,11 +36,9 @@ pub mod transport {
     #[derive(Debug, Clone)]
     pub struct TaskConfig {
         pub client: ClientConfig,
-        pub replica: ReplicaConfig,
         pub service: ServiceConfig,
         pub num_client: usize,
         pub client_duration: Duration,
-        pub tick_interval: Duration,
     }
 
     pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
@@ -186,11 +184,33 @@ pub mod transport {
                 .await
                 .flatten()
             {
-                finalized_sender.send(command).await?
+                // finalized_sender.send(command).await?
+                if !checked_send(&finalized_sender, command).await? {
+                    tracing::warn!("finalized channel full");
+                }
             }
             Ok(())
         };
         tokio::try_join!(service_task, replica_task)?;
         Ok(())
+    }
+}
+
+mod parse {
+    use std::time::Duration;
+
+    use crate::parse::Options;
+
+    impl TryFrom<Options> for super::transport::TaskConfig {
+        type Error = anyhow::Error; // TODO
+
+        fn try_from(options: Options) -> Result<Self, Self::Error> {
+            Ok(Self {
+                client: options.clone().try_into()?,
+                service: options.clone().try_into()?,
+                num_client: options.get("num_client")?,
+                client_duration: Duration::from_secs_f32(options.get("client_duration")?),
+            })
+        }
     }
 }

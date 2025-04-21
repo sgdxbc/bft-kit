@@ -1,9 +1,9 @@
 use std::{env::args, path::PathBuf};
 
 use bft_kit::{
-    hotstuff::transport::{TaskConfig, WARMUP_DURATION, clients_task},
     init_logging,
     parse::Options,
+    unreplicated::transport::{TaskConfig, WARMUP_DURATION, clients_task},
     workload::report_latencies,
 };
 use tokio::fs::read_to_string;
@@ -21,8 +21,9 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(config_path.with_file_name("common.conf")).await?);
     options.parse(&read_to_string(config_path.with_file_name("network.conf")).await?);
 
-    let config = TaskConfig::try_from(options.clone())?;
-    let client_latencies = clients_task(options.try_into()?, config.clone())
+    let mut config = TaskConfig::try_from(options.clone())?;
+    config.service.server_external_addresses.truncate(1);
+    let client_latencies = clients_task(config.clone())
         .instrument(tracing::info_span!("concurrent close loops"))
         .await?;
 
