@@ -8,6 +8,7 @@ pub mod pbft;
 #[cfg(test)]
 pub mod testing; // no test inside, common infrastructure for writing tests
 pub mod transport;
+pub mod unreplicated;
 pub mod workload;
 
 // similar to tracing_subscriber::fmt::init() but reports spans

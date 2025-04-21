@@ -32,7 +32,8 @@
         "sidenote",
         "sidenotes",
         "Sonnino",
-        "specpaxos"
+        "specpaxos",
+        "unreplicated"
     ],
     "ignoreWords": [],
     "import": []

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
 
 use bincode::{Decode, Encode};
-use quinn::{Connection, ConnectionError, Endpoint, Incoming};
+use quinn::{AckFrequencyConfig, Connection, ConnectionError, Endpoint, Incoming};
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
@@ -201,12 +201,16 @@ where
         let mut transport = quinn::TransportConfig::default();
         transport.max_idle_timeout(None);
         transport.max_concurrent_uni_streams((1u32 << 12).into());
-        let transport = Arc::new(transport);
+        transport.ack_frequency_config({
+            let mut config = AckFrequencyConfig::default();
+            config.ack_eliciting_threshold(0u32.into());
+            Some(config)
+        });
         let external_endpoint = Endpoint::server(
             // server_config(),
             {
                 let mut config = server_config();
-                config.transport_config(transport.clone());
+                config.transport_config(transport.into());
                 config
             },
             config.server_external_addresses[self.replica_id as usize],
@@ -314,6 +318,11 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(None);
     transport.max_concurrent_uni_streams((1u32 << 12).into());
+    transport.ack_frequency_config({
+        let mut config = AckFrequencyConfig::default();
+        config.ack_eliciting_threshold(0u32.into());
+        Some(config)
+    });
     let transport = Arc::new(transport);
     let mut internal_endpoint = Endpoint::server(
         // server_config(),
