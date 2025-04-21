@@ -1,6 +1,7 @@
-use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use bincode::{Decode, Encode};
+use bytes::Bytes;
 use quinn::{Connection, ConnectionError, Endpoint, Incoming, TransportConfig};
 use tokio::{
     sync::mpsc::{self, Receiver, Sender, error::TrySendError},
@@ -44,64 +45,45 @@ pub async fn read_task<M: Decode<()> + Send + Sync + 'static>(
 }
 
 pub struct WriteMessage {
-    encode_bytes: Vec<u8>,
-}
-
-pub trait AbstractEgress {
-    fn write_bytes(self, encode_bytes: &[u8]) -> impl Future<Output = anyhow::Result<()>> + Send;
+    encode_bytes: Bytes,
 }
 
 impl WriteMessage {
-    pub fn new() -> Self {
-        Self {
-            encode_bytes: vec![0; 1 << 16],
-        }
-    }
-
-    pub async fn run<C: AbstractEgress>(
-        &mut self,
-        message: impl Encode,
-        egresses: impl IntoIterator<Item = C>,
-    ) -> anyhow::Result<()> {
-        let len = bincode::encode_into_slice(
-            message,
-            &mut self.encode_bytes,
-            bincode::config::standard(),
-        )?;
-        for egress in egresses {
-            egress.write_bytes(&self.encode_bytes[..len]).await?
-        }
-        Ok(())
-    }
-
-    pub async fn reply_client<C: AbstractEgress>(
-        &mut self,
-        message: impl Encode,
-        egress: C,
-    ) -> anyhow::Result<()> {
-        self.run(message, [egress]).await.or_else(|err| {
-            if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
-                return Ok(());
-            } else if let Some(err) = err.downcast_ref::<std::io::Error>() {
-                if err.kind() == ErrorKind::BrokenPipe {
-                    return Ok(());
-                }
-            }
-            Err(err)
+    pub fn new(message: impl Encode) -> anyhow::Result<Self> {
+        Ok(Self {
+            encode_bytes: bincode::encode_to_vec(message, bincode::config::standard())?.into(),
         })
     }
-}
 
-impl Default for WriteMessage {
-    fn default() -> Self {
-        Self::new()
+    pub fn run(
+        &self,
+        egress: &Connection,
+    ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
+        let bytes = self.encode_bytes.clone();
+        let egress = egress.clone();
+        Ok(async move {
+            let mut stream = egress.open_uni().await?;
+            stream.write_all(&bytes).await?;
+            Ok(())
+        })
     }
-}
 
-impl AbstractEgress for &'_ Connection {
-    async fn write_bytes(self, encode_bytes: &[u8]) -> anyhow::Result<()> {
-        self.open_uni().await?.write_all(encode_bytes).await?;
-        Ok(())
+    pub fn reply_client(
+        self,
+        egress: &Connection,
+    ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
+        let egress = egress.clone();
+        Ok(async move {
+            let stream = match egress.open_uni().await {
+                Ok(stream) => Some(stream),
+                Err(ConnectionError::ApplicationClosed(_)) => None,
+                Err(err) => anyhow::bail!(err),
+            };
+            if let Some(mut stream) = stream {
+                stream.write_all(&self.encode_bytes).await?
+            }
+            Ok(())
+        })
     }
 }
 
@@ -214,15 +196,16 @@ where
             config.server_external_addresses[self.replica_id as usize],
         )?;
         let mut read_tasks = JoinSet::new();
+        let mut write_tasks = JoinSet::new();
         let mut client_egresses = HashMap::new();
-        let mut write_message = WriteMessage::new();
         let (message_sender, mut message_receiver) = mpsc::channel(1 << 12);
         loop {
             enum Select<F> {
                 Accept(Option<Incoming>),
                 Message(Option<Command>),
                 Finalized(Option<F>),
-                JoinNext(anyhow::Result<()>),
+                ReadJoinNext(anyhow::Result<()>),
+                WriteJoinNext(()),
                 Cancel,
             }
             use Select::*;
@@ -230,19 +213,21 @@ where
                 accept = external_endpoint.accept() => Accept(accept),
                 message = message_receiver.recv() => Message(message),
                 finalize = finalized_receiver.recv() => Finalized(finalize),
-                Some(result) = read_tasks.join_next() => JoinNext(result?),
+                Some(result) = read_tasks.join_next() => ReadJoinNext(result?),
+                Some(result) = write_tasks.join_next() => WriteJoinNext(result??),
                 () = cancel.cancelled() => Cancel,
             } {
-                Cancel | JoinNext(Ok(())) | Finalized(None) => {
+                Cancel | ReadJoinNext(Ok(())) | Finalized(None) => {
                     anyhow::ensure!(cancel.is_cancelled());
                     break;
                 }
-                JoinNext(Err(err)) => 'join_err: {
+                ReadJoinNext(Err(err)) => 'join_err: {
                     if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
                         break 'join_err;
                     }
                     anyhow::bail!(err)
                 }
+                WriteJoinNext(()) => {}
                 Accept(None) => anyhow::bail!("endpoint closed"),
                 Accept(Some(incoming)) => {
                     let connection = incoming.await?;
@@ -269,7 +254,7 @@ where
                         let Some(egress) = client_egresses.get(&command.client_id) else {
                             anyhow::bail!("send to unexpected client id {}", command.client_id)
                         };
-                        write_message.reply_client(reply, egress).await?
+                        write_tasks.spawn(WriteMessage::new(reply)?.reply_client(egress)?);
                     }
                     // _ => self.request_sender.send(command).await?,
                     _ => {
@@ -283,7 +268,7 @@ where
                         let Some(egress) = client_egresses.get(&client_id) else {
                             anyhow::bail!("send to unexpected client id {client_id}")
                         };
-                        write_message.reply_client(&reply, egress).await?
+                        write_tasks.spawn(WriteMessage::new(reply)?.reply_client(egress)?);
                     }
                 }
             }
@@ -405,7 +390,7 @@ pub struct ReplicaTask<R: AbstractReplica> {
     pub replica_egresses: HashMap<ReplicaId, Connection>,
     pub finalized_sender: Sender<R::Finalized>,
     pub replica: R,
-    pub write_message: WriteMessage,
+    pub write_tasks: JoinSet<anyhow::Result<()>>,
 }
 
 pub trait Effect<R>
@@ -421,7 +406,7 @@ impl<R: AbstractReplica> ReplicaTask<R> {
             replica_egresses: Default::default(),
             finalized_sender,
             replica,
-            write_message: WriteMessage::new(),
+            write_tasks: JoinSet::new(),
         }
     }
 
@@ -455,7 +440,8 @@ impl<R: AbstractReplica> ReplicaTask<R> {
                 Sleep,
                 Request(Option<Command>),
                 Message(Option<M>),
-                JoinNext(()),
+                ReadJoinNext(()),
+                WriteJoinNext(()),
                 Cancel,
             }
             use Select::*;
@@ -463,13 +449,15 @@ impl<R: AbstractReplica> ReplicaTask<R> {
                 () = sleep(tick_interval) => Sleep,
                 request = request_receiver.recv() => Request(request),
                 message = message_receiver.recv() => Message(message),
-                Some(result) = read_tasks.join_next() => JoinNext(result??),
+                Some(result) = read_tasks.join_next() => ReadJoinNext(result??),
+                Some(result) = self.write_tasks.join_next() => WriteJoinNext(result??),
                 () = cancel.cancelled() => Cancel,
             } {
-                Cancel | Message(None) | Request(None) | JoinNext(()) => {
+                Cancel | Message(None) | Request(None) | ReadJoinNext(()) => {
                     anyhow::ensure!(cancel.is_cancelled());
                     break;
                 }
+                WriteJoinNext(()) => {}
                 Sleep => self.replica.tick(&mut actions),
                 Request(Some(command)) => self.replica.request(command, &mut actions),
                 Message(Some(message)) => self.replica.receive(message, &mut actions),
@@ -499,24 +487,24 @@ where
     async fn effect(self, task: &mut ReplicaTask<R>) -> anyhow::Result<()> {
         match self {
             ReplicaAction::SendToReplica(replica_id, message) => {
-                let egress = task.replica_egresses.get(&replica_id);
-                anyhow::ensure!(
-                    egress.is_some(),
-                    "send to unexpected replica id {replica_id}"
-                );
-                task.write_message.run(message, egress).await?
+                let Some(egress) = task.replica_egresses.get(&replica_id) else {
+                    anyhow::bail!("send to unexpected replica id {replica_id}");
+                };
+                task.write_tasks
+                    .spawn(WriteMessage::new(message)?.run(egress)?);
             }
             ReplicaAction::SendToAllReplicas(message) => {
-                task.write_message
-                    .run(message, task.replica_egresses.values())
-                    .await?
+                let write_message = WriteMessage::new(message)?;
+                for egress in task.replica_egresses.values() {
+                    task.write_tasks.spawn(write_message.run(egress)?);
+                }
             }
             ReplicaAction::Finalize(commands) => {
                 // task.finalized_sender
                 //     .send(task.replica.finalized(commands))
                 //     .await?
                 if !checked_send(&task.finalized_sender, task.replica.finalized(commands)).await? {
-                    tracing::warn!("finalized channel full");
+                    // tracing::warn!("finalized channel full");
                 }
             }
         }

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = { version = "1.0.97", features = ["backtrace"] }
 bincode = "2.0.1"
+bytes = "1.10.1"
 futures = { version = "0.3.31", default-features = false, features = ["std"] }
 givre = { version = "0.2.0", features = ["cggmp21-keygen", "ciphersuite-secp256k1", "spof"] }
 hdrhistogram = "7.5.4"
