@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap, future::pending, io::ErrorKind, net::SocketAddr, sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, future::pending, net::SocketAddr, sync::Arc, time::Duration};
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint, Incoming, TransportConfig};
@@ -100,94 +97,6 @@ impl Default for Transport {
     }
 }
 
-pub async fn read_task<M: Decode<()> + Send + Sync + 'static>(
-    ingress: Connection,
-    read_sender: Sender<M>,
-    cancel: CancellationToken,
-) -> anyhow::Result<()> {
-    let mut decode_bytes = vec![0; 1 << 16];
-    loop {
-        let mut stream = match cancel.run_until_cancelled(ingress.accept_uni()).await {
-            None => break Ok(()),
-            Some(Ok(stream)) => stream,
-            Some(Err(err)) => anyhow::bail!(err),
-        };
-        let mut offset = 0;
-        while let Some(len) = stream.read(&mut decode_bytes).await? {
-            offset += len
-        }
-        let (message, len) =
-            bincode::decode_from_slice(&decode_bytes[..offset], bincode::config::standard())?;
-        anyhow::ensure!(len == offset); //
-        // read_sender.send(message).await?;
-        if !checked_send(&read_sender, message).await? {
-            tracing::warn!("request channel full");
-        }
-    }
-}
-
-pub struct WriteMessage {
-    encode_bytes: Vec<u8>,
-}
-
-pub trait AbstractEgress {
-    fn write_bytes(self, encode_bytes: &[u8]) -> impl Future<Output = anyhow::Result<()>> + Send;
-}
-
-impl WriteMessage {
-    pub fn new() -> Self {
-        Self {
-            encode_bytes: vec![0; 1 << 16],
-        }
-    }
-
-    pub async fn run<C: AbstractEgress>(
-        &mut self,
-        message: impl Encode,
-        egresses: impl IntoIterator<Item = C>,
-    ) -> anyhow::Result<()> {
-        let len = bincode::encode_into_slice(
-            message,
-            &mut self.encode_bytes,
-            bincode::config::standard(),
-        )?;
-        for egress in egresses {
-            egress.write_bytes(&self.encode_bytes[..len]).await?
-        }
-        Ok(())
-    }
-
-    pub async fn reply_client<C: AbstractEgress>(
-        &mut self,
-        message: impl Encode,
-        egress: C,
-    ) -> anyhow::Result<()> {
-        self.run(message, [egress]).await.or_else(|err| {
-            if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
-                return Ok(());
-            } else if let Some(err) = err.downcast_ref::<std::io::Error>() {
-                if err.kind() == ErrorKind::BrokenPipe {
-                    return Ok(());
-                }
-            }
-            Err(err)
-        })
-    }
-}
-
-impl Default for WriteMessage {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AbstractEgress for &'_ Connection {
-    async fn write_bytes(self, encode_bytes: &[u8]) -> anyhow::Result<()> {
-        self.open_uni().await?.write_all(encode_bytes).await?;
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum ClientConfig {
     CloseLoop,
@@ -210,7 +119,7 @@ pub struct ServiceConfig {
     pub server_external_addresses: HashMap<ReplicaId, SocketAddr>,
 }
 
-type TransportAndSenders = (Transport, HashMap<ReplicaId, Sender<Bytes>>);
+pub type TransportAndSenders = (Transport, HashMap<ReplicaId, Sender<Bytes>>);
 
 pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
     id: ClientId,
@@ -339,7 +248,6 @@ where
                         );
                         Transport::write(reply, sender).await?
                     }
-                    // _ => self.request_sender.send(command).await?,
                     _ => {
                         if !checked_send(&self.request_sender, command).await? {
                             tracing::warn!("request channel full");
@@ -486,7 +394,7 @@ impl<R: AbstractReplica> ReplicaTask<R> {
     }
 
     pub async fn run(
-        mut self,
+        self,
         replica_id: ReplicaId,
         config: ReplicaConfig,
         tick_interval: Duration,
@@ -496,27 +404,27 @@ impl<R: AbstractReplica> ReplicaTask<R> {
         R::Action: Effect<R>,
         R::Message: Decode<()> + Send + Sync + 'static,
     {
-        let (message_sender, message_receiver) = mpsc::channel(100);
-        let transport;
-        (transport, self.write_senders) = boot_replica(replica_id, config, message_sender).await?;
-        tracing::info!("replica ready");
-
-        self.run_internal(tick_interval, request_receiver, message_receiver, transport)
-            .await
+        self.run_with_bootstrap(tick_interval, request_receiver, |message_sender| {
+            boot_replica(replica_id, config, message_sender)
+        })
+        .await
     }
 
-    pub async fn run_internal(
+    pub async fn run_with_bootstrap(
         mut self,
         tick_interval: Duration,
         mut request_receiver: Receiver<Command>,
-        mut message_receiver: Receiver<R::Message>,
-        mut transport: Transport,
+        bootstrap: impl AsyncFnOnce(Sender<R::Message>) -> anyhow::Result<TransportAndSenders>,
     ) -> Result<(), anyhow::Error>
     where
         R::Action: Effect<R>,
     {
-        let mut actions = Vec::new();
+        let (message_sender, mut message_receiver) = mpsc::channel(100);
+        let mut transport;
+        (transport, self.write_senders) = bootstrap(message_sender).await?;
+        tracing::info!("replica ready");
 
+        let mut actions = Vec::new();
         self.replica.init(&mut actions);
         loop {
             for action in actions.drain(..) {
@@ -569,9 +477,6 @@ where
                 Transport::write(message, task.write_senders.values()).await?
             }
             ReplicaAction::Finalize(commands) => {
-                // task.finalized_sender
-                //     .send(task.replica.finalized(commands))
-                //     .await?
                 if !checked_send(&task.finalized_sender, task.replica.finalized(commands)).await? {
                     tracing::warn!("finalized channel full");
                 }

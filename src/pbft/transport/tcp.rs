@@ -27,18 +27,19 @@ pub async fn client_task(
     invoke_receiver: Receiver<Invoke>,
     commit_sender: Sender<ClientId>,
 ) -> anyhow::Result<Latencies> {
-    let (message_sender, message_receiver) = mpsc::channel(64);
-    let (transport, replica_egresses) = boot_client(id, service_config, message_sender).await?;
-    sleep(Duration::from_millis(100)).await;
-    super::client_task_internal(
+    super::client_task_with_bootstrap(
         spec,
         config,
         id,
         invoke_receiver,
         commit_sender,
-        message_receiver,
-        transport,
-        replica_egresses,
+        |message_sender| async {
+            let boot = boot_client(id, service_config, message_sender).await?;
+            // when there are many clients backup replicas may send replies before accepting
+            // connections from those clients, so wait a bit to request
+            sleep(Duration::from_millis(100)).await;
+            Ok(boot)
+        },
     )
     .await
 }
@@ -69,48 +70,29 @@ pub async fn clients_task(spec: Spec, config: TaskConfig) -> anyhow::Result<Vec<
 
 pub async fn server_task(replica: Replica, config: TaskConfig) -> anyhow::Result<()> {
     let (request_sender, request_receiver) = mpsc::channel(100);
-    let (finalize_sender, finalize_receiver) = mpsc::channel(100);
+    let (finalized_sender, finalized_receiver) = mpsc::channel(100);
 
     let replica_id = replica.core.config.id;
     let service_task = service_task(
         replica_id,
         config.service.clone(),
         request_sender,
-        finalize_receiver,
+        finalized_receiver,
     );
-    let replica_task = replica_task(replica, config, request_receiver, finalize_sender);
-    tokio::try_join!(service_task, replica_task)?;
-    unreachable!()
-}
-
-async fn replica_task(
-    replica: Replica,
-    config: TaskConfig,
-    request_receiver: Receiver<Command>,
-    finalized_sender: Sender<Finalized>,
-) -> anyhow::Result<()> {
-    let replica_id = replica.core.config.id;
-    let mut task = ReplicaTask::new(replica, finalized_sender);
-    let transport;
-    let (message_sender, message_receiver) = mpsc::channel(100);
-    (transport, task.write_senders) =
-        boot_replica(replica_id, config.replica, message_sender).await?;
-    tracing::info!("replica ready");
-
-    task.run_internal(
+    let replica_task = ReplicaTask::new(replica, finalized_sender).run_with_bootstrap(
         config.tick_interval,
         request_receiver,
-        message_receiver,
-        transport,
-    )
-    .await
+        |message_sender| boot_replica(replica_id, config.replica, message_sender),
+    );
+    tokio::try_join!(service_task, replica_task)?;
+    unreachable!()
 }
 
 async fn service_task(
     replica_id: ReplicaId,
     config: ServiceConfig,
     request_sender: Sender<Command>,
-    mut finalize_receiver: Receiver<Finalized>,
+    mut finalized_receiver: Receiver<Finalized>,
 ) -> anyhow::Result<()> {
     let mut replies = HashMap::<ClientId, message::Reply>::new();
     let external_listener =
@@ -129,7 +111,7 @@ async fn service_task(
         match tokio::select! {
             accept = external_listener.accept() => Accept(accept?),
             message = message_receiver.recv() => Message(message),
-            finalize = finalize_receiver.recv() => Select::Finalize(finalize),
+            finalize = finalized_receiver.recv() => Select::Finalize(finalize),
             result = transport.join_next() => TransportJoinNext(result),
         } {
             TransportJoinNext(Ok(())) | Message(None) => unreachable!(),

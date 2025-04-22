@@ -12,7 +12,7 @@ use crate::{
     pbft::{Command, ToClient, ViewNum},
     transport::{
         AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask, ServiceConfig,
-        ServiceTask, Transport, boot_client,
+        ServiceTask, Transport, TransportAndSenders, boot_client,
     },
     workload::{ConcurrentClients, Invoke, Latencies},
 };
@@ -42,32 +42,28 @@ pub async fn client_task(
     invoke_receiver: Receiver<Invoke>,
     commit_sender: Sender<ClientId>,
 ) -> anyhow::Result<Histogram<u32>> {
-    let (message_sender, message_receiver) = mpsc::channel(100);
-    let (transport, replica_egresses) = boot_client(id, service_config, message_sender).await?;
-
-    client_task_internal(
+    client_task_with_bootstrap(
         spec,
         config,
         id,
         invoke_receiver,
         commit_sender,
-        message_receiver,
-        transport,
-        replica_egresses,
+        |message_sender| boot_client(id, service_config, message_sender),
     )
     .await
 }
 
-async fn client_task_internal(
+async fn client_task_with_bootstrap(
     spec: Spec,
     config: ClientConfig,
     id: ClientId,
     mut invoke_receiver: Receiver<Invoke>,
     commit_sender: Sender<ClientId>,
-    mut message_receiver: Receiver<message::Reply>,
-    mut transport: Transport,
-    replica_egresses: std::collections::HashMap<u8, Sender<tokio_util::bytes::Bytes>>,
-) -> Result<Histogram<u32>, anyhow::Error> {
+    bootstrap: impl AsyncFnOnce(Sender<ToClient>) -> anyhow::Result<TransportAndSenders>,
+) -> anyhow::Result<Latencies> {
+    let (message_sender, mut message_receiver) = mpsc::channel(100);
+    let (mut transport, replica_egresses) = bootstrap(message_sender).await?;
+
     struct SeqScratch {
         results: Quorum<Vec<u8>>,
         expected_result: Option<Vec<u8>>,
