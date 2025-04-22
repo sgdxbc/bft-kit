@@ -3,6 +3,7 @@ use std::{env::args, path::PathBuf};
 use bft_kit::{
     init_logging,
     parse::Options,
+    transport::ClientConfig::CloseLoop,
     unreplicated::transport::{TaskConfig, WARMUP_DURATION, clients_task},
     workload::report_latencies,
 };
@@ -22,6 +23,7 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(config_path.with_file_name("network.conf")).await?);
 
     let mut config = TaskConfig::try_from(options.clone())?;
+    anyhow::ensure!(matches!(config.client, CloseLoop), "unimplemented");
     config
         .service
         .server_external_addresses
