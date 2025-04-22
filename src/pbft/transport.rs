@@ -228,7 +228,7 @@ pub async fn server_task(
     config: TaskConfig,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let (request_sender, request_receiver) = mpsc::channel(100);
+    let (request_sender, request_receiver) = mpsc::channel(1000);
     let (finalized_sender, finalized_receiver) = mpsc::channel(100);
 
     let replica_id = replica.core.config.id;

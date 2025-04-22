@@ -228,7 +228,7 @@ pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
             .await?
             .write_all(&id.to_le_bytes())
             .await?;
-        let (write_sender, write_receiver) = mpsc::channel(100);
+        let (write_sender, write_receiver) = mpsc::channel(1000);
         transport.add_connection(connection, message_sender.clone(), write_receiver);
         write_senders.insert(replica_id, write_sender);
     }
@@ -322,7 +322,7 @@ where
                         .await?;
                     let client_id = ClientId::from_le_bytes(client_id);
                     tracing::debug!(%client_id, "accept client connection");
-                    let (write_sender, write_receiver) = mpsc::channel(100);
+                    let (write_sender, write_receiver) = mpsc::channel(1000);
                     transport.add_connection(connection, message_sender.clone(), write_receiver);
                     let replaced = write_senders.insert(client_id, write_sender);
                     anyhow::ensure!(replaced.is_none());
@@ -356,7 +356,10 @@ where
                         Transport::write(reply, sender).await?
                     }
                 }
-                TransportJoinNext(Err(err)) => {
+                TransportJoinNext(Err(err)) => 'transport_err: {
+                    if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
+                        break 'transport_err;
+                    }
                     tracing::info!(%err)
                 }
             }
@@ -396,11 +399,13 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
         config
     });
     let active_task = async {
-        tracing::info!(
-            "start server interconnect after {:?}",
-            config.server_interconnect_delay
-        );
-        sleep(config.server_interconnect_delay).await;
+        if !config.server_interconnect_delay.is_zero() {
+            tracing::info!(
+                "start server interconnect after {:?}",
+                config.server_interconnect_delay
+            );
+            sleep(config.server_interconnect_delay).await
+        }
         let mut connections = HashMap::new();
         for (&i, &addr) in &config.server_internal_addresses {
             if i <= replica_id {
@@ -522,16 +527,16 @@ impl<R: AbstractReplica> ReplicaTask<R> {
                 Sleep,
                 Request(Option<Command>),
                 Message(Option<M>),
-                JoinNext(()),
+                TransportJoinNext(()),
             }
             use Select::*;
             match tokio::select! {
                 () = sleep(tick_interval) => Sleep,
                 request = request_receiver.recv() => Request(request),
                 message = message_receiver.recv() => Message(message),
-                result = transport.join_next() => JoinNext(result?),
+                result = transport.join_next() => TransportJoinNext(result?),
             } {
-                Message(None) | JoinNext(()) => unreachable!(),
+                Message(None) | TransportJoinNext(()) => unreachable!(),
                 Request(None) => break,
                 Sleep => self.replica.tick(&mut actions),
                 Request(Some(command)) => self.replica.request(command, &mut actions),
@@ -539,7 +544,7 @@ impl<R: AbstractReplica> ReplicaTask<R> {
             }
         }
         transport.read_tasks.abort_all();
-        // delay releasing transport until remote replicas are canceled and actively close
+        // delay releasing transport until remote replicas are canceled and actively
         // close the connection from read_task side (as above)
         sleep(Duration::from_secs(1)).await;
         Ok(())

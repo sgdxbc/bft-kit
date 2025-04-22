@@ -1,9 +1,10 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, time::Duration};
 
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
     sync::mpsc::{self, Receiver, Sender},
+    time::sleep,
 };
 
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
     pbft::{Command, Replica, Spec, message},
     transport::{
         ClientConfig, ReplicaTask, ServiceConfig, Transport,
-        tcp::{boot_client, boot_replica},
+        tcp::{Closed, boot_client, boot_replica},
     },
     workload::{ConcurrentClients, Invoke, Latencies},
 };
@@ -28,6 +29,7 @@ pub async fn client_task(
 ) -> anyhow::Result<Latencies> {
     let (message_sender, message_receiver) = mpsc::channel(64);
     let (transport, replica_egresses) = boot_client(id, service_config, message_sender).await?;
+    sleep(Duration::from_millis(100)).await;
     super::client_task_internal(
         spec,
         config,
@@ -131,9 +133,18 @@ async fn service_task(
             result = transport.join_next() => TransportJoinNext(result),
         } {
             TransportJoinNext(Ok(())) | Message(None) => unreachable!(),
-            TransportJoinNext(Err(err)) => {
-                // sometimes it's connection reset, suppress it
-                tracing::warn!(%err, "client read task returned")
+            TransportJoinNext(Err(err)) => 'transport_err: {
+                // usually on ingress
+                if let Some(Closed) = err.downcast_ref() {
+                    break 'transport_err;
+                }
+                // usually on egress
+                if let Some(err) = err.downcast_ref::<std::io::Error>() {
+                    if err.kind() == ErrorKind::BrokenPipe {
+                        break 'transport_err;
+                    }
+                }
+                tracing::warn!(%err, "client transport")
             }
             Accept((mut connection, _)) => {
                 let mut client_id = [0; size_of::<ClientId>()];

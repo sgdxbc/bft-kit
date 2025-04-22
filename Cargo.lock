@@ -162,6 +162,7 @@ dependencies = [
  "sha2",
  "slab",
  "test-log",
+ "thiserror 2.0.12",
  "threshold_crypto",
  "tokio",
  "tokio-util",

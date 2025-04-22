@@ -508,11 +508,15 @@ impl Replica {
                 }
             }
             ToReplica::VoteGeneric(vote_generic) => self.handle_vote_generic(vote_generic),
-            ToReplica::PublicCommitmentsSupply(index, supply) => self
-                .public_commitments_pool
-                .entry(index)
-                .or_default()
-                .extend(supply),
+            ToReplica::PublicCommitmentsSupply(index, supply) => {
+                // if !self.public_commitments_pool.contains_key(&index) {
+                //     tracing::info!("receive initial ")
+                // }
+                self.public_commitments_pool
+                    .entry(index)
+                    .or_default()
+                    .extend(supply)
+            }
         }
 
         self.effect_core_actions(actions)
@@ -670,7 +674,7 @@ impl AbstractReplica for Replica {
     type Message = ToReplica;
 
     fn init(&mut self, actions: &mut Vec<Self::Action>) {
-        Replica::init(self, actions)
+        Self::init(self, actions)
     }
 
     fn request(&mut self, command: Command, actions: &mut Vec<Self::Action>) {

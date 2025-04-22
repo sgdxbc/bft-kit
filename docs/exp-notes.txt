@@ -1,0 +1,23 @@
+Open loop vs close loop
+=======================
+Close loop: bounded queue length by construction. More stable system & more confidential results. With open loop need to a. have some "burning" stage(s) in the loop to actively (and arbitrarily) bound inflight workload and b. use bounded queues everywhere else to correctly back pressure the burning stages. optionally c. monitor queues and identify the ones that indeed back pressuring. may cause suboptimal performance by scheduling
+
+Open loop: bounded number of client/connection, desirable for heavily batched systems that requires a LOT of concurrent requests to saturate. If with close loop, the number of client has to be on par with the concurrency, and colocate too many clients on the same machine to be practical
+
+
+QUIC vs TCP
+===========
+QUIC (quinn) adds noticeable overhead, but seems sensible for point to point secure
+
+QUIC allows connect before listen. Handy for trying things out quickly by hand.
+
+QUIC support (encourage maybe?) ephemeral single message (unidirectional) stream. Not only potentially better performance (despite out of order message delivery which does not matter for distributed protocols) but also easier to program. TCP stream reader either explicitly framing or relying on self-delimited encoding schemas.
+
+
+Arch & analyzing protocol parallelize-ability
+=============================================
+
+
+Threshold signature
+===================
+BLS is free form but slow. FROST (givre) is fast and reasonably intrusive. CGGMP21 is even less intrusive than FROST but slow (to be confirmed).

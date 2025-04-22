@@ -73,7 +73,7 @@ pub mod transport {
                 message = message_receiver.recv() => Select::Message(message),
                 result = transport.join_next() => Select::TransportJoinNext(result?)
             } {
-                Select::TransportJoinNext(()) => unreachable!(),
+                Select::TransportJoinNext(()) | Select::Message(None) => unreachable!(),
                 Select::Invoke(None) => break Ok(latencies),
                 Select::Invoke(Some((op, result))) => {
                     seq += 1;
@@ -102,10 +102,7 @@ pub mod transport {
                         },
                     );
                 }
-                Select::Message(reply) => {
-                    let Some(reply) = reply else {
-                        anyhow::bail!("message receive channel close")
-                    };
+                Select::Message(Some(reply)) => {
                     let Some(scratch) = seq_scratch.remove(&reply.seq) else {
                         continue;
                     };

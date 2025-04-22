@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use bincode::{Decode, error::DecodeError};
+use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -13,6 +14,10 @@ use crate::common::{ClientId, ReplicaId};
 
 use super::{ReplicaConfig, ServiceConfig, Transport, TransportAndSenders};
 
+#[derive(Debug, Error)]
+#[error("closed")]
+pub struct Closed;
+
 async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     mut ingress: impl AsyncRead + Unpin,
     read_sender: Sender<M>,
@@ -21,7 +26,9 @@ async fn read_task<M: Decode<()> + Send + Sync + 'static>(
     let mut bytes_len = 0;
     loop {
         let len = ingress.read(&mut decode_bytes[bytes_len..]).await?;
-        anyhow::ensure!(len != 0);
+        if len == 0 {
+            anyhow::bail!(Closed)
+        }
         bytes_len += len;
         let mut offset = 0;
         let mut range;
