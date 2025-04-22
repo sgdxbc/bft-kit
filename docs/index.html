@@ -63,23 +63,23 @@ The tests mostly check for liveness, so that as long as all tests are passed, if
 
 **Manual cluster-scale deployment.** The `pbft-client` and `pbft` binaries run *a group of close loop clients* and a replica according to a set of configuration files. Execute
 
-    $ cargo run -r --bin pbft -- configs/pbft/replica0.conf
+    $ cargo run -r --bin pbft -- configs/replica0.conf
 
-to run a PBFT replica#0 that is configured with `configs/pbft/replica0.conf`, and it will further discover `common.conf` and `network.conf` in the same folder of the replica configuration, which is `configs/pbft` in this case. Then, either on the same machine or other machine with identical compiled binaries and configurations (a network file system would be convenient), execute the same command with `configs/pbft/replica1.conf` to run replica#1 configured by it and the same other two configurations as replica#0. Repeat two more times for replica#2 and replica#3. 
+to run a PBFT replica#0 that is configured with `configs/replica0.conf`, and it will further discover `common.conf` and `network.conf` in the same folder of the replica configuration, which is `configs` in this case. Then, either on the same machine or other machine with identical compiled binaries and configurations (a network file system would be convenient), execute the same command with `configs/replica1.conf` to run replica#1 configured by it and the same other two configurations as replica#0. Repeat two more times for replica#2 and replica#3. 
 
 Wait a while until the replicas report "replica ready" in the logs. Execute
 
-    $ cargo run -r --bin pbft-client -- configs/pbft/client.conf
+    $ cargo run -r --bin pbft-client -- configs/client.conf
 
-to run PBFT clients configured by `configs/pbft/client.conf` if it exists (which is not the case currently). The `common.conf` and `network.conf` are discovered as same as the replicas. The clients will exit after report the performance statistics. It is possible to rerun clients against the same replica network, but start with a fresh network is recommended. Send Ctrl-C to one replica to exit it, and the other replicas will exit (kind of crash actually) after their connections to the exited one closed (unexpectedly). Alternatively, if all replicas are running on the same machine, execute
+to run PBFT clients configured by `configs/client.conf` if it exists (which is not the case currently). The `common.conf` and `network.conf` are discovered as same as the replicas. The clients will exit after report the performance statistics. It is possible to rerun clients against the same replica network, but start with a fresh network is recommended. Send Ctrl-C to one replica to exit it, and the other replicas will exit (kind of crash actually) after their connections to the exited one closed (unexpectedly). Alternatively, if all replicas are running on the same machine, execute
 
     $ pkill -INT pbft
 
 to shutdown all of them.
 
-The taxonomy of configurations. `replicaN.conf` and `client.conf` exclusively configure replica#N or a client process, at the same time locates the other two configures. `common.conf` and `network.conf` holds shared items for all participants. They two are not essentially different, just `network.conf` are usually dedicated to store network addresses.
+The (conventional) taxonomy of configurations. `replicaN.conf` and `client.conf` serve for exclusively configuring replica#N or a client process, at the same time locating the other two configures. `common.conf` and `network.conf` holds shared items for all participants. They two are not essentially different, just `network.conf` are usually dedicated to store network addresses.
 
-The configuration layout is relatively flexible: the binaries merge the three relevant configurations into one single configuration store, then extract all kinds of configuration structures from it. The above description of which configuration is for what is just convention.
+The configuration layout is relatively flexible: the binaries merge the three relevant configurations into one single configuration store, then extract all kinds of configuration structures from it. The above description of which configuration is for what is just convention. Also, the extraction is not sensitive to extra entries, to allow reuse same set of configurations across systems that accept different configurations (as long as no name conflict).
 
 **Automated deployment.** Work in progress.
 
