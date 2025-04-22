@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, net::SocketAddr};
 
-use bincode::{Decode, error::DecodeError};
+use bincode::{Decode, Encode, error::DecodeError};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt},
@@ -8,11 +8,14 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     time::sleep,
 };
-use tokio_util::bytes::Bytes;
+use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
-use crate::common::{ClientId, ReplicaId};
+use crate::common::{ClientId, Command, ReplicaId};
 
-use super::{ReplicaConfig, ServiceConfig, Transport, TransportAndSenders};
+use super::{
+    AbstractService, ReplicaConfig, ServiceConfig, ServiceTask, Transport, TransportAndSenders,
+    checked_send,
+};
 
 #[derive(Debug, Error)]
 #[error("closed")]
@@ -113,6 +116,98 @@ pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
         write_senders.insert(replica_id, write_sender);
     }
     Ok((transport, write_senders))
+}
+
+// TODO try to reduce redundancy to ServiceTask::run (if possible)
+impl<K> ServiceTask<K>
+where
+    Self: AbstractService,
+{
+    pub async fn run_tcp(
+        mut self,
+        config: ServiceConfig,
+        mut finalized_receiver: Receiver<<Self as AbstractService>::Finalized>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()>
+    where
+        <Self as AbstractService>::Reply: Encode,
+    {
+        let listener =
+            TcpListener::bind(config.server_external_addresses[&self.replica_id]).await?;
+        // large queue buffer to allow many concurrent clients simultaneously send at
+        // the beginning
+        let (message_sender, mut message_receiver) = mpsc::channel(1 << 12);
+        let mut transport = Transport::new();
+        let mut write_senders = HashMap::new();
+        loop {
+            enum Select<F> {
+                Accept((TcpStream, SocketAddr)),
+                Message(Option<Command>),
+                Finalized(Option<F>),
+                TransportJoinNext(anyhow::Result<()>),
+                Cancel,
+            }
+            use Select::*;
+            match tokio::select! {
+                accept = listener.accept() => Accept(accept?),
+                message = message_receiver.recv() => Message(message),
+                finalize = finalized_receiver.recv() => Finalized(finalize),
+                result = transport.join_next() => TransportJoinNext(result),
+                () = cancel.cancelled() => Cancel,
+            } {
+                Finalized(None) | TransportJoinNext(Ok(())) => unreachable!(),
+                Cancel => break Ok(()),
+                Accept((mut connection, _)) => {
+                    let mut client_id = [0; size_of::<ClientId>()];
+                    connection.read_exact(&mut client_id).await?;
+                    let client_id = ClientId::from_le_bytes(client_id);
+                    tracing::debug!(%client_id, "accept client connection");
+                    let (write_sender, write_receiver) = mpsc::channel(1000);
+                    transport.add_tcp_connection(
+                        connection,
+                        message_sender.clone(),
+                        write_receiver,
+                    );
+                    let replaced = write_senders.insert(client_id, write_sender);
+                    anyhow::ensure!(replaced.is_none());
+                }
+                Message(None) => unreachable!(),
+                Message(Some(command)) => match self.replies.get(&command.client_id) {
+                    Some(reply) if Self::reply_seq(reply) > command.seq => {}
+                    Some(reply) if Self::reply_seq(reply) == command.seq => {
+                        let sender = write_senders.get(&command.client_id);
+                        anyhow::ensure!(
+                            sender.is_some(),
+                            "send to unexpected client id {}",
+                            command.client_id
+                        );
+                        Transport::write(reply, sender).await?
+                    }
+                    _ => {
+                        if !checked_send(&self.request_sender, command).await? {
+                            tracing::warn!("request channel full");
+                        }
+                    }
+                },
+                Finalized(Some(finalized)) => {
+                    for (client_id, reply) in self.on_finalized(finalized) {
+                        let sender = write_senders.get(&client_id);
+                        anyhow::ensure!(
+                            sender.is_some(),
+                            "send to unexpected client id {client_id}",
+                        );
+                        Transport::write(reply, sender).await?
+                    }
+                }
+                TransportJoinNext(Err(err)) => 'transport_err: {
+                    if let Some(Closed) = err.downcast_ref() {
+                        break 'transport_err;
+                    }
+                    tracing::info!(%err)
+                }
+            }
+        }
+    }
 }
 
 // unlike QUIC, TCP transport use dual socket style interconnect. interconnect

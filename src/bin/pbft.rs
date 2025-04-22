@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let mut server = pin!(if !use_tcp {
         server_task(replica, config, cancel.clone()).left_future()
     } else {
-        tcp::server_task(replica, config).right_future()
+        tcp::server_task(replica, config, cancel.clone()).right_future()
     });
     'server: {
         tokio::select! {

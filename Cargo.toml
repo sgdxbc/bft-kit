@@ -35,3 +35,4 @@ harness = false
 
 [profile.release]
 debug = true
+incremental = true

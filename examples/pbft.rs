@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         server_tasks.spawn(if !task_config.use_tcp {
             server_task(replica, task_config.clone(), cancel.clone()).left_future()
         } else {
-            tcp::server_task(replica, task_config.clone()).right_future()
+            tcp::server_task(replica, task_config.clone(), cancel.clone()).right_future()
         });
     }
     tracing::info!("wait servers up");
@@ -113,6 +113,9 @@ async fn main() -> anyhow::Result<()> {
     drop(invoke_sender);
     let latencies = client_task.await?;
     tracing::info!(latency = ?Duration::from_micros(latencies.mean() as _));
-    server_tasks.abort_all();
+    cancel.cancel();
+    while let Some(result) = server_tasks.join_next().await {
+        result??
+    }
     Ok(())
 }
