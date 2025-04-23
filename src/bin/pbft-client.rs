@@ -7,8 +7,8 @@ use bft_kit::{
     transport::ClientConfig,
     workload::report_latencies,
 };
-use futures::FutureExt;
 use tokio::fs::read_to_string;
+use tokio_util::either::Either;
 use tracing::Instrument;
 
 #[tokio::main]
@@ -29,9 +29,9 @@ async fn main() -> anyhow::Result<()> {
         "yet unimplemented"
     );
     let client_latencies = if !config.use_tcp {
-        clients_task(options.try_into()?, config.clone()).left_future()
+        Either::Left(clients_task(options.try_into()?, config.clone()))
     } else {
-        tcp::clients_task(options.try_into()?, config.clone()).right_future()
+        Either::Right(tcp::clients_task(options.try_into()?, config.clone()))
     }
     .instrument(tracing::info_span!("concurrent close loops"))
     .await?;

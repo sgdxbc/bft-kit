@@ -8,9 +8,8 @@ use bft_kit::{
         transport::{TaskConfig, server_task, tcp},
     },
 };
-use futures::FutureExt;
 use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{either::Either, sync::CancellationToken};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -26,9 +25,9 @@ async fn main() -> anyhow::Result<()> {
     let use_tcp = config.use_tcp;
     let cancel = CancellationToken::new();
     let mut server = pin!(if !use_tcp {
-        server_task(replica, config, cancel.clone()).left_future()
+        Either::Left(server_task(replica, config, cancel.clone()))
     } else {
-        tcp::server_task(replica, config, cancel.clone()).right_future()
+        Either::Right(tcp::server_task(replica, config, cancel.clone()))
     });
     'server: {
         tokio::select! {

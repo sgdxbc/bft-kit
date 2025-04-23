@@ -83,7 +83,7 @@ The configuration layout is relatively flexible: the binaries merge the three re
 
 Notes on network file system. The above description applies to development codebase that lives in network file system. However, building inside network file system may not be desirable. Alternatively, you can put the development codebase outside the network file system's mounting root, and execute
 
-    $ uv run ./scripts/cp-artifacts.py $DIR
+    $ uv run ./scripts/cp_artifacts.py $DIR
 
 To build binaries and copy them into `$DIR` under network file system.
 

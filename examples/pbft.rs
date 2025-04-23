@@ -9,9 +9,8 @@ use bft_kit::{
     },
     transport::{ClientConfig, ReplicaConfig, ServiceConfig},
 };
-use futures::FutureExt;
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{either::Either, sync::CancellationToken};
 use tracing::Instrument;
 
 #[tokio::main]
@@ -55,9 +54,13 @@ async fn main() -> anyhow::Result<()> {
         let config = ReplicaCoreConfig::new_basic(spec.clone(), i);
         let replica = Replica::new(config);
         server_tasks.spawn(if !task_config.use_tcp {
-            server_task(replica, task_config.clone(), cancel.clone()).left_future()
+            Either::Left(server_task(replica, task_config.clone(), cancel.clone()))
         } else {
-            tcp::server_task(replica, task_config.clone(), cancel.clone()).right_future()
+            Either::Right(tcp::server_task(
+                replica,
+                task_config.clone(),
+                cancel.clone(),
+            ))
         });
     }
     tracing::info!("wait servers up");
@@ -72,25 +75,23 @@ async fn main() -> anyhow::Result<()> {
     let (invoke_sender, invoke_receiver) = mpsc::channel(1);
     let (commit_sender, mut commit_receiver) = mpsc::channel(1);
     let mut client_task = pin!(if !task_config.use_tcp {
-        client_task(
+        Either::Left(client_task(
             spec,
             task_config.client,
             task_config.service,
             ClientId(0),
             invoke_receiver,
             commit_sender,
-        )
-        .left_future()
+        ))
     } else {
-        tcp::client_task(
+        Either::Right(tcp::client_task(
             spec,
             task_config.client,
             task_config.service,
             ClientId(0),
             invoke_receiver,
             commit_sender,
-        )
-        .right_future()
+        ))
     });
     invoke_sender
         .send((Default::default(), Some(Default::default())))
