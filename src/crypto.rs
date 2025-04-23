@@ -102,32 +102,54 @@ impl Debug for Sig {
     }
 }
 
-pub type SecretKey = secp256k1::SecretKey;
-pub type PublicKey = secp256k1::PublicKey;
+#[derive(Debug, Clone)]
+pub enum SecretKey {
+    Secp256k1(secp256k1::SecretKey),
+}
+
+#[derive(Debug, Clone)]
+pub enum PublicKey {
+    Secp256k1(secp256k1::PublicKey),
+}
 
 thread_local!(static SECP: secp256k1::Secp256k1<secp256k1::All> = secp256k1::Secp256k1::new());
 
 pub fn sign(message: &impl DigestHash, secret_key: &SecretKey) -> Sig {
     if cfg!(test) {
-        Default::default()
-    } else {
-        let message = secp256k1::Message::from_digest(message.sha256().into());
-        Sig::Secp256k1(SECP.with(|secp| secp.sign_ecdsa(&message, secret_key)))
+        return Default::default();
+    }
+    match secret_key {
+        SecretKey::Secp256k1(secret_key) => {
+            let message = secp256k1::Message::from_digest(message.sha256().into());
+            Sig::Secp256k1(SECP.with(|secp| secp.sign_ecdsa(&message, secret_key)))
+        }
     }
 }
 
 pub fn verify(message: &impl DigestHash, public_key: &PublicKey, sig: &Sig) -> anyhow::Result<()> {
-    verify_digest(message.sha256().into(), public_key, sig)
+    if cfg!(test) {
+        return Ok(());
+    }
+    match (public_key, sig) {
+        (PublicKey::Secp256k1(public_key), Sig::Secp256k1(sig)) => {
+            let message = secp256k1::Message::from_digest(message.sha256().into());
+            SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?
+        }
+        _ => anyhow::bail!("mismatched signature type"),
+    }
+    Ok(())
 }
 
-fn verify_digest(Digest(digest): Digest, public_key: &PublicKey, sig: &Sig) -> anyhow::Result<()> {
-    let Sig::Secp256k1(sig) = sig else {
+pub fn verify_digest(
+    Digest(digest): Digest,
+    public_key: &PublicKey,
+    sig: &Sig,
+) -> anyhow::Result<()> {
+    let (PublicKey::Secp256k1(public_key), Sig::Secp256k1(sig)) = (public_key, sig) else {
         anyhow::bail!("mismatched signature type")
     };
-    if !cfg!(test) {
-        let message = secp256k1::Message::from_digest(digest);
-        SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?;
-    }
+    let message = secp256k1::Message::from_digest(digest);
+    SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?;
     Ok(())
 }
 
@@ -136,11 +158,15 @@ pub fn replica_secret_key(replica_id: ReplicaId) -> SecretKey {
     let tag = format!("replica#{replica_id}");
     let tag = tag.as_bytes();
     bytes[..tag.len()].copy_from_slice(tag);
-    SecretKey::from_byte_array(&bytes).unwrap()
+    SecretKey::Secp256k1(secp256k1::SecretKey::from_byte_array(&bytes).unwrap())
 }
 
 pub fn public_key(secret_key: &SecretKey) -> PublicKey {
-    SECP.with(|secp| secret_key.public_key(secp))
+    match secret_key {
+        SecretKey::Secp256k1(secret_key) => {
+            PublicKey::Secp256k1(SECP.with(|secp| secret_key.public_key(secp)))
+        }
+    }
 }
 
 pub struct ReplicaConfig {
@@ -153,7 +179,7 @@ impl ReplicaConfig {
         let secret_keys = (0..num_replica).map(replica_secret_key).collect::<Vec<_>>();
         Self {
             public_keys: secret_keys.iter().map(public_key).collect(),
-            secret_key: secret_keys[replica_id as usize],
+            secret_key: secret_keys[replica_id as usize].clone(),
         }
     }
 }

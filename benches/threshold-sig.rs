@@ -2,7 +2,7 @@
 use std::iter::repeat_with;
 
 use bft_kit::crypto::{
-    DigestHash, SecretKey, Sha256Output, Sha512Output, sign,
+    DigestHash, SecretKey, Sha256Output, Sha512Output, public_key, sign,
     threshold::{self, ThresholdCryptoSigShare},
     verify,
 };
@@ -42,7 +42,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let secret_key = secp256k1_secret_key();
         let message = Message(random());
         let sig = sign(&message, &secret_key);
-        let public_key = secret_key.public_key(&secp256k1::Secp256k1::new());
+        let public_key = public_key(&secret_key);
         b.iter(|| black_box(verify(&message, &public_key, &sig).unwrap()))
     });
     group.bench_function("ThresholdCrypto", |b| {
@@ -173,15 +173,11 @@ fn prepare_combine_vec(
     threshold: threshold::Index,
     message: &Message,
 ) -> (Vec<threshold::PartialSig>, threshold::PublicMasterKey) {
-    let secp = secp256k1::Secp256k1::new();
     let (sigs, public_keys) = repeat_with(secp256k1_secret_key)
         .take(threshold as _)
         .map(|secret_key| {
             let sig = sign(message, &secret_key);
-            (
-                threshold::PartialSig::Vec(sig),
-                secret_key.public_key(&secp),
-            )
+            (threshold::PartialSig::Vec(sig), public_key(&secret_key))
         })
         .unzip::<_, _, Vec<_>, Vec<_>>();
     let master_key = threshold::PublicMasterKey::Vec(public_keys, threshold);
@@ -261,10 +257,10 @@ fn prepare_combine_givre(
     (sig_shares, signers, key_shares.into_iter().next().unwrap())
 }
 
-fn secp256k1_secret_key() -> secp256k1::SecretKey {
+fn secp256k1_secret_key() -> SecretKey {
     loop {
-        if let Ok(secret_key) = SecretKey::from_byte_array(&random()) {
-            break secret_key;
+        if let Ok(secret_key) = secp256k1::SecretKey::from_byte_array(&random()) {
+            break SecretKey::Secp256k1(secret_key);
         }
     }
 }
