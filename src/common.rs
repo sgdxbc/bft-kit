@@ -77,8 +77,8 @@ impl Command {
     }
 }
 
-impl<S: sha2::Digest> UpdateHash<S> for Command {
-    fn update(&self, state: &mut S) {
+impl UpdateHash for Command {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
         state.update(self.client_id.to_le_bytes());
         state.update(self.seq.to_le_bytes());
         state.update(&self.op)

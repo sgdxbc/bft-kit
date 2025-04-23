@@ -9,6 +9,8 @@ use bincode::{
 
 use crate::common::ReplicaId;
 
+use super::{Digest, DigestHash};
+
 // note on threshold definition
 // threshold_crypto defines threshold as the maximum number of faulty
 // participants, and combine signature with threshold + 1 partial signatures
@@ -97,18 +99,19 @@ impl PublicMasterKey {
     }
 }
 
-pub fn sign(message: impl Into<[u8; 32]>, secret_key: &PartialSecretKey) -> PartialSig {
+pub fn sign(message: &impl DigestHash, secret_key: &PartialSecretKey) -> PartialSig {
     match secret_key {
         PartialSecretKey::Vec(secret_key) => PartialSig::Vec(super::sign(message, secret_key)),
+        // TODO avoid double hash (the other one is inside threshold_crypto)
         PartialSecretKey::ThresholdCrypto(secret_key_share) => PartialSig::ThresholdCrypto(
-            ThresholdCryptoSigShare(secret_key_share.sign(message.into()).into()),
+            ThresholdCryptoSigShare(secret_key_share.sign(message.sha256()).into()),
         ),
         // givre sign require extra inputs and not implemented here
     }
 }
 
 pub fn verify_partial(
-    message: impl Into<[u8; 32]>,
+    message: &impl DigestHash,
     master_key: &PublicMasterKey,
     index: Index,
     partial_sig: &PartialSig,
@@ -123,7 +126,7 @@ pub fn verify_partial(
         ) => {
             let valid = public_key_set
                 .public_key_share(index as usize)
-                .verify(sig_share, message.into());
+                .verify(sig_share, message.sha256());
             anyhow::ensure!(valid)
         }
         // we don't implement for givre variant here as it does not support verification
@@ -218,11 +221,18 @@ impl PartialSigs {
 }
 
 pub fn verify(
-    message: impl Into<[u8; 32]>,
+    message: &impl DigestHash,
     sig: &Sig,
     master_key: &PublicMasterKey,
 ) -> anyhow::Result<()> {
-    let message = message.into();
+    verify_digest(message.sha256().into(), sig, master_key)
+}
+
+pub fn verify_digest(
+    Digest(digest): Digest,
+    sig: &Sig,
+    master_key: &PublicMasterKey,
+) -> anyhow::Result<()> {
     match (sig, master_key) {
         (Sig::Vec(sigs), PublicMasterKey::Vec(public_keys, threshold)) => {
             let threshold = *threshold as usize;
@@ -234,7 +244,7 @@ pub fn verify(
             let count = sigs
                 .into_iter()
                 .filter(|&(index, sig)| {
-                    super::verify(message, &public_keys[index as usize], sig).is_ok()
+                    super::verify_digest(Digest(digest), &public_keys[index as usize], sig).is_ok()
                 })
                 .take(threshold + 1)
                 .count();
@@ -244,10 +254,10 @@ pub fn verify(
             Sig::ThresholdCrypto(ThresholdCryptoSig(sig)),
             PublicMasterKey::ThresholdCrypto(public_key_set),
         ) => {
-            anyhow::ensure!(public_key_set.public_key().verify(sig, message))
+            anyhow::ensure!(public_key_set.public_key().verify(sig, digest))
         }
         (Sig::Givre(GivreSig(sig)), PublicMasterKey::Givre(public_key)) => {
-            sig.verify(public_key, &message)?
+            sig.verify(public_key, &digest)?
         }
         _ => anyhow::bail!("unmatched public key and signature types"),
     }

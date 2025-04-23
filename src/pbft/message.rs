@@ -33,16 +33,16 @@ pub struct Vote {
     pub sig: Sig,
 }
 
-impl<S: sha2::Digest> UpdateHash<S> for PrePrepare {
-    fn update(&self, state: &mut S) {
+impl UpdateHash for PrePrepare {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
         state.update(self.view_num.to_le_bytes());
         state.update(self.block_num.to_le_bytes());
         state.update(&self.digest)
     }
 }
 
-impl<S: sha2::Digest> UpdateHash<S> for Vote {
-    fn update(&self, state: &mut S) {
+impl UpdateHash for Vote {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
         state.update(self.view_num.to_le_bytes());
         state.update(self.block_num.to_le_bytes());
         state.update(&self.digest);

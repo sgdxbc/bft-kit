@@ -2,19 +2,33 @@
 use std::iter::repeat_with;
 
 use bft_kit::crypto::{
-    SecretKey, sign,
+    DigestHash, SecretKey, Sha256Output, Sha512Output, sign,
     threshold::{self, ThresholdCryptoSigShare},
     verify,
 };
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use rand::random;
 
+struct Message([u8; 64]);
+
+impl DigestHash for Message {
+    fn sha256(&self) -> Sha256Output {
+        let mut output = [0; 32];
+        output.copy_from_slice(&self.0[..32]);
+        Sha256Output::from(output)
+    }
+
+    fn sha512(&self) -> Sha512Output {
+        Sha512Output::from(self.0)
+    }
+}
+
 pub fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("Sign");
     group.bench_function("Secp256k1", |b| {
         let secret_key = secp256k1_secret_key();
-        let message = random::<[u8; 32]>();
-        b.iter(|| black_box(sign(message, &secret_key)))
+        let message = Message(random());
+        b.iter(|| black_box(sign(&message, &secret_key)))
     });
     group.bench_function("ThresholdCrypto", |b| {
         let secret_key = rand07::random::<threshold_crypto::SecretKey>();
@@ -26,10 +40,10 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("PartialVerify");
     group.bench_function("Secp256k1", |b| {
         let secret_key = secp256k1_secret_key();
-        let message = random::<[u8; 32]>();
-        let sig = sign(message, &secret_key);
+        let message = Message(random());
+        let sig = sign(&message, &secret_key);
         let public_key = secret_key.public_key(&secp256k1::Secp256k1::new());
-        b.iter(|| black_box(verify(message, &public_key, &sig).unwrap()))
+        b.iter(|| black_box(verify(&message, &public_key, &sig).unwrap()))
     });
     group.bench_function("ThresholdCrypto", |b| {
         let secret_key_set = threshold_crypto::SecretKeySet::random(2, &mut rand07::thread_rng());
@@ -49,10 +63,10 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("Combine");
     for f in [1, 10, 33] {
-        let threshold = 2 * f;
-        let message = random::<[u8; 32]>();
+        let threshold = 2 * f + 1;
+        let message = Message(random());
 
-        let (partial_sigs, _) = prepare_combine_vec(threshold, message);
+        let (partial_sigs, _) = prepare_combine_vec(threshold, &message);
         group.bench_function(BenchmarkId::new("Vec", threshold), |b| {
             b.iter(|| {
                 black_box(combine(
@@ -63,7 +77,8 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             })
         });
 
-        let (partial_sigs, public_key_set) = prepare_combine_threshold_crypto(threshold, message);
+        let (partial_sigs, public_key_set) =
+            prepare_combine_threshold_crypto(threshold, message.sha256().into());
         group.bench_function(BenchmarkId::new("ThresholdCrypto", threshold), |b| {
             b.iter(|| {
                 black_box(combine(
@@ -75,11 +90,11 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         });
 
         let (partial_sigs, signers, key_share) =
-            prepare_combine_givre((3 * f + 1) as _, threshold as _, message);
+            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.sha256().into());
         let context = threshold::GivreAggregateContext {
             key_share: &key_share,
             signers: &signers,
-            message: &message[..],
+            message: &message.sha256(),
         };
         group.bench_function(BenchmarkId::new("Givre", threshold), |b| {
             b.iter(|| {
@@ -96,19 +111,20 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("Verify");
     for f in [1, 10, 33] {
         let threshold = 2 * f + 1;
-        let message = random::<[u8; 32]>();
+        let message = Message(random());
 
-        let (partial_sigs, master_key) = prepare_combine_vec(threshold, message);
+        let (partial_sigs, master_key) = prepare_combine_vec(threshold, &message);
         let sig = combine(
             threshold::PartialSigs::Vec(Default::default()),
             &partial_sigs,
             threshold::AggregateContext::Vec(threshold),
         );
         group.bench_function(BenchmarkId::new("Vec", threshold), |b| {
-            b.iter(|| black_box(threshold::verify(message, &sig, &master_key).unwrap()))
+            b.iter(|| black_box(threshold::verify(&message, &sig, &master_key).unwrap()))
         });
 
-        let (partial_sigs, public_key_set) = prepare_combine_threshold_crypto(threshold, message);
+        let (partial_sigs, public_key_set) =
+            prepare_combine_threshold_crypto(threshold, message.sha256().into());
         let sig = combine(
             threshold::PartialSigs::ThresholdCrypto(Default::default()),
             &partial_sigs,
@@ -116,15 +132,15 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         );
         let master_key = threshold::PublicMasterKey::ThresholdCrypto(public_key_set);
         group.bench_function(BenchmarkId::new("ThresholdCrypto", threshold), |b| {
-            b.iter(|| black_box(threshold::verify(message, &sig, &master_key).unwrap()))
+            b.iter(|| black_box(threshold::verify(&message, &sig, &master_key).unwrap()))
         });
 
         let (partial_sigs, signers, key_share) =
-            prepare_combine_givre((3 * f + 1) as _, threshold as _, message);
+            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.sha256().into());
         let context = threshold::GivreAggregateContext {
             key_share: &key_share,
             signers: &signers,
-            message: &message[..],
+            message: &message.sha256(),
         };
         let sig = combine(
             threshold::PartialSigs::Givre(Default::default()),
@@ -133,7 +149,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         );
         let master_key = threshold::PublicMasterKey::givre(&key_share);
         group.bench_function(BenchmarkId::new("Givre", threshold), |b| {
-            b.iter(|| black_box(threshold::verify(message, &sig, &master_key).unwrap()))
+            b.iter(|| black_box(threshold::verify(&message, &sig, &master_key).unwrap()))
         });
     }
 }
@@ -155,7 +171,7 @@ fn combine(
 
 fn prepare_combine_vec(
     threshold: threshold::Index,
-    message: [u8; 32],
+    message: &Message,
 ) -> (Vec<threshold::PartialSig>, threshold::PublicMasterKey) {
     let secp = secp256k1::Secp256k1::new();
     let (sigs, public_keys) = repeat_with(secp256k1_secret_key)

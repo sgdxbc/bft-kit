@@ -6,7 +6,7 @@ use std::{
 use crate::{
     CommandPool,
     common::{AbstractReplica, Quorum, ReplicaId},
-    crypto::{self, Digest, Sha256Hash, sign, verify},
+    crypto::{self, Digest, DigestHash, sign, verify},
 };
 
 mod message;
@@ -368,7 +368,7 @@ impl Replica {
                             replica_id: self.core.config.id,
                             sig: Default::default(),
                         };
-                        vote.sig = sign(vote.sha256(), &self.crypto_config.secret_key);
+                        vote.sig = sign(&vote, &self.crypto_config.secret_key);
                         let replica_id = self.core.config.spec.primary(self.core.view_num);
                         actions.push(ReplicaAction::SendToReplica(
                             replica_id,
@@ -384,7 +384,7 @@ impl Replica {
                     return;
                 }
                 if let Err(err) = verify(
-                    pre_prepare.sha256(),
+                    &pre_prepare,
                     &self.crypto_config.public_keys
                         [self.core.config.spec.primary(pre_prepare.view_num) as usize],
                     &pre_prepare.sig,
@@ -416,7 +416,7 @@ impl Replica {
                     return;
                 }
                 if let Err(err) = verify(
-                    prepare.sha256(),
+                    &prepare,
                     &self.crypto_config.public_keys[prepare.replica_id as usize],
                     &prepare.sig,
                 ) {
@@ -452,7 +452,7 @@ impl Replica {
                     return;
                 }
                 if let Err(err) = verify(
-                    commit.sha256(),
+                    &commit,
                     &self.crypto_config.public_keys[commit.replica_id as usize],
                     &commit.sig,
                 ) {
@@ -494,8 +494,7 @@ impl Replica {
                             digest: digest.clone(),
                             sig: Default::default(),
                         };
-                        pre_prepare.sig =
-                            sign(pre_prepare.sha256(), &self.crypto_config.secret_key);
+                        pre_prepare.sig = sign(&pre_prepare, &self.crypto_config.secret_key);
                         let block = Block {
                             commands: commands.clone(),
                             digest,
@@ -538,7 +537,7 @@ impl Replica {
                             replica_id: self.core.config.id,
                             sig: Default::default(),
                         };
-                        prepare.sig = sign(prepare.sha256(), &self.crypto_config.secret_key);
+                        prepare.sig = sign(&prepare, &self.crypto_config.secret_key);
                         scratch
                             .prepare_quorum
                             .insert(prepare.replica_id, prepare.sig.clone());
@@ -565,7 +564,7 @@ impl Replica {
                             replica_id: self.core.config.id,
                             sig: Default::default(),
                         };
-                        commit.sig = sign(commit.sha256(), &self.crypto_config.secret_key);
+                        commit.sig = sign(&commit, &self.crypto_config.secret_key);
                         scratch
                             .commit_quorum
                             .insert(commit.replica_id, commit.sig.clone());
@@ -655,7 +654,7 @@ impl Replica {
                 digest: block.digest.clone(),
                 sig: Default::default(),
             };
-            pre_prepare.sig = sign(pre_prepare.sha256(), &self.crypto_config.secret_key);
+            pre_prepare.sig = sign(&pre_prepare, &self.crypto_config.secret_key);
             actions.push(ReplicaAction::SendToAllReplicas(ToReplica::PrePrepare(
                 pre_prepare,
                 block.commands.clone(),

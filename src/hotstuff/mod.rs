@@ -12,11 +12,11 @@ use crate::{
     CommandPool,
     common::{AbstractReplica, ReplicaId},
     crypto::{
-        Digest, Sha256Hash,
+        Digest, DigestHash,
         threshold::{
             AggregateContext, GivreAggregateContext, GivreCiphersuite, GivreKeyShare,
             GivrePublicCommitments, GivreSecretNonces, GivreSigShare, PartialSig, PartialSigs,
-            PublicMasterKey, Sig, verify,
+            PublicMasterKey, Sig, verify_digest,
         },
     },
 };
@@ -468,7 +468,7 @@ impl Replica {
                     .quorum_cert_index
                     .contains_key(&block.justify.node)
                 {
-                    if let Err(err) = verify(
+                    if let Err(err) = verify_digest(
                         block.justify.node.clone(),
                         &block.justify.sig,
                         &PublicMasterKey::givre(&self.crypto_config.key_share),

@@ -44,25 +44,33 @@ impl From<Digest> for [u8; 32] {
     }
 }
 
-pub trait UpdateHash<S> {
-    fn update(&self, state: &mut S);
+pub trait UpdateHash {
+    fn update<D: sha2::Digest>(&self, state: &mut D);
 }
 
-impl<T: UpdateHash<S>, S> UpdateHash<S> for &[T] {
-    fn update(&self, state: &mut S) {
+impl<T: UpdateHash> UpdateHash for &[T] {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
         for item in *self {
             item.update(state)
         }
     }
 }
 
-pub trait Sha256Hash {
+pub type Sha512Output = sha2::digest::Output<sha2::Sha512>;
+
+pub trait DigestHash {
     fn sha256(&self) -> Sha256Output;
+    fn sha512(&self) -> Sha512Output;
 }
 
-impl<T: UpdateHash<sha2::Sha256>> Sha256Hash for T {
+impl<T: UpdateHash> DigestHash for T {
     fn sha256(&self) -> Sha256Output {
         let mut state = sha2::Sha256::new();
+        self.update(&mut state);
+        state.finalize()
+    }
+    fn sha512(&self) -> Sha512Output {
+        let mut state = sha2::Sha512::new();
         self.update(&mut state);
         state.finalize()
     }
@@ -96,22 +104,26 @@ pub type PublicKey = secp256k1::PublicKey;
 
 thread_local!(static SECP: secp256k1::Secp256k1<secp256k1::All> = secp256k1::Secp256k1::new());
 
-pub fn sign(message: impl Into<[u8; 32]>, secret_key: &SecretKey) -> Sig {
+pub fn sign(message: &impl DigestHash, secret_key: &SecretKey) -> Sig {
     if cfg!(test) {
         Default::default()
     } else {
-        let message = secp256k1::Message::from_digest(message.into());
+        let message = secp256k1::Message::from_digest(message.sha256().into());
         Sig(SECP.with(|secp| secp.sign_ecdsa(&message, secret_key)))
     }
 }
 
-pub fn verify(
-    message: impl Into<[u8; 32]>,
+pub fn verify(message: &impl DigestHash, public_key: &PublicKey, sig: &Sig) -> anyhow::Result<()> {
+    verify_digest(message.sha256().into(), public_key, sig)
+}
+
+pub fn verify_digest(
+    Digest(digest): Digest,
     public_key: &PublicKey,
     Sig(sig): &Sig,
 ) -> anyhow::Result<()> {
     if !cfg!(test) {
-        let message = secp256k1::Message::from_digest(message.into());
+        let message = secp256k1::Message::from_digest(digest);
         SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?;
     }
     Ok(())

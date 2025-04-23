@@ -57,8 +57,8 @@ pub struct VoteGeneric {
     pub signer_index: givre::SignerIndex,
 }
 
-impl<S: sha2::Digest> UpdateHash<S> for Block {
-    fn update(&self, state: &mut S) {
+impl UpdateHash for Block {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
         state.update(&self.parent);
         (&*self.commands).update(state);
         state.update(&self.justify.node);
