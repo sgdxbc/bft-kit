@@ -9,7 +9,7 @@ use bincode::{
 
 use crate::common::ReplicaId;
 
-use super::{Digest, DigestHash};
+use super::{Digest, DigestHash, UpdateHash};
 
 // note on threshold definition
 // threshold_crypto defines threshold as the maximum number of faulty
@@ -99,7 +99,7 @@ impl PublicMasterKey {
     }
 }
 
-pub fn sign(message: &impl DigestHash, secret_key: &PartialSecretKey) -> PartialSig {
+pub fn sign(message: &impl UpdateHash, secret_key: &PartialSecretKey) -> PartialSig {
     match secret_key {
         PartialSecretKey::Vec(secret_key) => PartialSig::Vec(super::sign(message, secret_key)),
         // TODO avoid double hash (the other one is inside threshold_crypto)
@@ -111,7 +111,7 @@ pub fn sign(message: &impl DigestHash, secret_key: &PartialSecretKey) -> Partial
 }
 
 pub fn verify_partial(
-    message: &impl DigestHash,
+    message: &impl UpdateHash,
     master_key: &PublicMasterKey,
     index: Index,
     partial_sig: &PartialSig,

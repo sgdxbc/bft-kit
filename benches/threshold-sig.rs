@@ -2,7 +2,7 @@
 use std::iter::repeat_with;
 
 use bft_kit::crypto::{
-    DigestHash, SecretKey, Sha256Output, Sha512Output, public_key, sign,
+    DigestHash, SecretKey, UpdateHash, sign,
     threshold::{self, ThresholdCryptoSigShare},
     verify,
 };
@@ -11,15 +11,9 @@ use rand::random;
 
 struct Message([u8; 64]);
 
-impl DigestHash for Message {
-    fn sha256(&self) -> Sha256Output {
-        let mut output = [0; 32];
-        output.copy_from_slice(&self.0[..32]);
-        Sha256Output::from(output)
-    }
-
-    fn sha512(&self) -> Sha512Output {
-        Sha512Output::from(self.0)
+impl UpdateHash for Message {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
+        state.update(self.0)
     }
 }
 
@@ -42,7 +36,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let secret_key = secp256k1_secret_key();
         let message = Message(random());
         let sig = sign(&message, &secret_key);
-        let public_key = public_key(&secret_key);
+        let public_key = secret_key.public_key();
         b.iter(|| black_box(verify(&message, &public_key, &sig).unwrap()))
     });
     group.bench_function("ThresholdCrypto", |b| {
@@ -177,7 +171,7 @@ fn prepare_combine_vec(
         .take(threshold as _)
         .map(|secret_key| {
             let sig = sign(message, &secret_key);
-            (threshold::PartialSig::Vec(sig), public_key(&secret_key))
+            (threshold::PartialSig::Vec(sig), secret_key.public_key())
         })
         .unzip::<_, _, Vec<_>, Vec<_>>();
     let master_key = threshold::PublicMasterKey::Vec(public_keys, threshold);
