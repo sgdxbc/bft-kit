@@ -94,7 +94,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let context = threshold::GivreAggregateContext {
             key_share: &key_share,
             signers: &signers,
-            message: &message.sha256(),
+            digest: &message.sha256().into(),
         };
         group.bench_function(BenchmarkId::new("Givre", threshold), |b| {
             b.iter(|| {
@@ -140,7 +140,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let context = threshold::GivreAggregateContext {
             key_share: &key_share,
             signers: &signers,
-            message: &message.sha256(),
+            digest: &message.sha256().into(),
         };
         let sig = combine(
             threshold::PartialSigs::Givre(Default::default()),

@@ -533,7 +533,7 @@ impl Replica {
             AggregateContext::Givre(GivreAggregateContext {
                 key_share: &self.crypto_config.key_share,
                 signers: &scratch.signers,
-                message: vote_generic.node.as_ref(),
+                digest: &vote_generic.node,
             }),
         ) {
             Ok(None) => return,

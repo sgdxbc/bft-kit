@@ -149,7 +149,7 @@ pub enum AggregateContext<'a> {
 pub struct GivreAggregateContext<'a> {
     pub key_share: &'a GivreKeyShare,
     pub signers: &'a [(givre::SignerIndex, GivrePublicCommitments)],
-    pub message: &'a [u8],
+    pub digest: &'a Digest,
 }
 
 impl PartialSigs {
@@ -209,7 +209,7 @@ impl PartialSigs {
                         givre::signing::aggregate::aggregate(
                             context.key_share.as_ref(),
                             &signers,
-                            context.message,
+                            &context.digest.0,
                         )?
                         .into(),
                     )))
