@@ -14,6 +14,7 @@
         "Givre",
         "hdrhistogram",
         "hotstuff",
+        "keccak",
         "libhotstuff",
         "Niko",
         "pbft",

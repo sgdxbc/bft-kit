@@ -321,7 +321,7 @@ impl Replica {
 }
 
 fn block_digest(commands: &[Command]) -> Digest {
-    commands.sha256().into()
+    commands.digest()
 }
 
 #[derive(Debug, Clone, bincode::Encode, bincode::Decode)]

@@ -56,23 +56,17 @@ impl<T: UpdateHash> UpdateHash for &[T] {
     }
 }
 
-pub type Sha512Output = sha2::digest::Output<sha2::Sha512>;
-
+// the canonical digest in this codebase is 32 byte SHA256
+// swap to keccak256 in the future if have a good reason
 pub trait DigestHash {
-    fn sha256(&self) -> Sha256Output;
-    fn sha512(&self) -> Sha512Output;
+    fn digest(&self) -> Digest;
 }
 
 impl<T: UpdateHash> DigestHash for T {
-    fn sha256(&self) -> Sha256Output {
+    fn digest(&self) -> Digest {
         let mut state = sha2::Sha256::new();
         self.update(&mut state);
-        state.finalize()
-    }
-    fn sha512(&self) -> Sha512Output {
-        let mut state = sha2::Sha512::new();
-        self.update(&mut state);
-        state.finalize()
+        state.finalize().into()
     }
 }
 
@@ -127,7 +121,7 @@ pub fn sign(message: &impl UpdateHash, secret_key: &SecretKey) -> Sig {
     }
     match secret_key {
         SecretKey::Secp256k1(secret_key) => {
-            let message = secp256k1::Message::from_digest(message.sha256().into());
+            let message = secp256k1::Message::from_digest(message.digest().into());
             Sig::Secp256k1(SECP.with(|secp| secp.sign_ecdsa(&message, secret_key)))
         }
         SecretKey::Ed25519(signing_key) => {
@@ -148,7 +142,7 @@ pub fn verify(message: &impl UpdateHash, public_key: &PublicKey, sig: &Sig) -> a
     }
     match (public_key, sig) {
         (PublicKey::Secp256k1(public_key), Sig::Secp256k1(sig)) => {
-            let message = secp256k1::Message::from_digest(message.sha256().into());
+            let message = secp256k1::Message::from_digest(message.digest().into());
             SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?
         }
         (PublicKey::Ed25519(verifying_key), Sig::Ed25519(sig)) => {

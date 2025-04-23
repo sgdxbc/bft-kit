@@ -72,7 +72,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         });
 
         let (partial_sigs, public_key_set) =
-            prepare_combine_threshold_crypto(threshold, message.sha256().into());
+            prepare_combine_threshold_crypto(threshold, message.digest().into());
         group.bench_function(BenchmarkId::new("ThresholdCrypto", threshold), |b| {
             b.iter(|| {
                 black_box(combine(
@@ -84,11 +84,11 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         });
 
         let (partial_sigs, signers, key_share) =
-            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.sha256().into());
+            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.digest().into());
         let context = threshold::GivreAggregateContext {
             key_share: &key_share,
             signers: &signers,
-            digest: &message.sha256().into(),
+            digest: &message.digest(),
         };
         group.bench_function(BenchmarkId::new("Givre", threshold), |b| {
             b.iter(|| {
@@ -118,7 +118,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         });
 
         let (partial_sigs, public_key_set) =
-            prepare_combine_threshold_crypto(threshold, message.sha256().into());
+            prepare_combine_threshold_crypto(threshold, message.digest().into());
         let sig = combine(
             threshold::PartialSigs::ThresholdCrypto(Default::default()),
             &partial_sigs,
@@ -130,11 +130,11 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         });
 
         let (partial_sigs, signers, key_share) =
-            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.sha256().into());
+            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.digest().into());
         let context = threshold::GivreAggregateContext {
             key_share: &key_share,
             signers: &signers,
-            digest: &message.sha256().into(),
+            digest: &message.digest(),
         };
         let sig = combine(
             threshold::PartialSigs::Givre(Default::default()),

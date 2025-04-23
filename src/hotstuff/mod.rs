@@ -460,7 +460,7 @@ impl Replica {
                 if self.core.node_index.contains_key(&generic.block) {
                     return;
                 }
-                if Digest::from(block.sha256()) != generic.block {
+                if block.digest() != generic.block {
                     return;
                 }
                 if !self
@@ -592,7 +592,7 @@ impl Replica {
                             todo!("fallback to slower signature scheme")
                         }
                         let generic = message::Generic {
-                            block: block.sha256().into(),
+                            block: block.digest(),
                             signers,
                         };
                         actions.push(ReplicaAction::SendToAllReplicas(ToReplica::Generic(
