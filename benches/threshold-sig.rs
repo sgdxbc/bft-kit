@@ -24,6 +24,11 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let message = Message(random());
         b.iter(|| black_box(sign(&message, &secret_key)))
     });
+    group.bench_function("Ed25519", |b| {
+        let secret_key = SecretKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(&random()));
+        let message = Message(random());
+        b.iter(|| black_box(sign(&message, &secret_key)))
+    });
     group.bench_function("ThresholdCrypto", |b| {
         let secret_key = rand07::random::<threshold_crypto::SecretKey>();
         let message = random::<[u8; 32]>();
@@ -34,6 +39,13 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("PartialVerify");
     group.bench_function("Secp256k1", |b| {
         let secret_key = secp256k1_secret_key();
+        let message = Message(random());
+        let sig = sign(&message, &secret_key);
+        let public_key = secret_key.public_key();
+        b.iter(|| black_box(verify(&message, &public_key, &sig).unwrap()))
+    });
+    group.bench_function("Ed25519", |b| {
+        let secret_key = SecretKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(&random()));
         let message = Message(random());
         let sig = sign(&message, &secret_key);
         let public_key = secret_key.public_key();
