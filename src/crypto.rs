@@ -77,25 +77,28 @@ impl<T: UpdateHash> DigestHash for T {
 }
 
 // wire type for signature
-#[derive(Clone)]
-pub struct Sig(secp256k1::ecdsa::Signature);
+#[derive(Clone, Default)]
+pub enum Sig {
+    #[default]
+    Uninitialized,
+    Secp256k1(secp256k1::ecdsa::Signature),
+}
 
 impl Display for Sig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Sig")?;
-        fmt_bytes(&self.0.serialize_compact(), f)
+        match self {
+            Self::Uninitialized => write!(f, "Uninitialized"),
+            Self::Secp256k1(sig) => {
+                write!(f, "Secp256k1")?;
+                fmt_bytes(&sig.serialize_compact(), f)
+            }
+        }
     }
 }
 
 impl Debug for Sig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self}")
-    }
-}
-
-impl Default for Sig {
-    fn default() -> Self {
-        Self(secp256k1::ecdsa::Signature::from_compact(&[0; 64]).unwrap())
     }
 }
 
@@ -109,7 +112,7 @@ pub fn sign(message: &impl DigestHash, secret_key: &SecretKey) -> Sig {
         Default::default()
     } else {
         let message = secp256k1::Message::from_digest(message.sha256().into());
-        Sig(SECP.with(|secp| secp.sign_ecdsa(&message, secret_key)))
+        Sig::Secp256k1(SECP.with(|secp| secp.sign_ecdsa(&message, secret_key)))
     }
 }
 
@@ -117,11 +120,10 @@ pub fn verify(message: &impl DigestHash, public_key: &PublicKey, sig: &Sig) -> a
     verify_digest(message.sha256().into(), public_key, sig)
 }
 
-pub fn verify_digest(
-    Digest(digest): Digest,
-    public_key: &PublicKey,
-    Sig(sig): &Sig,
-) -> anyhow::Result<()> {
+fn verify_digest(Digest(digest): Digest, public_key: &PublicKey, sig: &Sig) -> anyhow::Result<()> {
+    let Sig::Secp256k1(sig) = sig else {
+        anyhow::bail!("mismatched signature type")
+    };
     if !cfg!(test) {
         let message = secp256k1::Message::from_digest(digest);
         SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?;
@@ -161,16 +163,30 @@ impl Encode for Sig {
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
-        Encode::encode(&self.0.serialize_compact(), encoder)
+        match self {
+            Self::Uninitialized => Err(bincode::error::EncodeError::Other(
+                "cannot encode uninitialized signature",
+            )),
+            // if this long tag affects performance, consider shorter ones
+            Self::Secp256k1(sig) => {
+                Encode::encode("secp256k1", encoder)?;
+                Encode::encode(&sig.serialize_compact(), encoder)
+            }
+        }
     }
 }
 
 impl<C> Decode<C> for Sig {
     fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
-        let bytes = <[u8; 64]>::decode(decoder)?;
-        match secp256k1::ecdsa::Signature::from_compact(&bytes) {
-            Ok(sig) => Ok(Self(sig)),
-            Err(err) => Err(DecodeError::OtherString(err.to_string())),
+        match &*<String>::decode(decoder)? {
+            "secp256k1" => {
+                let bytes = <[u8; 64]>::decode(decoder)?;
+                match secp256k1::ecdsa::Signature::from_compact(&bytes) {
+                    Ok(sig) => Ok(Self::Secp256k1(sig)),
+                    Err(err) => Err(DecodeError::OtherString(err.to_string())),
+                }
+            }
+            _ => Err(DecodeError::Other("invalid signature type")),
         }
     }
 }
