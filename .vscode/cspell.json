@@ -38,6 +38,7 @@
         "Sonnino",
         "specpaxos",
         "thiserror",
+        "txns",
         "unreplicated"
     ],
     "ignoreWords": [],
