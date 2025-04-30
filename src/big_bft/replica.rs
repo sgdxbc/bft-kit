@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{
-    DigestHash, Spec, Txn,
+    DigestHash, Spec, Txn, message,
     state_shard::{StateShard, StateShardDigestHashes},
 };
 
@@ -161,19 +161,6 @@ impl ReplicaCore {
 #[derive(Debug, Clone)]
 pub enum Message {
     PushShard(message::SyncShard),
-}
-
-pub mod message {
-    use crate::big_bft::state_shard::StateShard;
-
-    use super::Version;
-
-    #[derive(Debug, Clone)]
-    pub struct SyncShard {
-        pub version: Version,
-        pub index: usize,
-        pub data: StateShard,
-    }
 }
 
 pub struct Replica {

@@ -89,10 +89,8 @@ pub async fn client_task(
                     },
                 );
             }
-            Select::Message(reply) => {
-                let Some(reply) = reply else {
-                    anyhow::bail!("message receive channel close")
-                };
+            Select::Message(None) => anyhow::bail!("message receive channel close"),
+            Select::Message(Some(reply)) => {
                 let Some(scratch) = seq_scratch.get_mut(&reply.seq) else {
                     continue;
                 };

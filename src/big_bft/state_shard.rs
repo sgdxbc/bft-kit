@@ -3,11 +3,12 @@ use std::{
     mem::take,
 };
 
+use bincode::{Decode, Encode};
 use sha2::{Digest, Sha256};
 
 use super::DigestHash;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Encode, Decode)]
 pub struct StateShard {
     pub store: HashMap<DigestHash, String>,
     //

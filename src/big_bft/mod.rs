@@ -1,5 +1,7 @@
 use std::ops::Deref;
 
+use bincode::{Decode, Encode};
+
 pub mod replica;
 pub mod state_shard;
 pub mod transport;
@@ -7,7 +9,7 @@ pub mod workload;
 
 pub type DigestHash = [u8; 32];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum Op {
     Insert(DigestHash, String),
     Read(DigestHash),
@@ -23,7 +25,7 @@ impl Op {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Encode, Decode)]
 pub struct Txn(pub Vec<Op>);
 
 impl Deref for Txn {
@@ -79,5 +81,27 @@ impl Spec {
         // round robin is the most clear pattern i guess
         (stripe..stripe + self.num_stripe_shard + self.num_fault * 2)
             .map(|index| index % self.num_replica)
+    }
+}
+
+pub type Version = u32;
+
+pub mod message {
+    use bincode::{Decode, Encode};
+
+    use crate::big_bft::state_shard::StateShard;
+
+    use super::Version;
+
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct SyncShard {
+        pub version: Version,
+        pub index: usize,
+        pub data: StateShard,
+    }
+
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct Reply {
+        //
     }
 }
