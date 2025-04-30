@@ -4,6 +4,8 @@ Close loop: bounded queue length by construction. More stable system & more conf
 
 Open loop: bounded number of client/connection, desirable for heavily batched systems that requires a LOT of concurrent requests to saturate. If with close loop, the number of client has to be on par with the concurrency, and colocate too many clients on the same machine to be practical.
 
+Choose open loop if can only choose it. No canonical "reply". Send happens at predefined instants e.g. following some traces.
+
 
 QUIC vs TCP
 ===========
