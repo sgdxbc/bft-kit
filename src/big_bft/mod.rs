@@ -91,7 +91,7 @@ pub mod message {
 
     use crate::big_bft::state_shard::StateShard;
 
-    use super::Version;
+    use super::{DigestHash, Version};
 
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct SyncShard {
@@ -102,6 +102,8 @@ pub mod message {
 
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct Reply {
-        //
+        pub version: Version,
+        pub hash: DigestHash,
+        pub replica_index: usize,
     }
 }

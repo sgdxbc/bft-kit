@@ -8,7 +8,7 @@ use crate::common::{ReplicaId, fmt_bytes};
 pub mod cert;
 pub mod threshold;
 
-#[derive(Clone, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Encode, Decode)]
 pub struct Digest(pub [u8; 32]);
 
 impl Display for Digest {

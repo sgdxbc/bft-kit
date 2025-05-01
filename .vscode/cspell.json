@@ -16,6 +16,7 @@
         "hotstuff",
         "keccak",
         "libhotstuff",
+        "newtype",
         "Niko",
         "pbft",
         "permissioned",
