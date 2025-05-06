@@ -121,7 +121,7 @@ pub mod parse {
         fn try_from(value: Options) -> Result<Self, Self::Error> {
             Ok(Self {
                 spec: value.clone().try_into()?,
-                index: value.get("index")?,
+                index: value.get("replica_id")?,
             })
         }
     }

@@ -15,7 +15,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    big_bft::DigestHash,
+    big_bft::{
+        DigestHash,
+        workload::{Workload, initial_state},
+    },
     common::{ClientId, ReplicaId},
     crypto::cert::quinn::server_config,
     transport::{ReplicaConfig, ServiceConfig, Transport, boot_client, boot_replica},
@@ -112,8 +115,10 @@ pub async fn close_loop_client_task(spec: Spec, config: TaskConfig) -> anyhow::R
         invoke_receiver,
         finish_sender
     ));
+    let mut workload = Workload::new();
+
     for _ in 0..config.num_concurrent {
-        invoke_sender.send(Txn(vec![])).await? // TODO
+        invoke_sender.send(workload.next().unwrap()).await?
     }
     let deadline = Instant::now() + config.client_duration;
     enum Select {
@@ -137,7 +142,7 @@ pub async fn close_loop_client_task(spec: Spec, config: TaskConfig) -> anyhow::R
             }
             Select::Finish(Some(())) => {
                 invoke_sender
-                    .send(Txn(vec![])) // TODO
+                    .send(workload.next().unwrap()) //
                     .await?
             }
         };
@@ -167,14 +172,22 @@ pub async fn server_task(
     let (message_sender, mut message_receiver) = mpsc::channel(100);
     let (mut transport, write_senders) =
         boot_replica(replica_id, config.replica, message_sender).await?;
-    tracing::info!("replica ready");
 
-    // replica.core.init(initial_state)
+    replica.core.init(initial_state());
+    tracing::info!("replica ready");
     'client: loop {
-        let Some(client_incoming) = external_endpoint.accept().await else {
-            unreachable!("endpoint closed")
+        let client_connection = match cancel.run_until_cancelled(external_endpoint.accept()).await {
+            None => break,
+            Some(None) => unreachable!("endpoint closed"),
+            Some(Some(incoming)) => incoming.await?,
         };
-        let client_connection = client_incoming.await?;
+        let mut client_id = [0; size_of::<ClientId>()];
+        client_connection
+            .accept_uni()
+            .await?
+            .read_exact(&mut client_id)
+            .await?;
+        anyhow::ensure!(ClientId::from_le_bytes(client_id) == ClientId(0));
         let mut client_transport = Transport::new();
         let (execute_sender, mut execute_receiver) = mpsc::channel(100);
         let (reply_sender, reply_receiver) = mpsc::channel(100);
@@ -183,24 +196,23 @@ pub async fn server_task(
         let mut actions = Vec::new();
         loop {
             enum Select {
-                Execute(Option<Txn>),
-                Message(Option<super::replica::Message>),
+                Execute(Txn),
+                Message(super::replica::Message),
                 TransportJoinNext(()),
                 ClientTransportJoinNext(anyhow::Result<()>),
                 Cancel,
             }
             match tokio::select! {
                 () = cancel.cancelled() => Select::Cancel,
-                invoke = execute_receiver.recv() => Select::Execute(invoke),
-                message = message_receiver.recv() => Select::Message(message),
+                Some(invoke) = execute_receiver.recv() => Select::Execute(invoke),
+                Some(message) = message_receiver.recv() => Select::Message(message),
                 result = client_transport.join_next() => Select::ClientTransportJoinNext(result),
                 result = transport.join_next() => Select::TransportJoinNext(result?),
             } {
                 Select::TransportJoinNext(()) => unreachable!(),
                 Select::Cancel => break 'client,
-                Select::Execute(None) | Select::Message(None) => todo!(),
-                Select::Execute(Some(txn)) => replica.execute(txn, &mut actions),
-                Select::Message(Some(message)) => replica.receive(message, &mut actions),
+                Select::Execute(txn) => replica.execute(txn, &mut actions),
+                Select::Message(message) => replica.receive(message, &mut actions),
                 Select::ClientTransportJoinNext(result) => {
                     if let Err(err) = result {
                         tracing::info!(%err);

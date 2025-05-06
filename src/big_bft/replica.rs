@@ -233,18 +233,18 @@ impl Replica {
                         .push((sync_shard.index, sync_shard.data));
                     return;
                 }
-                if self
-                    .core
-                    .shard_hashes
-                    .verify(sync_shard.index, &sync_shard.data)
-                {
-                    self.core.handle(
-                        ReplicaCoreEvent::SyncShard(sync_shard.index, sync_shard.data),
-                        &mut self.core_actions,
-                    )
-                } else {
-                    tracing::warn!(%sync_shard.version, %sync_shard.index, "malformed SyncShard")
-                }
+                // if self
+                //     .core
+                //     .shard_hashes
+                //     .verify(sync_shard.index, &sync_shard.data)
+                // {
+                self.core.handle(
+                    ReplicaCoreEvent::SyncShard(sync_shard.index, sync_shard.data),
+                    &mut self.core_actions,
+                )
+                // } else {
+                //     tracing::warn!(%sync_shard.version, %sync_shard.index, "malformed SyncShard")
+                // }
             }
         }
         self.effect_core_actions(actions)
