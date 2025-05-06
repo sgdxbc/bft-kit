@@ -1,10 +1,4 @@
-#![allow(unused)]
-use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
-    net::SocketAddr,
-    pin::pin,
-    time::Duration,
-};
+use std::{collections::HashMap, pin::pin, time::Duration};
 
 use hdrhistogram::Histogram;
 use quinn::{Endpoint, TransportConfig};
@@ -19,7 +13,7 @@ use crate::{
         DigestHash,
         workload::{Workload, initial_state},
     },
-    common::{ClientId, ReplicaId},
+    common::ClientId,
     crypto::cert::quinn::server_config,
     transport::{ReplicaConfig, ServiceConfig, Transport, boot_client, boot_replica},
     workload::Latencies,
@@ -53,7 +47,8 @@ pub async fn client_task(
         start: Instant,
         hashes: HashMap<usize, DigestHash>,
     }
-    let mut scratches = BTreeMap::new();
+    let mut scratches = HashMap::new();
+    let mut version = 0;
     loop {
         enum Select {
             Invoke(Option<Txn>),
@@ -68,12 +63,9 @@ pub async fn client_task(
             Select::TransportJoinNext(()) => unreachable!(),
             Select::Invoke(None) => break Ok(latencies),
             Select::Invoke(Some(txn)) => {
-                let version = scratches
-                    .last_key_value()
-                    .map(|(&version, _)| version)
-                    .unwrap_or(0);
+                version += 1;
                 scratches.insert(
-                    version + 1,
+                    version,
                     Scratch {
                         start: Instant::now(),
                         hashes: Default::default(),
@@ -87,13 +79,13 @@ pub async fn client_task(
                     continue;
                 };
                 scratch.hashes.insert(reply.replica_index, reply.hash);
-                if scratch
-                    .hashes
-                    .values()
-                    .filter(|&&hash| hash == reply.hash)
-                    .count()
-                    == spec.num_fault + 1
-                {
+                // if scratch
+                //     .hashes
+                //     .values()
+                //     .filter(|&&hash| hash == reply.hash)
+                //     .count()
+                //     == spec.num_fault + 1
+                if scratch.hashes.len() == spec.num_fault + 1 {
                     let end = Instant::now();
                     if end.duration_since(start) >= WARMUP_DURATION {
                         latencies += end.duration_since(scratch.start).as_micros() as u64;
@@ -222,6 +214,7 @@ pub async fn server_task(
             }
 
             for action in actions.drain(..) {
+                tracing::debug!(?action);
                 match action {
                     crate::big_bft::replica::ReplicaAction::SendToAll(message) => {
                         Transport::write(message, write_senders.values()).await?

@@ -25,7 +25,7 @@ impl Op {
     }
 }
 
-#[derive(Debug, Clone, Default, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct Txn(pub Vec<Op>);
 
 impl Deref for Txn {

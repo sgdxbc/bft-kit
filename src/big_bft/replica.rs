@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     mem::{replace, take},
 };
 
@@ -19,7 +19,7 @@ pub struct ReplicaCore {
     config: ReplicaCoreConfig,
 
     version: Version,
-    txn: Txn,
+    txn: Option<Txn>,
     shard_hashes: StateShardDigestHashes,
     shards: HashMap<usize, StateShard>,
 }
@@ -44,6 +44,7 @@ pub enum ReplicaCoreEvent {
     SyncShard(usize, StateShard),
 }
 
+#[derive(Debug)]
 pub enum ReplicaCoreAction {
     // demanded remote shard of self.version
     PullShard(usize),
@@ -59,7 +60,7 @@ impl ReplicaCore {
             config,
             shards: Default::default(),
             version: 0,
-            txn: Default::default(),
+            txn: None,
         }
     }
 
@@ -90,16 +91,18 @@ impl ReplicaCore {
     }
 
     fn to_sync(&self) -> impl Iterator<Item = usize> {
-        self.txn.keys().filter_map(|key| {
-            Some(self.config.spec.shard_of(key))
-                .filter(|shard_index| !self.shards.contains_key(shard_index))
+        self.txn.iter().flat_map(|txn| {
+            txn.keys().filter_map(|key| {
+                Some(self.config.spec.shard_of(key))
+                    .filter(|shard_index| !self.shards.contains_key(shard_index))
+            })
         })
     }
 
     pub fn handle(&mut self, event: ReplicaCoreEvent, actions: &mut ReplicaCoreActions) {
         match event {
             ReplicaCoreEvent::Execute(txn) => {
-                self.txn = txn;
+                self.txn = Some(txn);
                 let mut can_execute = true;
                 for shard_index in self.to_sync() {
                     can_execute = false;
@@ -111,7 +114,7 @@ impl ReplicaCore {
             }
             ReplicaCoreEvent::SyncShard(shard_index, shard) => {
                 self.shards.insert(shard_index, shard);
-                if self.to_sync().count() == 0 {
+                if self.txn.is_some() && self.to_sync().count() == 0 {
                     self.execute(actions)
                 }
             }
@@ -119,7 +122,7 @@ impl ReplicaCore {
     }
 
     fn execute(&mut self, actions: &mut ReplicaCoreActions) {
-        for op in &*self.txn {
+        for op in &*self.txn.take().unwrap() {
             match op {
                 super::Op::Insert(key, value) => {
                     let shard = self
@@ -169,11 +172,12 @@ pub struct Replica {
     pub core: ReplicaCore,
     core_actions: ReplicaCoreActions,
     // None means not executing, Some([]) means executing but no pending
-    pending_txns: Option<Vec<Txn>>,
+    pending_txns: Option<VecDeque<Txn>>,
     reordering_sync_shards: HashMap<Version, Vec<(usize, StateShard)>>,
     ticked_version: Version,
 }
 
+#[derive(Debug)]
 pub enum ReplicaAction {
     SendToAll(Message),
     Executed(Version, DigestHash),
@@ -196,8 +200,10 @@ impl Replica {
     }
 
     pub fn execute(&mut self, txn: Txn, actions: &mut ReplicaActions) {
-        if let Some(pending_txns) = self.pending_txns.as_mut() {
-            pending_txns.push(txn);
+        tracing::debug!(?txn, "execute");
+        if let Some(pending_txns) = &mut self.pending_txns {
+            tracing::debug!("pending");
+            pending_txns.push_back(txn);
             return;
         }
         for key in txn.keys() {
@@ -221,6 +227,7 @@ impl Replica {
     }
 
     pub fn receive(&mut self, message: Message, actions: &mut ReplicaActions) {
+        tracing::debug!(?message, "receive");
         match message {
             Message::PushShard(sync_shard) => {
                 if sync_shard.version < self.core.version {
@@ -253,6 +260,7 @@ impl Replica {
     fn effect_core_actions(&mut self, actions: &mut ReplicaActions) {
         while !self.core_actions.is_empty() {
             for core_action in take(&mut self.core_actions) {
+                tracing::debug!(?core_action);
                 match core_action {
                     ReplicaCoreAction::PullShard(_) => {
                         // should save the shard index to pull, and pull after a while if it is
@@ -277,9 +285,28 @@ impl Replica {
                                 }
                             }
                         }
-                        if let Some(txn) = self.pending_txns.as_mut().unwrap().pop() {
+                        if let Some(txn) = self.pending_txns.as_mut().unwrap().pop_front() {
+                            tracing::debug!(?txn, "execute (pending)");
+                            for key in txn.keys() {
+                                // the first fast replica speculative (pre)push to all the others
+                                // as long as fast path hits, no more message should be required
+                                let index = self.core.config.spec.shard_of(key);
+                                if self.core.config.spec.fast_replicas(index).next()
+                                    == Some(self.core.config.index)
+                                {
+                                    let data = self.core.shards[&index].clone();
+                                    let push_shard = message::SyncShard {
+                                        version: self.core.version,
+                                        index,
+                                        data,
+                                    };
+                                    actions.push(ReplicaAction::SendToAll(Message::PushShard(
+                                        push_shard,
+                                    )))
+                                }
+                            }
                             self.core
-                                .handle(ReplicaCoreEvent::Execute(txn), &mut self.core_actions)
+                                .handle(ReplicaCoreEvent::Execute(txn), &mut self.core_actions);
                         } else {
                             self.pending_txns = None
                         }
