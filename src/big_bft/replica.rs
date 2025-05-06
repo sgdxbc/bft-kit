@@ -25,8 +25,8 @@ pub struct ReplicaCore {
 }
 
 pub struct ReplicaCoreConfig {
-    spec: Spec,
-    index: usize,
+    pub spec: Spec,
+    pub index: usize,
 }
 
 impl ReplicaCoreConfig {

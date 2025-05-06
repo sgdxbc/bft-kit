@@ -44,11 +44,11 @@ impl Txn {
 
 #[derive(Debug, Clone)]
 pub struct Spec {
-    num_shard: usize,
-    num_replica: usize,
-    num_fault: usize,
-    num_stripe_shard: usize,
-    num_fast_replica: usize,
+    pub num_shard: usize,
+    pub num_replica: usize,
+    pub num_fault: usize,
+    pub num_stripe_shard: usize,
+    pub num_fast_replica: usize,
 }
 
 impl Spec {
@@ -105,5 +105,51 @@ pub mod message {
         pub version: Version,
         pub hash: DigestHash,
         pub replica_index: usize,
+    }
+}
+
+pub mod parse {
+    use std::time::Duration;
+
+    use crate::parse::Options;
+
+    use super::{Spec, replica::ReplicaCoreConfig, transport::TaskConfig};
+
+    impl TryFrom<Options> for ReplicaCoreConfig {
+        type Error = anyhow::Error;
+
+        fn try_from(value: Options) -> Result<Self, Self::Error> {
+            Ok(Self {
+                spec: value.clone().try_into()?,
+                index: value.get("index")?,
+            })
+        }
+    }
+
+    impl TryFrom<Options> for Spec {
+        type Error = anyhow::Error;
+
+        fn try_from(options: Options) -> Result<Self, Self::Error> {
+            Ok(Self {
+                num_shard: options.get("num_shard")?,
+                num_replica: options.get("num_replica")?,
+                num_fault: options.get("num_fault")?,
+                num_stripe_shard: options.get("num_stripe_shard")?,
+                num_fast_replica: options.get("num_fast_replica")?,
+            })
+        }
+    }
+
+    impl TryFrom<Options> for TaskConfig {
+        type Error = anyhow::Error;
+
+        fn try_from(options: Options) -> Result<Self, Self::Error> {
+            Ok(Self {
+                service: options.clone().try_into()?,
+                replica: options.clone().try_into()?,
+                num_concurrent: options.get("num_concurrent")?,
+                client_duration: Duration::from_secs_f32(options.get("client_duration")?),
+            })
+        }
     }
 }
