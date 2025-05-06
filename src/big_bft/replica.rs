@@ -3,6 +3,8 @@ use std::{
     mem::{replace, take},
 };
 
+use bincode::{Decode, Encode};
+
 use super::{
     DigestHash, Spec, Txn, message,
     state_shard::{StateShard, StateShardDigestHashes},
@@ -158,13 +160,13 @@ impl ReplicaCore {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum Message {
     PushShard(message::SyncShard),
 }
 
 pub struct Replica {
-    core: ReplicaCore,
+    pub core: ReplicaCore,
     core_actions: ReplicaCoreActions,
     // None means not executing, Some([]) means executing but no pending
     pending_txns: Option<Vec<Txn>>,
@@ -187,6 +189,10 @@ impl Replica {
             reordering_sync_shards: Default::default(),
             ticked_version: 0,
         }
+    }
+
+    pub fn id(&self) -> crate::common::ReplicaId {
+        self.core.config.index as _
     }
 
     pub fn execute(&mut self, txn: Txn, actions: &mut ReplicaActions) {

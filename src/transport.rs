@@ -279,8 +279,9 @@ where
 pub struct ReplicaConfig {
     pub server_internal_addresses: HashMap<ReplicaId, SocketAddr>,
     // how long should replicas wait before attempting to connect each other's
-    // internal addresses. set longer in higher latency environments (or human
-    // action is involved)
+    // internal addresses. not necessary for QUIC because it allows connect before
+    // accept. set longer in higher latency environments (or human action is
+    // involved)
     pub server_interconnect_delay: Duration,
 }
 
