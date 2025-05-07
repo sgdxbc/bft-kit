@@ -7,7 +7,7 @@ use bincode::{
     error::{DecodeError, EncodeError},
 };
 
-use crate::common::ReplicaId;
+use crate::ReplicaId;
 
 use super::{Digest, DigestHash, UpdateHash};
 

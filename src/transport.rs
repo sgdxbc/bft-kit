@@ -11,11 +11,9 @@ use tokio::{
 use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
 use crate::{
-    common::ReplicaAction,
+    ClientId, ClientSeq, Command, ReplicaAction, ReplicaId,
     crypto::cert::quinn::{client_config, server_config},
 };
-
-use crate::common::{ClientId, ClientSeq, Command, ReplicaId};
 
 pub mod tcp;
 
@@ -366,7 +364,7 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     Ok((transport, write_senders))
 }
 
-pub trait AbstractReplica: crate::common::AbstractReplica {
+pub trait AbstractReplica: crate::replica::AbstractReplica {
     type Finalized;
 
     fn finalized(&self, commands: Vec<Command>) -> Self::Finalized;

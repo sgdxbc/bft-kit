@@ -1,8 +1,7 @@
 use std::{env::args, pin::pin, time::Duration};
 
 use bft_kit::{
-    common::ClientId,
-    init_logging,
+    ClientId, init_logging,
     pbft::{
         Replica, ReplicaCoreConfig, Spec,
         transport::{TaskConfig, client_task, server_task, tcp},

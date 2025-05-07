@@ -6,17 +6,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    common::ClientId,
-    pbft::{Replica, Spec},
-    transport::{
-        ClientConfig, ReplicaTask, ServiceConfig, ServiceTask,
-        tcp::{boot_client, boot_replica},
-    },
-    workload::{ConcurrentClients, Invoke, Latencies},
-};
+use crate::transport::tcp::{boot_client, boot_replica};
 
-use super::{ServiceKit, TaskConfig};
+use super::{
+    ClientConfig, ClientId, ConcurrentClients, Invoke, Latencies, Replica, ReplicaTask,
+    ServiceConfig, ServiceKit, ServiceTask, Spec, TaskConfig,
+};
 
 pub async fn client_task(
     spec: Spec,

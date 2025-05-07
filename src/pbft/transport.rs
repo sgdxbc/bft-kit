@@ -8,8 +8,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    common::{ClientId, ClientSeq, Quorum, ReplicaId},
+    ClientId, ClientSeq, ReplicaId,
     pbft::{Command, ToClient, ViewNum},
+    replica::Quorum,
     transport::{
         AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask, ServiceConfig,
         ServiceTask, Transport, TransportAndSenders, boot_client,

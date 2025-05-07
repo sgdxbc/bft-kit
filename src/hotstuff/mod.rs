@@ -9,8 +9,7 @@ use bincode::{Decode, Encode};
 use slab::Slab;
 
 use crate::{
-    CommandPool,
-    common::{AbstractReplica, ReplicaId},
+    CommandPool, ReplicaId,
     crypto::{
         Digest, DigestHash,
         threshold::{
@@ -19,13 +18,14 @@ use crate::{
             PublicMasterKey, Sig, verify_digest,
         },
     },
+    replica::AbstractReplica,
 };
 
 mod message;
 mod parse;
 pub mod transport;
 
-pub use crate::common::Command;
+pub use crate::Command;
 pub use message::Reply as ToClient;
 
 #[derive(Debug, Clone)]
@@ -395,7 +395,7 @@ pub enum ToReplica {
     PublicCommitmentsSupply(givre::SignerIndex, Vec<GivrePublicCommitments>),
 }
 
-pub type ReplicaAction = crate::common::ReplicaAction<ToReplica>;
+pub type ReplicaAction = crate::ReplicaAction<ToReplica>;
 pub type ReplicaActions = Vec<ReplicaAction>;
 
 impl Replica {

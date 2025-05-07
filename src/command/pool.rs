@@ -1,4 +1,4 @@
-use crate::common::{ClientId, ClientSeq, Command};
+use crate::{ClientId, ClientSeq, Command};
 
 // "mempool" in cryptocurrency term
 // assist (primary) replica to propose blocks with sensible commands
@@ -64,9 +64,7 @@ impl CommandPool {
 pub mod open_loop {
     use std::collections::{HashMap, VecDeque};
 
-    use crate::common::ClientSeq;
-
-    use super::{ClientId, Command};
+    use super::{ClientId, ClientSeq, Command};
 
     #[derive(Debug, Default)]
     pub struct CommandPool {

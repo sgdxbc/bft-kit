@@ -195,7 +195,7 @@ impl Replica {
         }
     }
 
-    pub fn id(&self) -> crate::common::ReplicaId {
+    pub fn id(&self) -> crate::ReplicaId {
         self.core.config.index as _
     }
 

@@ -9,11 +9,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    ClientId,
     big_bft::{
         DigestHash,
         workload::{Workload, initial_state},
     },
-    common::ClientId,
     crypto::cert::quinn::server_config,
     transport::{ReplicaConfig, ServiceConfig, Transport, boot_client, boot_replica},
     workload::Latencies,

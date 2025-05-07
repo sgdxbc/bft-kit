@@ -1,7 +1,7 @@
 pub mod message {
     use bincode::{Decode, Encode};
 
-    use crate::common::ReplicaId;
+    use crate::ReplicaId;
 
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct Reply {
@@ -23,12 +23,12 @@ pub mod transport {
     use tokio_util::sync::CancellationToken;
 
     use crate::{
-        common::{ClientId, ClientSeq, Command},
         transport::{
             AbstractService, ClientConfig, ServiceConfig, ServiceTask, Transport, boot_client,
             checked_send,
         },
         workload::{ConcurrentClients, Invoke, Latencies},
+        {ClientId, ClientSeq, Command},
     };
 
     use super::{ToClient, message};

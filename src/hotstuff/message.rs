@@ -1,7 +1,7 @@
 use bincode::{Decode, Encode};
 
 use crate::{
-    common::ReplicaId,
+    ReplicaId,
     crypto::{
         Digest, UpdateHash,
         threshold::{GivrePublicCommitments, PartialSig, Sig},

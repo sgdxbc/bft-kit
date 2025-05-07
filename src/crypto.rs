@@ -3,7 +3,7 @@ use std::fmt::{Debug, Display};
 use bincode::{BorrowDecode, Decode, Encode, error::DecodeError};
 use sha2::Digest as _;
 
-use crate::common::{ReplicaId, fmt_bytes};
+use crate::{ReplicaId, fmt_bytes};
 
 pub mod cert;
 pub mod threshold;

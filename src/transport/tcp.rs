@@ -10,11 +10,9 @@ use tokio::{
 };
 use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
-use crate::common::{ClientId, Command, ReplicaId};
-
 use super::{
-    AbstractService, ReplicaConfig, ServiceConfig, ServiceTask, Transport, TransportAndSenders,
-    checked_send,
+    AbstractService, ClientId, Command, ReplicaConfig, ReplicaId, ServiceConfig, ServiceTask,
+    Transport, TransportAndSenders, checked_send,
 };
 
 #[derive(Debug, Error)]

@@ -1,7 +1,7 @@
 use std::{pin::pin, time::Duration};
 
 use bft_kit::{
-    common::ClientId,
+    ClientId,
     crypto::threshold::givre_replica_key_shares,
     hotstuff::{
         CryptoConfig, Replica, ReplicaCoreConfig, Spec,

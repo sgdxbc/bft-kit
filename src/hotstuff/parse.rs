@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{common::ReplicaId, crypto::threshold::givre_replica_key_shares, parse::Options};
+use crate::{ReplicaId, crypto::threshold::givre_replica_key_shares, parse::Options};
 
 impl TryFrom<Options> for super::Spec {
     type Error = anyhow::Error; // TODO

@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::{
-    CommandPool,
-    common::{AbstractReplica, Quorum, ReplicaId},
+    CommandPool, ReplicaId,
     crypto::{self, Digest, DigestHash, sign, verify},
+    replica::{AbstractReplica, Quorum},
 };
 
 mod message;
@@ -30,7 +30,7 @@ impl Spec {
 
 pub type ToClient = message::Reply;
 
-pub use crate::common::Command;
+pub use crate::Command;
 
 #[derive(Debug)]
 pub struct ReplicaCoreConfig {
@@ -337,7 +337,7 @@ pub enum ToReplica {
     // TODO recover path messages
 }
 
-type ReplicaAction = crate::common::ReplicaAction<ToReplica>;
+type ReplicaAction = crate::ReplicaAction<ToReplica>;
 type ReplicaActions = Vec<ReplicaAction>;
 
 impl Replica {
