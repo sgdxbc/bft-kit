@@ -1,9 +1,11 @@
 pub mod message {
     use bincode::{Decode, Encode};
 
+    use crate::ClientSeq;
+
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct Reply {
-        pub seq: u32,
+        pub seq: ClientSeq,
         pub result: Vec<u8>,
     }
 }
@@ -139,8 +141,8 @@ pub mod transport {
         }
     }
 
-    pub struct ServiceKit;
-    impl AbstractService for ServiceTask<ServiceKit> {
+    pub struct Service;
+    impl AbstractService for Service {
         type Reply = message::Reply;
         type Finalized = Command;
 
@@ -151,8 +153,9 @@ pub mod transport {
         fn on_finalized(
             &mut self,
             command: Self::Finalized,
+            task: &mut ServiceTask<Self>,
         ) -> impl Iterator<Item = (ClientId, Self::Reply)> {
-            if matches!(self.replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq)
+            if matches!(task.replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq)
             {
                 tracing::warn!(?command, "duplicated finalized");
                 return None.into_iter();
@@ -162,7 +165,7 @@ pub mod transport {
                 // a 0/0 service, extend to support arbitrary state machine later
                 result: Default::default(),
             };
-            self.replies.insert(command.client_id, reply.clone());
+            task.replies.insert(command.client_id, reply.clone());
             Some((command.client_id, reply)).into_iter()
         }
     }
@@ -171,7 +174,8 @@ pub mod transport {
         let (request_sender, mut request_receiver) = mpsc::channel(1000);
         let (finalized_sender, finalized_receiver) = mpsc::channel(1000);
 
-        let service_task = ServiceTask::<ServiceKit>::new(0, request_sender).run(
+        let service_task = ServiceTask::<Service>::new(0, request_sender).run(
+            Service,
             config.service,
             finalized_receiver,
             cancel.clone(),

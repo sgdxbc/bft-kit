@@ -116,19 +116,17 @@ pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
     Ok((transport, write_senders))
 }
 
-// TODO try to reduce redundancy to ServiceTask::run (if possible)
-impl<K> ServiceTask<K>
-where
-    Self: AbstractService,
-{
+impl<S: AbstractService> ServiceTask<S> {
+    // TODO try to reduce redundancy to ServiceTask::run (if possible)
     pub async fn run_tcp(
         mut self,
+        mut service: S,
         config: ServiceConfig,
-        mut finalized_receiver: Receiver<<Self as AbstractService>::Finalized>,
+        mut finalized_receiver: Receiver<S::Finalized>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()>
     where
-        <Self as AbstractService>::Reply: Encode,
+        S::Reply: Encode,
     {
         let listener =
             TcpListener::bind(config.server_external_addresses[&self.replica_id]).await?;
@@ -171,8 +169,8 @@ where
                 }
                 Message(None) => unreachable!(),
                 Message(Some(command)) => match self.replies.get(&command.client_id) {
-                    Some(reply) if Self::reply_seq(reply) > command.seq => {}
-                    Some(reply) if Self::reply_seq(reply) == command.seq => {
+                    Some(reply) if S::reply_seq(reply) > command.seq => {}
+                    Some(reply) if S::reply_seq(reply) == command.seq => {
                         let sender = write_senders.get(&command.client_id);
                         anyhow::ensure!(
                             sender.is_some(),
@@ -188,7 +186,7 @@ where
                     }
                 },
                 Finalized(Some(finalized)) => {
-                    for (client_id, reply) in self.on_finalized(finalized) {
+                    for (client_id, reply) in service.on_finalized(finalized, &mut self) {
                         let sender = write_senders.get(&client_id);
                         anyhow::ensure!(
                             sender.is_some(),

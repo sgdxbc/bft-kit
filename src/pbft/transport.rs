@@ -176,8 +176,8 @@ pub struct Finalized {
     view_num: ViewNum,
 }
 
-pub struct ServiceKit;
-impl AbstractService for ServiceTask<ServiceKit> {
+pub struct Service;
+impl AbstractService for Service {
     type Reply = message::Reply;
     type Finalized = Finalized;
 
@@ -188,9 +188,10 @@ impl AbstractService for ServiceTask<ServiceKit> {
     fn on_finalized(
         &mut self,
         finalized: Self::Finalized,
+        task: &mut ServiceTask<Self>,
     ) -> impl Iterator<Item = (ClientId, Self::Reply)> {
         finalized.commands.into_iter().filter_map(move |command| {
-            if matches!(self.replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq) {
+            if matches!(task.replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq) {
                 tracing::warn!(?command, "duplicated finalize");
                 return None;
             }
@@ -198,10 +199,10 @@ impl AbstractService for ServiceTask<ServiceKit> {
                 seq: command.seq,
                 // a 0/0 service, extend to support arbitrary state machine later
                 result: Default::default(),
-                replica_id: self.replica_id,
+                replica_id: task.replica_id,
                 view_num: finalized.view_num,
             };
-            self.replies.insert(command.client_id, reply.clone());
+            task.replies.insert(command.client_id, reply.clone());
             Some((command.client_id, reply))
         })
     }
@@ -227,7 +228,8 @@ pub async fn server_task(
     let (finalized_sender, finalized_receiver) = mpsc::channel(100);
 
     let replica_id = replica.core.config.id;
-    let service_task = ServiceTask::<ServiceKit>::new(replica_id, request_sender).run(
+    let service_task = ServiceTask::<Service>::new(replica_id, request_sender).run(
+        Service,
         config.service,
         finalized_receiver,
         cancel.clone(),

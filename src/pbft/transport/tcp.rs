@@ -9,8 +9,8 @@ use tokio_util::sync::CancellationToken;
 use crate::transport::tcp::{boot_client, boot_replica};
 
 use super::{
-    ClientConfig, ClientId, ConcurrentClients, Invoke, Latencies, Replica, ReplicaTask,
-    ServiceConfig, ServiceKit, ServiceTask, Spec, TaskConfig,
+    ClientConfig, ClientId, ConcurrentClients, Invoke, Latencies, Replica, ReplicaTask, Service,
+    ServiceConfig, ServiceTask, Spec, TaskConfig,
 };
 
 pub async fn client_task(
@@ -71,7 +71,8 @@ pub async fn server_task(
     let (finalized_sender, finalized_receiver) = mpsc::channel(100);
 
     let replica_id = replica.core.config.id;
-    let service_task = ServiceTask::<ServiceKit>::new(replica_id, request_sender).run_tcp(
+    let service_task = ServiceTask::<Service>::new(replica_id, request_sender).run_tcp(
+        Service,
         config.service,
         finalized_receiver,
         cancel.clone(),
