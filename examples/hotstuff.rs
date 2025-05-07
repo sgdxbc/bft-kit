@@ -25,12 +25,12 @@ async fn main() -> anyhow::Result<()> {
     let task_config = TaskConfig {
         service: ServiceConfig {
             server_external_addresses: (0..spec.num_replica)
-                .map(|i| (i, ([127, 0, 0, 1], 50000 + i as u16).into()))
+                .map(|i| (i, ([127, 0, 0, 1], 50000 + i).into()))
                 .collect(),
         },
         replica: ReplicaConfig {
             server_internal_addresses: (0..spec.num_replica)
-                .map(|i| (i, ([127, 0, 0, 1], 8000 + i as u16).into()))
+                .map(|i| (i, ([127, 0, 0, 1], 8000 + i).into()))
                 .collect(),
             server_interconnect_delay: Duration::from_millis(100),
         },

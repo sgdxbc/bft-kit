@@ -57,6 +57,7 @@ impl TryFrom<Options> for super::transport::ReplicaConfig {
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(Self {
+            // if necessary, allow nonconsecutive replica id
             server_internal_addresses: options
                 .get_values("server_internal_address")?
                 .into_iter()
@@ -75,6 +76,7 @@ impl TryFrom<Options> for super::transport::ServiceConfig {
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(Self {
+            // if necessary, allow nonconsecutive replica id
             server_external_addresses: options
                 .get_values("server_external_address")?
                 .into_iter()

@@ -1,13 +1,10 @@
 pub mod message {
     use bincode::{Decode, Encode};
 
-    use crate::ReplicaId;
-
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct Reply {
         pub seq: u32,
         pub result: Vec<u8>,
-        pub replica_id: ReplicaId,
     }
 }
 
@@ -164,7 +161,6 @@ pub mod transport {
                 seq: command.seq,
                 // a 0/0 service, extend to support arbitrary state machine later
                 result: Default::default(),
-                replica_id: self.replica_id,
             };
             self.replies.insert(command.client_id, reply.clone());
             Some((command.client_id, reply)).into_iter()

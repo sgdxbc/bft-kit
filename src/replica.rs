@@ -1,6 +1,12 @@
 use crate::command::Command;
 
-pub type Id = u8;
+// theoretically there could be more than 2^16 replicas in the system, but (the
+// common stuff of) this codebase is written without keeping such case in mind
+// roll out protocol specific replica id in such case
+// it's also probably not going to be more than 2^8 replicas, but be prepared
+// for flat id address in potential sharding protocols, also u16 is easier for
+// replica id <-> port mapping
+pub type Id = u16;
 
 #[derive(Debug)]
 pub enum Action<M> {

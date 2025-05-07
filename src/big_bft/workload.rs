@@ -5,6 +5,12 @@ pub struct Workload {
     key_index: usize,
 }
 
+impl Default for Workload {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Workload {
     pub fn new() -> Self {
         Self { key_index: 0 }
