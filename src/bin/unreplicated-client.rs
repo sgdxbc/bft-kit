@@ -3,8 +3,8 @@ use std::{env::args, path::PathBuf};
 use bft_kit::{
     init_logging,
     parse::Options,
-    transport::ClientConfig::CloseLoop,
     unreplicated::transport::{TaskConfig, WARMUP_DURATION, clients_task},
+    workload::ClientConfig::CloseLoop,
     workload::report_latencies,
 };
 use tokio::fs::read_to_string;
@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(config_path.with_file_name("network.conf")).await?);
 
     let mut config = TaskConfig::try_from(options.clone())?;
-    anyhow::ensure!(matches!(config.client, CloseLoop), "unimplemented");
+    anyhow::ensure!(matches!(config.workload.client, CloseLoop), "unimplemented");
     config
         .service
         .server_external_addresses
@@ -32,6 +32,6 @@ async fn main() -> anyhow::Result<()> {
         .instrument(tracing::info_span!("concurrent close loops"))
         .await?;
 
-    report_latencies(client_latencies, config.client_duration - WARMUP_DURATION);
+    report_latencies(client_latencies, config.workload.duration - WARMUP_DURATION);
     Ok(())
 }

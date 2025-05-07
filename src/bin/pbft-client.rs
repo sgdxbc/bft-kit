@@ -4,8 +4,7 @@ use bft_kit::{
     init_logging,
     parse::Options,
     pbft::transport::{TaskConfig, WARMUP_DURATION, clients_task, tcp},
-    transport::ClientConfig,
-    workload::report_latencies,
+    workload::{ClientConfig::CloseLoop, report_latencies},
 };
 use tokio::fs::read_to_string;
 use tokio_util::either::Either;
@@ -25,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = TaskConfig::try_from(options.clone())?;
     anyhow::ensure!(
-        matches!(config.client, ClientConfig::CloseLoop),
+        matches!(config.workload.client, CloseLoop),
         "yet unimplemented"
     );
     let client_latencies = if !config.use_tcp {
@@ -36,6 +35,6 @@ async fn main() -> anyhow::Result<()> {
     .instrument(tracing::info_span!("concurrent close loops"))
     .await?;
 
-    report_latencies(client_latencies, config.client_duration - WARMUP_DURATION);
+    report_latencies(client_latencies, config.workload.duration - WARMUP_DURATION);
     Ok(())
 }

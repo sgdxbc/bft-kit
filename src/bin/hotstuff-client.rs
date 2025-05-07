@@ -26,6 +26,6 @@ async fn main() -> anyhow::Result<()> {
         .instrument(tracing::info_span!("concurrent close loops"))
         .await?;
 
-    report_latencies(client_latencies, config.client_duration - WARMUP_DURATION);
+    report_latencies(client_latencies, config.workload.duration - WARMUP_DURATION);
     Ok(())
 }

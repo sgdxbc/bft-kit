@@ -1,16 +1,21 @@
 use std::{pin::pin, time::Duration};
 
 use bft_kit::{
-    common::ClientId,
+    ClientId,
     crypto::threshold::givre_replica_key_shares,
     hotstuff::{
         CryptoConfig, Replica, ReplicaCoreConfig, Spec,
-        transport::{TaskConfig, client_task, server_task},
+        transport::{ClientTask, TaskConfig, server_task},
     },
     init_logging,
-    transport::{ClientConfig, ReplicaConfig, ServiceConfig},
+    transport::{ReplicaConfig, ServiceConfig},
+    workload::{self, ClientConfig::CloseLoop, ClientTask as _},
 };
-use tokio::{sync::mpsc, task::JoinSet, time::timeout};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+    time::timeout,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -25,20 +30,21 @@ async fn main() -> anyhow::Result<()> {
     let task_config = TaskConfig {
         service: ServiceConfig {
             server_external_addresses: (0..spec.num_replica)
-                .map(|i| (i, ([127, 0, 0, 1], 50000 + i as u16).into()))
+                .map(|i| (i, ([127, 0, 0, 1], 50000 + i).into()))
                 .collect(),
         },
         replica: ReplicaConfig {
             server_internal_addresses: (0..spec.num_replica)
-                .map(|i| (i, ([127, 0, 0, 1], 8000 + i as u16).into()))
+                .map(|i| (i, ([127, 0, 0, 1], 8000 + i).into()))
                 .collect(),
             server_interconnect_delay: Duration::from_millis(100),
         },
-        client: ClientConfig::CloseLoop,
-
-        // these two values unused. this example sends single request from one client
-        num_client: 0,
-        client_duration: Duration::ZERO,
+        workload: workload::Config {
+            client: CloseLoop,
+            // these two values unused. this example sends single request from one client
+            num_client: 0,
+            duration: Duration::ZERO,
+        },
 
         // effectively disable ticks
         tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
@@ -72,21 +78,25 @@ async fn main() -> anyhow::Result<()> {
         Err(_) => {}
     }
     let (invoke_sender, invoke_receiver) = mpsc::channel(1);
-    let (commit_sender, mut commit_receiver) = mpsc::channel(1);
-    let mut client_task = pin!(client_task(
-        spec,
-        task_config.client,
-        task_config.service,
-        ClientId(0),
-        invoke_receiver,
-        commit_sender,
-    ));
+    let (commit_sender, commit_receiver) = oneshot::channel();
+    let mut client_task = pin!(
+        ClientTask {
+            spec,
+            service_config: task_config.service,
+        }
+        .run(
+            ClientId(0),
+            task_config.workload.client,
+            invoke_receiver,
+            Some(commit_sender),
+        )
+    );
     invoke_sender
         .send((Default::default(), Some(Default::default())))
         .await?;
     async {
         tokio::select! {
-            commit = commit_receiver.recv() => anyhow::Ok(commit.unwrap()),
+            commit = commit_receiver => anyhow::Ok(commit?),
             result = &mut client_task => {
                 result?;
                 unreachable!()
@@ -100,8 +110,10 @@ async fn main() -> anyhow::Result<()> {
     .instrument(tracing::info_span!("invoke"))
     .await?;
     drop(invoke_sender);
-    let latencies = client_task.await?;
-    tracing::info!(latency = ?Duration::from_micros(latencies.mean() as _));
-    server_tasks.abort_all();
+    client_task.await?;
+    cancel.cancel();
+    while let Some(result) = server_tasks.join_next().await {
+        result??
+    }
     Ok(())
 }

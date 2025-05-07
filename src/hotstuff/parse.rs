@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{common::ReplicaId, crypto::threshold::givre_replica_key_shares, parse::Options};
+use crate::{ReplicaId, crypto::threshold::givre_replica_key_shares, parse::Options};
 
 impl TryFrom<Options> for super::Spec {
     type Error = anyhow::Error; // TODO
@@ -35,11 +35,9 @@ impl TryFrom<Options> for super::transport::TaskConfig {
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(Self {
-            client: options.clone().try_into()?,
+            workload: options.clone().try_into()?,
             replica: options.clone().try_into()?,
             service: options.clone().try_into()?,
-            num_client: options.get("num_client")?,
-            client_duration: Duration::from_secs_f32(options.get("client_duration")?),
             tick_interval: Duration::from_secs_f32(options.get("tick_interval")?),
         })
     }

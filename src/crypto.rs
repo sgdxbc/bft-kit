@@ -3,12 +3,12 @@ use std::fmt::{Debug, Display};
 use bincode::{BorrowDecode, Decode, Encode, error::DecodeError};
 use sha2::Digest as _;
 
-use crate::common::{ReplicaId, fmt_bytes};
+use crate::{ReplicaId, fmt_bytes};
 
 pub mod cert;
 pub mod threshold;
 
-#[derive(Clone, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Encode, Decode)]
 pub struct Digest(pub [u8; 32]);
 
 impl Display for Digest {

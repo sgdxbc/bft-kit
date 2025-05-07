@@ -11,11 +11,9 @@ use tokio::{
 use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
 use crate::{
-    common::ReplicaAction,
+    ClientId, ClientSeq, Command, ReplicaAction, ReplicaId,
     crypto::cert::quinn::{client_config, server_config},
 };
-
-use crate::common::{ClientId, ClientSeq, Command, ReplicaId};
 
 pub mod tcp;
 
@@ -97,18 +95,6 @@ impl Default for Transport {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum ClientConfig {
-    CloseLoop,
-    OpenLoop(OpenLoopClientConfig),
-}
-
-#[derive(Debug, Clone)]
-pub struct OpenLoopClientConfig {
-    pub num_max_concurrent: usize,
-    pub sending_rate: f32,
-}
-
 // TODO extract client skeleton
 // not sure whether that is possible or not since (simple) clients are inline
 // implemented in transport
@@ -144,33 +130,27 @@ pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
     Ok((transport, write_senders))
 }
 
-// this abstraction feels weird (maybe it's over engineered)
-pub struct ServiceTask<P>
-where
-    Self: AbstractService,
-{
-    pub replies: HashMap<ClientId, <Self as AbstractService>::Reply>,
+pub struct ServiceTask<S: AbstractService> {
+    pub replies: HashMap<ClientId, S::Reply>,
     pub request_sender: Sender<Command>,
     // TODO service state machine
     pub replica_id: ReplicaId,
 }
 
-pub trait AbstractService {
+pub trait AbstractService: Sized {
     type Reply;
     type Finalized;
 
+    // extract a Reply trait if necessary
     fn reply_seq(reply: &Self::Reply) -> ClientSeq;
-
     fn on_finalized(
         &mut self,
         finalized: Self::Finalized,
+        task: &mut ServiceTask<Self>,
     ) -> impl Iterator<Item = (ClientId, Self::Reply)>;
 }
 
-impl<K> ServiceTask<K>
-where
-    Self: AbstractService,
-{
+impl<S: AbstractService> ServiceTask<S> {
     pub fn new(replica_id: ReplicaId, request_sender: Sender<Command>) -> Self {
         Self {
             replica_id,
@@ -181,12 +161,13 @@ where
 
     pub async fn run(
         mut self,
+        mut service: S,
         config: ServiceConfig,
-        mut finalized_receiver: Receiver<<Self as AbstractService>::Finalized>,
+        mut finalized_receiver: Receiver<S::Finalized>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()>
     where
-        <Self as AbstractService>::Reply: Encode,
+        S::Reply: Encode,
     {
         let mut transport = TransportConfig::default();
         transport.max_idle_timeout(None);
@@ -238,8 +219,8 @@ where
                 }
                 Message(None) => unreachable!(),
                 Message(Some(command)) => match self.replies.get(&command.client_id) {
-                    Some(reply) if Self::reply_seq(reply) > command.seq => {}
-                    Some(reply) if Self::reply_seq(reply) == command.seq => {
+                    Some(reply) if S::reply_seq(reply) > command.seq => {}
+                    Some(reply) if S::reply_seq(reply) == command.seq => {
                         let sender = write_senders.get(&command.client_id);
                         anyhow::ensure!(
                             sender.is_some(),
@@ -255,7 +236,7 @@ where
                     }
                 },
                 Finalized(Some(finalized)) => {
-                    for (client_id, reply) in self.on_finalized(finalized) {
+                    for (client_id, reply) in service.on_finalized(finalized, &mut self) {
                         let sender = write_senders.get(&client_id);
                         anyhow::ensure!(
                             sender.is_some(),
@@ -279,8 +260,9 @@ where
 pub struct ReplicaConfig {
     pub server_internal_addresses: HashMap<ReplicaId, SocketAddr>,
     // how long should replicas wait before attempting to connect each other's
-    // internal addresses. set longer in higher latency environments (or human
-    // action is involved)
+    // internal addresses. not necessary for QUIC because it allows connect before
+    // accept. set longer in higher latency environments (or human action is
+    // involved)
     pub server_interconnect_delay: Duration,
 }
 
@@ -365,7 +347,7 @@ pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
     Ok((transport, write_senders))
 }
 
-pub trait AbstractReplica: crate::common::AbstractReplica {
+pub trait AbstractReplica: crate::replica::AbstractReplica {
     type Finalized;
 
     fn finalized(&self, commands: Vec<Command>) -> Self::Finalized;
@@ -377,10 +359,7 @@ pub struct ReplicaTask<R: AbstractReplica> {
     pub replica: R,
 }
 
-pub trait Effect<R>
-where
-    R: AbstractReplica,
-{
+pub trait Effect<R: AbstractReplica> {
     fn effect(self, task: &mut ReplicaTask<R>) -> impl Future<Output = anyhow::Result<()>>;
 }
 

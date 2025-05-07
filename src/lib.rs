@@ -1,10 +1,17 @@
-pub mod command_pool;
-pub use command_pool::CommandPool;
-pub mod common;
+pub mod client;
+pub use client::Action as ClientAction;
+pub use client::Id as ClientId;
+pub use client::Seq as ClientSeq;
+pub mod command;
+pub use command::Command;
+pub use command::pool::CommandPool;
 pub mod crypto;
 pub mod hotstuff;
 pub mod parse;
 pub mod pbft;
+pub mod replica;
+pub use replica::Action as ReplicaAction;
+pub use replica::Id as ReplicaId;
 #[cfg(test)]
 pub mod testing; // no test inside, common infrastructure for writing tests
 pub mod transport;
@@ -45,4 +52,18 @@ pub fn init_logging() {
             }
         })
         .init();
+}
+
+pub fn fmt_bytes(bytes: &[u8], f: &mut impl std::fmt::Write) -> std::fmt::Result {
+    use std::fmt::Write as _;
+    let prefix_hex = bytes.iter().take(4).fold(String::new(), |mut s, b| {
+        write!(&mut s, "{b:02x}").unwrap();
+        s
+    });
+    write!(
+        f,
+        "[{}]({prefix_hex}{})",
+        bytes.len(),
+        if bytes.len() > 4 { "..." } else { "" }
+    )
 }

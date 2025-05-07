@@ -36,12 +36,10 @@ impl TryFrom<Options> for super::transport::TaskConfig {
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(Self {
-            client: options.clone().try_into()?,
+            workload: options.clone().try_into()?,
             replica: options.clone().try_into()?,
             service: options.clone().try_into()?,
             use_tcp: options.try_get("use_tcp")?.unwrap_or(false),
-            num_client: options.get("num_client")?,
-            client_duration: Duration::from_secs_f32(options.get("client_duration")?),
             tick_interval: Duration::from_secs_f32(options.get("tick_interval")?),
         })
     }

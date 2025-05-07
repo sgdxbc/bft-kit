@@ -52,11 +52,12 @@ impl Options {
     }
 }
 
-impl TryFrom<Options> for super::transport::ReplicaConfig {
+impl TryFrom<Options> for crate::transport::ReplicaConfig {
     type Error = anyhow::Error;
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(Self {
+            // if necessary, allow nonconsecutive replica id
             server_internal_addresses: options
                 .get_values("server_internal_address")?
                 .into_iter()
@@ -70,11 +71,12 @@ impl TryFrom<Options> for super::transport::ReplicaConfig {
     }
 }
 
-impl TryFrom<Options> for super::transport::ServiceConfig {
+impl TryFrom<Options> for crate::transport::ServiceConfig {
     type Error = anyhow::Error;
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(Self {
+            // if necessary, allow nonconsecutive replica id
             server_external_addresses: options
                 .get_values("server_external_address")?
                 .into_iter()
@@ -85,17 +87,29 @@ impl TryFrom<Options> for super::transport::ServiceConfig {
     }
 }
 
-impl TryFrom<Options> for super::transport::ClientConfig {
+impl TryFrom<Options> for crate::workload::ClientConfig {
     type Error = anyhow::Error;
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(if !matches!(options.try_get("open_loop")?, Some(true)) {
             Self::CloseLoop
         } else {
-            Self::OpenLoop(super::transport::OpenLoopClientConfig {
-                num_max_concurrent: options.get("num_max_concurrent")?,
+            Self::OpenLoop(crate::workload::OpenLoopClientConfig {
+                num_max_inflight: options.get("num_max_concurrent")?,
                 sending_rate: options.get("sending_rate")?,
             })
+        })
+    }
+}
+
+impl TryFrom<Options> for crate::workload::Config {
+    type Error = anyhow::Error;
+
+    fn try_from(options: Options) -> Result<Self, Self::Error> {
+        Ok(Self {
+            client: options.clone().try_into()?,
+            num_client: options.get("num_client")?,
+            duration: Duration::from_secs_f32(options.get("client_duration")?),
         })
     }
 }

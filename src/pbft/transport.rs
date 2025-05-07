@@ -8,13 +8,14 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    common::{ClientId, ClientSeq, Quorum, ReplicaId},
+    ClientId, ClientSeq, ReplicaId,
     pbft::{Command, ToClient, ViewNum},
+    replica::Quorum,
     transport::{
-        AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask, ServiceConfig,
-        ServiceTask, Transport, TransportAndSenders, boot_client,
+        AbstractReplica, AbstractService, ReplicaConfig, ReplicaTask, ServiceConfig, ServiceTask,
+        Transport, TransportAndSenders, boot_client,
     },
-    workload::{ConcurrentClients, Invoke, Latencies},
+    workload::{self, ClientConfig, ConcurrentClients, Invoke, Latencies},
 };
 
 use super::{Replica, Spec, message};
@@ -23,34 +24,38 @@ pub mod tcp;
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
-    pub client: ClientConfig,
+    pub workload: workload::Config,
     pub replica: ReplicaConfig,
     pub service: ServiceConfig,
     pub use_tcp: bool,
-    pub num_client: usize,
-    pub client_duration: Duration,
     pub tick_interval: Duration,
 }
 
 pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
 
-pub async fn client_task(
-    spec: Spec,
-    config: ClientConfig,
-    service_config: ServiceConfig,
-    id: ClientId,
-    invoke_receiver: Receiver<Invoke>,
-    commit_sender: Sender<ClientId>,
-) -> anyhow::Result<Histogram<u32>> {
-    client_task_with_bootstrap(
-        spec,
-        config,
-        id,
-        invoke_receiver,
-        commit_sender,
-        |message_sender| boot_client(id, service_config, message_sender),
-    )
-    .await
+#[derive(Debug, Clone)]
+pub struct ClientTask {
+    pub spec: Spec,
+    pub service_config: ServiceConfig,
+}
+
+impl crate::workload::ClientTask for ClientTask {
+    fn run(
+        self,
+        client_id: ClientId,
+        config: ClientConfig,
+        invoke_receiver: Receiver<Invoke>,
+        context: impl crate::workload::AbstractContext + Send,
+    ) -> impl Future<Output = anyhow::Result<Latencies>> + Send {
+        client_task_with_bootstrap(
+            self.spec,
+            config,
+            client_id,
+            invoke_receiver,
+            context,
+            move |message_sender| boot_client(client_id, self.service_config, message_sender),
+        )
+    }
 }
 
 async fn client_task_with_bootstrap(
@@ -58,7 +63,7 @@ async fn client_task_with_bootstrap(
     config: ClientConfig,
     id: ClientId,
     mut invoke_receiver: Receiver<Invoke>,
-    commit_sender: Sender<ClientId>,
+    mut context: impl crate::workload::AbstractContext,
     bootstrap: impl AsyncFnOnce(Sender<ToClient>) -> anyhow::Result<TransportAndSenders>,
 ) -> anyhow::Result<Latencies> {
     let (message_sender, mut message_receiver) = mpsc::channel(100);
@@ -101,7 +106,7 @@ async fn client_task_with_bootstrap(
                     // resend for close loop?
                     ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),
                     ClientConfig::OpenLoop(config) => {
-                        if seq_scratch.len() == config.num_max_concurrent {
+                        if seq_scratch.len() == config.num_max_inflight {
                             seq_scratch.pop_first();
                         }
                     }
@@ -139,7 +144,7 @@ async fn client_task_with_bootstrap(
                     if end.duration_since(start) >= WARMUP_DURATION {
                         latencies += end.duration_since(scratch.start).as_micros() as u64;
                     }
-                    commit_sender.send(id).await?
+                    context.commit().await?
                 }
             }
         }
@@ -147,27 +152,15 @@ async fn client_task_with_bootstrap(
 }
 
 pub async fn clients_task(spec: Spec, config: TaskConfig) -> anyhow::Result<Vec<Latencies>> {
-    let mut concurrent_clients = ConcurrentClients::new();
-    for _ in 0..config.num_client {
-        concurrent_clients.spawn(|id, invoke_receiver, commit_sender| {
-            client_task(
-                spec.clone(),
-                config.client.clone(),
-                config.service.clone(),
-                id,
-                invoke_receiver,
-                commit_sender,
-            )
-        })
-    }
-    match config.client {
-        ClientConfig::CloseLoop => concurrent_clients.close_loop(config.client_duration).await,
-        ClientConfig::OpenLoop(client_config) => {
-            concurrent_clients
-                .open_loop(config.client_duration, client_config.sending_rate)
-                .await
-        }
-    }
+    ConcurrentClients::new()
+        .run(
+            config.workload,
+            ClientTask {
+                spec,
+                service_config: config.service,
+            },
+        )
+        .await
 }
 
 pub struct Finalized {
@@ -175,8 +168,8 @@ pub struct Finalized {
     view_num: ViewNum,
 }
 
-pub struct ServiceKit;
-impl AbstractService for ServiceTask<ServiceKit> {
+pub struct Service;
+impl AbstractService for Service {
     type Reply = message::Reply;
     type Finalized = Finalized;
 
@@ -187,9 +180,10 @@ impl AbstractService for ServiceTask<ServiceKit> {
     fn on_finalized(
         &mut self,
         finalized: Self::Finalized,
+        task: &mut ServiceTask<Self>,
     ) -> impl Iterator<Item = (ClientId, Self::Reply)> {
         finalized.commands.into_iter().filter_map(move |command| {
-            if matches!(self.replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq) {
+            if matches!(task.replies.get(&command.client_id), Some(reply) if reply.seq >= command.seq) {
                 tracing::warn!(?command, "duplicated finalize");
                 return None;
             }
@@ -197,10 +191,10 @@ impl AbstractService for ServiceTask<ServiceKit> {
                 seq: command.seq,
                 // a 0/0 service, extend to support arbitrary state machine later
                 result: Default::default(),
-                replica_id: self.replica_id,
+                replica_id: task.replica_id,
                 view_num: finalized.view_num,
             };
-            self.replies.insert(command.client_id, reply.clone());
+            task.replies.insert(command.client_id, reply.clone());
             Some((command.client_id, reply))
         })
     }
@@ -226,7 +220,8 @@ pub async fn server_task(
     let (finalized_sender, finalized_receiver) = mpsc::channel(100);
 
     let replica_id = replica.core.config.id;
-    let service_task = ServiceTask::<ServiceKit>::new(replica_id, request_sender).run(
+    let service_task = ServiceTask::<Service>::new(replica_id, request_sender).run(
+        Service,
         config.service,
         finalized_receiver,
         cancel.clone(),
