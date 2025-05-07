@@ -19,6 +19,7 @@
         "libhotstuff",
         "newtype",
         "Niko",
+        "oneshot",
         "pbft",
         "permissioned",
         "permissionless",

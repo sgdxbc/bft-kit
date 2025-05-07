@@ -5,13 +5,17 @@ use bft_kit::{
     crypto::threshold::givre_replica_key_shares,
     hotstuff::{
         CryptoConfig, Replica, ReplicaCoreConfig, Spec,
-        transport::{TaskConfig, client_task, server_task},
+        transport::{ClientTask, TaskConfig, server_task},
     },
     init_logging,
     transport::{ReplicaConfig, ServiceConfig},
-    workload::ClientConfig::CloseLoop,
+    workload::{ClientConfig::CloseLoop, ClientTask as _},
 };
-use tokio::{sync::mpsc, task::JoinSet, time::timeout};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+    time::timeout,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -73,21 +77,25 @@ async fn main() -> anyhow::Result<()> {
         Err(_) => {}
     }
     let (invoke_sender, invoke_receiver) = mpsc::channel(1);
-    let (commit_sender, mut commit_receiver) = mpsc::channel(1);
-    let mut client_task = pin!(client_task(
-        spec,
-        task_config.client,
-        task_config.service,
-        ClientId(0),
-        invoke_receiver,
-        commit_sender,
-    ));
+    let (commit_sender, commit_receiver) = oneshot::channel();
+    let mut client_task = pin!(
+        ClientTask {
+            spec,
+            service_config: task_config.service,
+        }
+        .run(
+            ClientId(0),
+            task_config.client,
+            invoke_receiver,
+            Some(commit_sender),
+        )
+    );
     invoke_sender
         .send((Default::default(), Some(Default::default())))
         .await?;
     async {
         tokio::select! {
-            commit = commit_receiver.recv() => anyhow::Ok(commit.unwrap()),
+            commit = commit_receiver => anyhow::Ok(commit?),
             result = &mut client_task => {
                 result?;
                 unreachable!()

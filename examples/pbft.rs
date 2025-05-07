@@ -4,12 +4,16 @@ use bft_kit::{
     ClientId, init_logging,
     pbft::{
         Replica, ReplicaCoreConfig, Spec,
-        transport::{TaskConfig, client_task, server_task, tcp},
+        transport::{ClientTask, TaskConfig, server_task, tcp},
     },
     transport::{ReplicaConfig, ServiceConfig},
-    workload::ClientConfig::CloseLoop,
+    workload::{ClientConfig::CloseLoop, ClientTask as _},
 };
-use tokio::{sync::mpsc, task::JoinSet, time::timeout};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+    time::timeout,
+};
 use tokio_util::{either::Either, sync::CancellationToken};
 use tracing::Instrument;
 
@@ -73,32 +77,40 @@ async fn main() -> anyhow::Result<()> {
         Err(_) => {}
     }
     let (invoke_sender, invoke_receiver) = mpsc::channel(1);
-    let (commit_sender, mut commit_receiver) = mpsc::channel(1);
+    let (commit_sender, commit_receiver) = oneshot::channel();
     let mut client_task = pin!(if !task_config.use_tcp {
-        Either::Left(client_task(
-            spec,
-            task_config.client,
-            task_config.service,
-            ClientId(0),
-            invoke_receiver,
-            commit_sender,
-        ))
+        Either::Left(
+            ClientTask {
+                spec,
+                service_config: task_config.service,
+            }
+            .run(
+                ClientId(0),
+                task_config.client,
+                invoke_receiver,
+                Some(commit_sender),
+            ),
+        )
     } else {
-        Either::Right(tcp::client_task(
-            spec,
-            task_config.client,
-            task_config.service,
-            ClientId(0),
-            invoke_receiver,
-            commit_sender,
-        ))
+        Either::Right(
+            tcp::ClientTask {
+                spec,
+                service_config: task_config.service,
+            }
+            .run(
+                ClientId(0),
+                task_config.client,
+                invoke_receiver,
+                Some(commit_sender),
+            ),
+        )
     });
     invoke_sender
         .send((Default::default(), Some(Default::default())))
         .await?;
     async {
         tokio::select! {
-            commit = commit_receiver.recv() => anyhow::Ok(commit.unwrap()),
+            commit = commit_receiver => anyhow::Ok(commit?),
             result = &mut client_task => {
                 result?;
                 unreachable!()

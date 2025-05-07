@@ -9,7 +9,10 @@ use hdrhistogram::Histogram;
 use rand::random;
 use rand_distr::{Distribution, Exp};
 use tokio::{
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        oneshot,
+    },
     task::JoinSet,
     time::{Instant, sleep_until, timeout_at},
 };
@@ -36,7 +39,6 @@ pub struct ConcurrentClients {
 }
 
 pub type Latencies = hdrhistogram::Histogram<u32>;
-pub type Invoke = (Vec<u8>, Option<Vec<u8>>);
 
 impl ConcurrentClients {
     pub fn new() -> Self {
@@ -48,17 +50,45 @@ impl ConcurrentClients {
             commit_receiver,
         }
     }
+}
 
-    pub fn spawn<F: Future<Output = anyhow::Result<Latencies>> + Send + 'static>(
-        &mut self,
-        task: impl FnOnce(ClientId, Receiver<Invoke>, Sender<ClientId>) -> F,
-    ) {
+pub type Invoke = (Vec<u8>, Option<Vec<u8>>);
+
+pub trait ClientTask {
+    fn run(
+        self,
+        client_id: ClientId,
+        config: ClientConfig,
+        invoke_receiver: Receiver<Invoke>,
+        context: impl AbstractContext + Send,
+    ) -> impl Future<Output = anyhow::Result<Latencies>> + Send;
+}
+
+pub trait AbstractContext {
+    fn commit(&mut self) -> impl Future<Output = anyhow::Result<()>> + Send;
+}
+
+pub struct Context(ClientId, Sender<ClientId>);
+
+impl AbstractContext for Context {
+    async fn commit(&mut self) -> anyhow::Result<()> {
+        self.1.send(self.0).await?;
+        Ok(())
+    }
+}
+
+impl ConcurrentClients {
+    pub fn spawn(&mut self, task: impl ClientTask + 'static, config: ClientConfig) {
         let id = ClientId(random());
         let (invoke_sender, invoke_receiver) = mpsc::channel(100);
         let replaced = self.invoke_senders.insert(id, invoke_sender);
         assert!(replaced.is_none());
-        self.tasks
-            .spawn(task(id, invoke_receiver, self.commit_sender.clone()));
+        self.tasks.spawn(task.run(
+            id,
+            config,
+            invoke_receiver,
+            Context(id, self.commit_sender.clone()),
+        ));
     }
 
     pub async fn run(
@@ -167,6 +197,17 @@ impl ConcurrentClients {
 impl Default for ConcurrentClients {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl AbstractContext for Option<oneshot::Sender<()>> {
+    async fn commit(&mut self) -> anyhow::Result<()> {
+        let Some(sender) = self.take() else {
+            anyhow::bail!("multiple commit")
+        };
+        sender
+            .send(())
+            .map_err(|()| anyhow::format_err!("channel closed"))
     }
 }
 

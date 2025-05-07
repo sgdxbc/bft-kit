@@ -16,7 +16,7 @@ pub mod transport {
     use std::{collections::BTreeMap, time::Duration};
 
     use tokio::{
-        sync::mpsc::{self, Receiver, Sender},
+        sync::mpsc::{self, Receiver},
         time::Instant,
     };
     use tokio_util::sync::CancellationToken;
@@ -41,77 +41,79 @@ pub mod transport {
 
     pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
 
-    pub async fn client_task(
-        config: ClientConfig,
+    pub struct ClientTask {
         service_config: ServiceConfig,
-        id: ClientId,
-        mut invoke_receiver: Receiver<Invoke>,
-        commit_sender: Sender<ClientId>,
-    ) -> anyhow::Result<Latencies> {
-        let (message_sender, mut message_receiver) = mpsc::channel(64);
-        let (mut transport, replica_egresses) =
-            boot_client(id, service_config, message_sender).await?;
+    }
 
-        let mut seq = 0;
-        let mut latencies = Latencies::new(3)?;
-        let start = Instant::now();
-        struct SeqScratch {
-            expected_result: Option<Vec<u8>>,
-            start: Instant,
-        }
-        let mut seq_scratch = BTreeMap::new();
-        loop {
-            enum Select {
-                Invoke(Option<Invoke>),
-                Message(Option<ToClient>),
-                TransportJoinNext(()),
+    impl crate::workload::ClientTask for ClientTask {
+        async fn run(
+            self,
+            client_id: ClientId,
+            config: ClientConfig,
+            mut invoke_receiver: Receiver<Invoke>,
+            mut context: impl crate::workload::AbstractContext,
+        ) -> anyhow::Result<Latencies> {
+            let (message_sender, mut message_receiver) = mpsc::channel(64);
+            let (mut transport, replica_egresses) =
+                boot_client(client_id, self.service_config, message_sender).await?;
+
+            let mut seq = 0;
+            let mut latencies = Latencies::new(3)?;
+            let start = Instant::now();
+            struct SeqScratch {
+                expected_result: Option<Vec<u8>>,
+                start: Instant,
             }
-            match tokio::select! {
-                invoke = invoke_receiver.recv() => Select::Invoke(invoke),
-                message = message_receiver.recv() => Select::Message(message),
-                result = transport.join_next() => Select::TransportJoinNext(result?)
-            } {
-                Select::TransportJoinNext(()) | Select::Message(None) => unreachable!(),
-                Select::Invoke(None) => break Ok(latencies),
-                Select::Invoke(Some((op, result))) => {
-                    seq += 1;
-                    let command = Command {
-                        client_id: id,
-                        seq,
-                        op,
-                    };
-                    let egress = replica_egresses.get(&0);
-                    anyhow::ensure!(egress.is_some());
-                    Transport::write(command, egress).await?;
-                    match &config {
-                        // resend for close loop?
-                        ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),
-                        ClientConfig::OpenLoop(config) => {
-                            if seq_scratch.len() == config.num_max_inflight {
-                                seq_scratch.pop_first();
+            let mut seq_scratch = BTreeMap::new();
+            loop {
+                enum Select {
+                    Invoke(Option<Invoke>),
+                    Message(Option<ToClient>),
+                    TransportJoinNext(()),
+                }
+                match tokio::select! {
+                    invoke = invoke_receiver.recv() => Select::Invoke(invoke),
+                    message = message_receiver.recv() => Select::Message(message),
+                    result = transport.join_next() => Select::TransportJoinNext(result?)
+                } {
+                    Select::TransportJoinNext(()) | Select::Message(None) => unreachable!(),
+                    Select::Invoke(None) => break Ok(latencies),
+                    Select::Invoke(Some((op, result))) => {
+                        seq += 1;
+                        let command = Command { client_id, seq, op };
+                        let egress = replica_egresses.get(&0);
+                        anyhow::ensure!(egress.is_some());
+                        Transport::write(command, egress).await?;
+                        match &config {
+                            // resend for close loop?
+                            ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),
+                            ClientConfig::OpenLoop(config) => {
+                                if seq_scratch.len() == config.num_max_inflight {
+                                    seq_scratch.pop_first();
+                                }
                             }
                         }
+                        seq_scratch.insert(
+                            seq,
+                            SeqScratch {
+                                expected_result: result,
+                                start: Instant::now(),
+                            },
+                        );
                     }
-                    seq_scratch.insert(
-                        seq,
-                        SeqScratch {
-                            expected_result: result,
-                            start: Instant::now(),
-                        },
-                    );
-                }
-                Select::Message(Some(reply)) => {
-                    let Some(scratch) = seq_scratch.remove(&reply.seq) else {
-                        continue;
-                    };
-                    if let Some(result) = scratch.expected_result {
-                        anyhow::ensure!(reply.result == result)
+                    Select::Message(Some(reply)) => {
+                        let Some(scratch) = seq_scratch.remove(&reply.seq) else {
+                            continue;
+                        };
+                        if let Some(result) = scratch.expected_result {
+                            anyhow::ensure!(reply.result == result)
+                        }
+                        let end = Instant::now();
+                        if end.duration_since(start) >= WARMUP_DURATION {
+                            latencies += end.duration_since(scratch.start).as_micros() as u64;
+                        }
+                        context.commit().await?
                     }
-                    let end = Instant::now();
-                    if end.duration_since(start) >= WARMUP_DURATION {
-                        latencies += end.duration_since(scratch.start).as_micros() as u64;
-                    }
-                    commit_sender.send(id).await?
                 }
             }
         }
@@ -120,15 +122,12 @@ pub mod transport {
     pub async fn clients_task(config: TaskConfig) -> anyhow::Result<Vec<Latencies>> {
         let mut concurrent_clients = ConcurrentClients::new();
         for _ in 0..config.num_client {
-            concurrent_clients.spawn(|id, invoke_receiver, commit_sender| {
-                client_task(
-                    config.client.clone(),
-                    config.service.clone(),
-                    id,
-                    invoke_receiver,
-                    commit_sender,
-                )
-            })
+            concurrent_clients.spawn(
+                ClientTask {
+                    service_config: config.service.clone(),
+                },
+                config.client.clone(),
+            )
         }
         concurrent_clients
             .run(config.client, config.client_duration)

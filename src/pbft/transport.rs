@@ -35,23 +35,28 @@ pub struct TaskConfig {
 
 pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
 
-pub async fn client_task(
-    spec: Spec,
-    config: ClientConfig,
-    service_config: ServiceConfig,
-    id: ClientId,
-    invoke_receiver: Receiver<Invoke>,
-    commit_sender: Sender<ClientId>,
-) -> anyhow::Result<Histogram<u32>> {
-    client_task_with_bootstrap(
-        spec,
-        config,
-        id,
-        invoke_receiver,
-        commit_sender,
-        |message_sender| boot_client(id, service_config, message_sender),
-    )
-    .await
+pub struct ClientTask {
+    pub spec: Spec,
+    pub service_config: ServiceConfig,
+}
+
+impl crate::workload::ClientTask for ClientTask {
+    fn run(
+        self,
+        client_id: ClientId,
+        config: ClientConfig,
+        invoke_receiver: Receiver<Invoke>,
+        context: impl crate::workload::AbstractContext + Send,
+    ) -> impl Future<Output = anyhow::Result<Latencies>> + Send {
+        client_task_with_bootstrap(
+            self.spec,
+            config,
+            client_id,
+            invoke_receiver,
+            context,
+            move |message_sender| boot_client(client_id, self.service_config, message_sender),
+        )
+    }
 }
 
 async fn client_task_with_bootstrap(
@@ -59,7 +64,7 @@ async fn client_task_with_bootstrap(
     config: ClientConfig,
     id: ClientId,
     mut invoke_receiver: Receiver<Invoke>,
-    commit_sender: Sender<ClientId>,
+    mut context: impl crate::workload::AbstractContext,
     bootstrap: impl AsyncFnOnce(Sender<ToClient>) -> anyhow::Result<TransportAndSenders>,
 ) -> anyhow::Result<Latencies> {
     let (message_sender, mut message_receiver) = mpsc::channel(100);
@@ -140,7 +145,7 @@ async fn client_task_with_bootstrap(
                     if end.duration_since(start) >= WARMUP_DURATION {
                         latencies += end.duration_since(scratch.start).as_micros() as u64;
                     }
-                    commit_sender.send(id).await?
+                    context.commit().await?
                 }
             }
         }
@@ -150,16 +155,13 @@ async fn client_task_with_bootstrap(
 pub async fn clients_task(spec: Spec, config: TaskConfig) -> anyhow::Result<Vec<Latencies>> {
     let mut concurrent_clients = ConcurrentClients::new();
     for _ in 0..config.num_client {
-        concurrent_clients.spawn(|id, invoke_receiver, commit_sender| {
-            client_task(
-                spec.clone(),
-                config.client.clone(),
-                config.service.clone(),
-                id,
-                invoke_receiver,
-                commit_sender,
-            )
-        })
+        concurrent_clients.spawn(
+            ClientTask {
+                spec: spec.clone(),
+                service_config: config.service.clone(),
+            },
+            config.client.clone(),
+        )
     }
     concurrent_clients
         .run(config.client, config.client_duration)
