@@ -15,7 +15,7 @@ use crate::{
         AbstractReplica, AbstractService, ReplicaConfig, ReplicaTask, ServiceConfig, ServiceTask,
         Transport, TransportAndSenders, boot_client,
     },
-    workload::{ClientConfig, ConcurrentClients, Invoke, Latencies},
+    workload::{self, ClientConfig, ConcurrentClients, Invoke, Latencies},
 };
 
 use super::{Replica, Spec, message};
@@ -24,17 +24,16 @@ pub mod tcp;
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
-    pub client: ClientConfig,
+    pub workload: workload::Config,
     pub replica: ReplicaConfig,
     pub service: ServiceConfig,
     pub use_tcp: bool,
-    pub num_client: usize,
-    pub client_duration: Duration,
     pub tick_interval: Duration,
 }
 
 pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
 
+#[derive(Debug, Clone)]
 pub struct ClientTask {
     pub spec: Spec,
     pub service_config: ServiceConfig,
@@ -153,18 +152,14 @@ async fn client_task_with_bootstrap(
 }
 
 pub async fn clients_task(spec: Spec, config: TaskConfig) -> anyhow::Result<Vec<Latencies>> {
-    let mut concurrent_clients = ConcurrentClients::new();
-    for _ in 0..config.num_client {
-        concurrent_clients.spawn(
+    ConcurrentClients::new()
+        .run(
+            config.workload,
             ClientTask {
-                spec: spec.clone(),
-                service_config: config.service.clone(),
+                spec,
+                service_config: config.service,
             },
-            config.client.clone(),
         )
-    }
-    concurrent_clients
-        .run(config.client, config.client_duration)
         .await
 }
 

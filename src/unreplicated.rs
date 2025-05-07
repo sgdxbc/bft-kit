@@ -26,21 +26,20 @@ pub mod transport {
         transport::{
             AbstractService, ServiceConfig, ServiceTask, Transport, boot_client, checked_send,
         },
-        workload::{ClientConfig, ConcurrentClients, Invoke, Latencies},
+        workload::{self, ClientConfig, ConcurrentClients, Invoke, Latencies},
     };
 
     use super::{ToClient, message};
 
     #[derive(Debug, Clone)]
     pub struct TaskConfig {
-        pub client: ClientConfig,
+        pub workload: workload::Config,
         pub service: ServiceConfig,
-        pub num_client: usize,
-        pub client_duration: Duration,
     }
 
     pub const WARMUP_DURATION: Duration = Duration::from_secs(1);
 
+    #[derive(Debug, Clone)]
     pub struct ClientTask {
         service_config: ServiceConfig,
     }
@@ -120,17 +119,13 @@ pub mod transport {
     }
 
     pub async fn clients_task(config: TaskConfig) -> anyhow::Result<Vec<Latencies>> {
-        let mut concurrent_clients = ConcurrentClients::new();
-        for _ in 0..config.num_client {
-            concurrent_clients.spawn(
+        ConcurrentClients::new()
+            .run(
+                config.workload,
                 ClientTask {
-                    service_config: config.service.clone(),
+                    service_config: config.service,
                 },
-                config.client.clone(),
             )
-        }
-        concurrent_clients
-            .run(config.client, config.client_duration)
             .await
     }
 
@@ -192,8 +187,6 @@ pub mod transport {
 }
 
 mod parse {
-    use std::time::Duration;
-
     use crate::parse::Options;
 
     impl TryFrom<Options> for super::transport::TaskConfig {
@@ -201,10 +194,8 @@ mod parse {
 
         fn try_from(options: Options) -> Result<Self, Self::Error> {
             Ok(Self {
-                client: options.clone().try_into()?,
                 service: options.clone().try_into()?,
-                num_client: options.get("num_client")?,
-                client_duration: Duration::from_secs_f32(options.get("client_duration")?),
+                workload: options.try_into()?,
             })
         }
     }

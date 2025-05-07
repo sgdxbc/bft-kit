@@ -7,7 +7,7 @@ use bft_kit::{
         transport::{ClientTask, TaskConfig, server_task, tcp},
     },
     transport::{ReplicaConfig, ServiceConfig},
-    workload::{ClientConfig::CloseLoop, ClientTask as _},
+    workload::{self, ClientConfig::CloseLoop, ClientTask as _},
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -30,7 +30,12 @@ async fn main() -> anyhow::Result<()> {
         num_replica: 4,
     };
     let task_config = TaskConfig {
-        client: CloseLoop,
+        workload: workload::Config {
+            client: CloseLoop,
+            // these two values unused. this example sends single request from one client
+            num_client: 0,
+            duration: Duration::ZERO,
+        },
 
         service: ServiceConfig {
             server_external_addresses: (0..spec.num_replica)
@@ -44,10 +49,6 @@ async fn main() -> anyhow::Result<()> {
             server_interconnect_delay: Duration::from_millis(100),
         },
         use_tcp,
-
-        // these two values unused. this example sends single request from one client
-        num_client: 0,
-        client_duration: Duration::ZERO,
 
         // effectively disable ticks
         tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
@@ -86,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
             }
             .run(
                 ClientId(0),
-                task_config.client,
+                task_config.workload.client,
                 invoke_receiver,
                 Some(commit_sender),
             ),
@@ -99,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
             }
             .run(
                 ClientId(0),
-                task_config.client,
+                task_config.workload.client,
                 invoke_receiver,
                 Some(commit_sender),
             ),

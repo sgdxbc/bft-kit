@@ -20,6 +20,13 @@ use tokio::{
 use crate::ClientId;
 
 #[derive(Debug, Clone)]
+pub struct Config {
+    pub client: ClientConfig,
+    pub num_client: usize,
+    pub duration: Duration,
+}
+
+#[derive(Debug, Clone)]
 pub enum ClientConfig {
     CloseLoop,
     OpenLoop(OpenLoopClientConfig),
@@ -28,7 +35,7 @@ pub enum ClientConfig {
 #[derive(Debug, Clone)]
 pub struct OpenLoopClientConfig {
     pub sending_rate: f32,
-    pub num_max_inflight: usize,
+    pub num_max_inflight: usize, // per client
 }
 
 pub struct ConcurrentClients {
@@ -92,13 +99,18 @@ impl ConcurrentClients {
     }
 
     pub async fn run(
-        self,
-        config: ClientConfig,
-        duration: Duration,
+        mut self,
+        config: Config,
+        task: impl ClientTask + Clone + 'static,
     ) -> anyhow::Result<Vec<Latencies>> {
-        match config {
-            ClientConfig::CloseLoop => self.close_loop(duration).await,
-            ClientConfig::OpenLoop(config) => self.open_loop(duration, config.sending_rate).await,
+        for _ in 0..config.num_client {
+            self.spawn(task.clone(), config.client.clone())
+        }
+        match config.client {
+            ClientConfig::CloseLoop => self.close_loop(config.duration).await,
+            ClientConfig::OpenLoop(OpenLoopClientConfig { sending_rate, .. }) => {
+                self.open_loop(config.duration, sending_rate).await
+            }
         }
     }
 
@@ -112,19 +124,20 @@ impl ConcurrentClients {
         let deadline = Instant::now() + duration;
         enum Select {
             Commit(Option<ClientId>),
-            JoinNext,
+            #[allow(dead_code)]
+            JoinNext(Latencies),
         }
         while let Ok(select) = {
             let task = async {
                 anyhow::Ok(tokio::select! {
                     commit = self.commit_receiver.recv() => Select::Commit(commit),
-                    Some(result) = self.tasks.join_next() => { result??; Select::JoinNext },
+                    Some(result) = self.tasks.join_next() => Select::JoinNext(result??),
                 })
             };
             timeout_at(deadline, task).await
         } {
             let client_id = match select? {
-                Select::JoinNext | Select::Commit(None) => unreachable!(),
+                Select::JoinNext(_) | Select::Commit(None) => unreachable!(),
                 Select::Commit(Some(client_id)) => client_id,
             };
             self.invoke_senders[&client_id]

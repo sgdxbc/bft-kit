@@ -23,7 +23,10 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(config_path.with_file_name("network.conf")).await?);
 
     let config = TaskConfig::try_from(options.clone())?;
-    anyhow::ensure!(matches!(config.client, CloseLoop), "yet unimplemented");
+    anyhow::ensure!(
+        matches!(config.workload.client, CloseLoop),
+        "yet unimplemented"
+    );
     let client_latencies = if !config.use_tcp {
         Either::Left(clients_task(options.try_into()?, config.clone()))
     } else {
@@ -32,6 +35,6 @@ async fn main() -> anyhow::Result<()> {
     .instrument(tracing::info_span!("concurrent close loops"))
     .await?;
 
-    report_latencies(client_latencies, config.client_duration - WARMUP_DURATION);
+    report_latencies(client_latencies, config.workload.duration - WARMUP_DURATION);
     Ok(())
 }

@@ -9,7 +9,7 @@ use bft_kit::{
     },
     init_logging,
     transport::{ReplicaConfig, ServiceConfig},
-    workload::{ClientConfig::CloseLoop, ClientTask as _},
+    workload::{self, ClientConfig::CloseLoop, ClientTask as _},
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -39,11 +39,12 @@ async fn main() -> anyhow::Result<()> {
                 .collect(),
             server_interconnect_delay: Duration::from_millis(100),
         },
-        client: CloseLoop,
-
-        // these two values unused. this example sends single request from one client
-        num_client: 0,
-        client_duration: Duration::ZERO,
+        workload: workload::Config {
+            client: CloseLoop,
+            // these two values unused. this example sends single request from one client
+            num_client: 0,
+            duration: Duration::ZERO,
+        },
 
         // effectively disable ticks
         tick_interval: Duration::from_secs(365 * 24 * 60 * 60),
@@ -85,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
         }
         .run(
             ClientId(0),
-            task_config.client,
+            task_config.workload.client,
             invoke_receiver,
             Some(commit_sender),
         )

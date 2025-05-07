@@ -101,3 +101,15 @@ impl TryFrom<Options> for crate::workload::ClientConfig {
         })
     }
 }
+
+impl TryFrom<Options> for crate::workload::Config {
+    type Error = anyhow::Error;
+
+    fn try_from(options: Options) -> Result<Self, Self::Error> {
+        Ok(Self {
+            client: options.clone().try_into()?,
+            num_client: options.get("num_client")?,
+            duration: Duration::from_secs_f32(options.get("client_duration")?),
+        })
+    }
+}

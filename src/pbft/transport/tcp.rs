@@ -13,6 +13,7 @@ use super::{
     ServiceConfig, ServiceTask, Spec, TaskConfig,
 };
 
+#[derive(Debug, Clone)]
 pub struct ClientTask {
     pub spec: Spec,
     pub service_config: ServiceConfig,
@@ -44,26 +45,15 @@ impl crate::workload::ClientTask for ClientTask {
 }
 
 pub async fn clients_task(spec: Spec, config: TaskConfig) -> anyhow::Result<Vec<Latencies>> {
-    let mut concurrent_clients = ConcurrentClients::new();
-    for _ in 0..config.num_client {
-        for _ in 0..config.num_client {
-            concurrent_clients.spawn(
-                ClientTask {
-                    spec: spec.clone(),
-                    service_config: config.service.clone(),
-                },
-                config.client.clone(),
-            )
-        }
-    }
-    match config.client {
-        ClientConfig::CloseLoop => concurrent_clients.close_loop(config.client_duration).await,
-        ClientConfig::OpenLoop(client_config) => {
-            concurrent_clients
-                .open_loop(config.client_duration, client_config.sending_rate)
-                .await
-        }
-    }
+    ConcurrentClients::new()
+        .run(
+            config.workload,
+            ClientTask {
+                spec,
+                service_config: config.service,
+            },
+        )
+        .await
 }
 
 pub async fn server_task(
