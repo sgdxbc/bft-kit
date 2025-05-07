@@ -8,7 +8,8 @@ use bft_kit::{
         transport::{TaskConfig, client_task, server_task},
     },
     init_logging,
-    transport::{ClientConfig, ReplicaConfig, ServiceConfig},
+    transport::{ReplicaConfig, ServiceConfig},
+    workload::ClientConfig::CloseLoop,
 };
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 use tokio_util::sync::CancellationToken;
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
                 .collect(),
             server_interconnect_delay: Duration::from_millis(100),
         },
-        client: ClientConfig::CloseLoop,
+        client: CloseLoop,
 
         // these two values unused. this example sends single request from one client
         num_client: 0,

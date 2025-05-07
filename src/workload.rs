@@ -16,7 +16,17 @@ use tokio::{
 
 use crate::ClientId;
 
-pub type Invoke = (Vec<u8>, Option<Vec<u8>>);
+#[derive(Debug, Clone)]
+pub enum ClientConfig {
+    CloseLoop,
+    OpenLoop(OpenLoopClientConfig),
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenLoopClientConfig {
+    pub sending_rate: f32,
+    pub num_max_inflight: usize,
+}
 
 pub struct ConcurrentClients {
     pub tasks: JoinSet<anyhow::Result<Latencies>>,
@@ -26,6 +36,7 @@ pub struct ConcurrentClients {
 }
 
 pub type Latencies = hdrhistogram::Histogram<u32>;
+pub type Invoke = (Vec<u8>, Option<Vec<u8>>);
 
 impl ConcurrentClients {
     pub fn new() -> Self {
@@ -48,6 +59,17 @@ impl ConcurrentClients {
         assert!(replaced.is_none());
         self.tasks
             .spawn(task(id, invoke_receiver, self.commit_sender.clone()));
+    }
+
+    pub async fn run(
+        self,
+        config: ClientConfig,
+        duration: Duration,
+    ) -> anyhow::Result<Vec<Latencies>> {
+        match config {
+            ClientConfig::CloseLoop => self.close_loop(duration).await,
+            ClientConfig::OpenLoop(config) => self.open_loop(duration, config.sending_rate).await,
+        }
     }
 
     pub async fn close_loop(mut self, duration: Duration) -> anyhow::Result<Vec<Latencies>> {

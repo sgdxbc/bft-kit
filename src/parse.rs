@@ -52,7 +52,7 @@ impl Options {
     }
 }
 
-impl TryFrom<Options> for super::transport::ReplicaConfig {
+impl TryFrom<Options> for crate::transport::ReplicaConfig {
     type Error = anyhow::Error;
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
@@ -71,7 +71,7 @@ impl TryFrom<Options> for super::transport::ReplicaConfig {
     }
 }
 
-impl TryFrom<Options> for super::transport::ServiceConfig {
+impl TryFrom<Options> for crate::transport::ServiceConfig {
     type Error = anyhow::Error;
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
@@ -87,15 +87,15 @@ impl TryFrom<Options> for super::transport::ServiceConfig {
     }
 }
 
-impl TryFrom<Options> for super::transport::ClientConfig {
+impl TryFrom<Options> for crate::workload::ClientConfig {
     type Error = anyhow::Error;
 
     fn try_from(options: Options) -> Result<Self, Self::Error> {
         Ok(if !matches!(options.try_get("open_loop")?, Some(true)) {
             Self::CloseLoop
         } else {
-            Self::OpenLoop(super::transport::OpenLoopClientConfig {
-                num_max_concurrent: options.get("num_max_concurrent")?,
+            Self::OpenLoop(crate::workload::OpenLoopClientConfig {
+                num_max_inflight: options.get("num_max_concurrent")?,
                 sending_rate: options.get("sending_rate")?,
             })
         })

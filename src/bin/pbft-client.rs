@@ -4,8 +4,7 @@ use bft_kit::{
     init_logging,
     parse::Options,
     pbft::transport::{TaskConfig, WARMUP_DURATION, clients_task, tcp},
-    transport::ClientConfig,
-    workload::report_latencies,
+    workload::{ClientConfig::CloseLoop, report_latencies},
 };
 use tokio::fs::read_to_string;
 use tokio_util::either::Either;
@@ -24,10 +23,7 @@ async fn main() -> anyhow::Result<()> {
     options.parse(&read_to_string(config_path.with_file_name("network.conf")).await?);
 
     let config = TaskConfig::try_from(options.clone())?;
-    anyhow::ensure!(
-        matches!(config.client, ClientConfig::CloseLoop),
-        "yet unimplemented"
-    );
+    anyhow::ensure!(matches!(config.client, CloseLoop), "yet unimplemented");
     let client_latencies = if !config.use_tcp {
         Either::Left(clients_task(options.try_into()?, config.clone()))
     } else {

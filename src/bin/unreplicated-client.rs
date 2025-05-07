@@ -3,8 +3,8 @@ use std::{env::args, path::PathBuf};
 use bft_kit::{
     init_logging,
     parse::Options,
-    transport::ClientConfig::CloseLoop,
     unreplicated::transport::{TaskConfig, WARMUP_DURATION, clients_task},
+    workload::ClientConfig::CloseLoop,
     workload::report_latencies,
 };
 use tokio::fs::read_to_string;

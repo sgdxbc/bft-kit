@@ -22,12 +22,11 @@ pub mod transport {
     use tokio_util::sync::CancellationToken;
 
     use crate::{
+        ClientId, ClientSeq, Command,
         transport::{
-            AbstractService, ClientConfig, ServiceConfig, ServiceTask, Transport, boot_client,
-            checked_send,
+            AbstractService, ServiceConfig, ServiceTask, Transport, boot_client, checked_send,
         },
-        workload::{ConcurrentClients, Invoke, Latencies},
-        {ClientId, ClientSeq, Command},
+        workload::{ClientConfig, ConcurrentClients, Invoke, Latencies},
     };
 
     use super::{ToClient, message};
@@ -88,7 +87,7 @@ pub mod transport {
                         // resend for close loop?
                         ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),
                         ClientConfig::OpenLoop(config) => {
-                            if seq_scratch.len() == config.num_max_concurrent {
+                            if seq_scratch.len() == config.num_max_inflight {
                                 seq_scratch.pop_first();
                             }
                         }
@@ -131,14 +130,9 @@ pub mod transport {
                 )
             })
         }
-        match config.client {
-            ClientConfig::CloseLoop => concurrent_clients.close_loop(config.client_duration).await,
-            ClientConfig::OpenLoop(client_config) => {
-                concurrent_clients
-                    .open_loop(config.client_duration, client_config.sending_rate)
-                    .await
-            }
-        }
+        concurrent_clients
+            .run(config.client, config.client_duration)
+            .await
     }
 
     pub struct Service;

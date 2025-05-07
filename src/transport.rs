@@ -95,18 +95,6 @@ impl Default for Transport {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum ClientConfig {
-    CloseLoop,
-    OpenLoop(OpenLoopClientConfig),
-}
-
-#[derive(Debug, Clone)]
-pub struct OpenLoopClientConfig {
-    pub num_max_concurrent: usize,
-    pub sending_rate: f32,
-}
-
 // TODO extract client skeleton
 // not sure whether that is possible or not since (simple) clients are inline
 // implemented in transport

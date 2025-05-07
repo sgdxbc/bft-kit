@@ -11,10 +11,10 @@ use crate::{
     ClientId, ClientSeq, Command, ReplicaId,
     replica::Quorum,
     transport::{
-        AbstractReplica, AbstractService, ClientConfig, ReplicaConfig, ReplicaTask, ServiceConfig,
-        ServiceTask, Transport, boot_client,
+        AbstractReplica, AbstractService, ReplicaConfig, ReplicaTask, ServiceConfig, ServiceTask,
+        Transport, boot_client,
     },
-    workload::{ConcurrentClients, Invoke, Latencies},
+    workload::{ClientConfig, ConcurrentClients, Invoke, Latencies},
 };
 
 use super::{Replica, Spec, ToClient, message};
@@ -76,7 +76,7 @@ pub async fn client_task(
                     // resend for close loop?
                     ClientConfig::CloseLoop => anyhow::ensure!(seq_scratch.is_empty()),
                     ClientConfig::OpenLoop(config) => {
-                        if seq_scratch.len() == config.num_max_concurrent {
+                        if seq_scratch.len() == config.num_max_inflight {
                             seq_scratch.pop_first();
                         }
                     }
@@ -134,14 +134,9 @@ pub async fn clients_task(spec: Spec, config: TaskConfig) -> anyhow::Result<Vec<
             )
         })
     }
-    match config.client {
-        ClientConfig::CloseLoop => concurrent_clients.close_loop(config.client_duration).await,
-        ClientConfig::OpenLoop(client_config) => {
-            concurrent_clients
-                .open_loop(config.client_duration, client_config.sending_rate)
-                .await
-        }
-    }
+    concurrent_clients
+        .run(config.client, config.client_duration)
+        .await
 }
 
 pub struct Service;

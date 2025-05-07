@@ -6,7 +6,8 @@ use bft_kit::{
         Replica, ReplicaCoreConfig, Spec,
         transport::{TaskConfig, client_task, server_task, tcp},
     },
-    transport::{ClientConfig, ReplicaConfig, ServiceConfig},
+    transport::{ReplicaConfig, ServiceConfig},
+    workload::ClientConfig::CloseLoop,
 };
 use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 use tokio_util::{either::Either, sync::CancellationToken};
@@ -25,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         num_replica: 4,
     };
     let task_config = TaskConfig {
-        client: ClientConfig::CloseLoop,
+        client: CloseLoop,
 
         service: ServiceConfig {
             server_external_addresses: (0..spec.num_replica)
