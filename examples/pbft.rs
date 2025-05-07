@@ -124,8 +124,7 @@ async fn main() -> anyhow::Result<()> {
     .instrument(tracing::info_span!("invoke"))
     .await?;
     drop(invoke_sender);
-    let latencies = client_task.await?;
-    tracing::info!(latency = ?Duration::from_micros(latencies.mean() as _));
+    client_task.await?;
     cancel.cancel();
     while let Some(result) = server_tasks.join_next().await {
         result??
