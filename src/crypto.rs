@@ -3,7 +3,7 @@ use std::fmt::{Debug, Display};
 use bincode::{BorrowDecode, Decode, Encode, error::DecodeError};
 use sha2::Digest as _;
 
-use crate::{ReplicaId, fmt_bytes};
+use crate::fmt_bytes;
 
 pub mod cert;
 pub mod threshold;
@@ -168,9 +168,9 @@ pub fn verify_digest(
     Ok(())
 }
 
-pub fn replica_secret_key(replica_id: ReplicaId) -> SecretKey {
+pub fn peer_secret_key(index: usize) -> SecretKey {
     let mut bytes = [0; 32];
-    let tag = format!("replica#{replica_id}");
+    let tag = format!("peer#{index}");
     let tag = tag.as_bytes();
     bytes[..tag.len()].copy_from_slice(tag);
     SecretKey::Secp256k1(secp256k1::SecretKey::from_byte_array(&bytes).unwrap())
@@ -187,17 +187,17 @@ impl SecretKey {
     }
 }
 
-pub struct ReplicaConfig {
+pub struct PeerConfig {
     pub secret_key: SecretKey,
     pub public_keys: Vec<PublicKey>,
 }
 
-impl ReplicaConfig {
-    pub fn new(replica_id: ReplicaId, num_replica: ReplicaId) -> Self {
-        let secret_keys = (0..num_replica).map(replica_secret_key).collect::<Vec<_>>();
+impl PeerConfig {
+    pub fn new(index: usize, num_peer: usize) -> Self {
+        let secret_keys = (0..num_peer).map(peer_secret_key).collect::<Vec<_>>();
         Self {
             public_keys: secret_keys.iter().map(SecretKey::public_key).collect(),
-            secret_key: secret_keys[replica_id as usize].clone(),
+            secret_key: secret_keys[index].clone(),
         }
     }
 }

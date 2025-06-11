@@ -7,8 +7,6 @@ use bincode::{
     error::{DecodeError, EncodeError},
 };
 
-use crate::ReplicaId;
-
 use super::{Digest, DigestHash, UpdateHash};
 
 // note on threshold definition
@@ -264,12 +262,9 @@ pub fn verify_digest(
     Ok(())
 }
 
-pub fn givre_replica_key_shares(
-    num_replica: ReplicaId,
-    num_faulty: ReplicaId,
-) -> Vec<GivreKeyShare> {
-    givre::trusted_dealer::builder(num_replica as _)
-        .set_threshold(Some((num_replica - num_faulty) as _))
+pub fn givre_replica_key_shares(num_peer: usize, num_faulty: usize) -> Vec<GivreKeyShare> {
+    givre::trusted_dealer::builder(num_peer as _)
+        .set_threshold(Some((num_peer - num_faulty) as _))
         .generate_shares(
             &mut <rand08::rngs::StdRng as rand08::SeedableRng>::seed_from_u64(0x117418),
         )
