@@ -102,7 +102,7 @@ pub fn sign(message: &impl UpdateHash, secret_key: &PartialSecretKey) -> Partial
         PartialSecretKey::Vec(secret_key) => PartialSig::Vec(super::sign(message, secret_key)),
         // TODO avoid double hash (the other one is inside threshold_crypto)
         PartialSecretKey::ThresholdCrypto(secret_key_share) => PartialSig::ThresholdCrypto(
-            ThresholdCryptoSigShare(secret_key_share.sign(message.digest()).into()),
+            ThresholdCryptoSigShare(secret_key_share.sign(message.digest().0).into()),
         ),
         // givre sign require extra inputs and not implemented here
     }
@@ -124,7 +124,7 @@ pub fn verify_partial(
         ) => {
             let valid = public_key_set
                 .public_key_share(index as usize)
-                .verify(sig_share, message.digest());
+                .verify(sig_share, message.digest().0);
             anyhow::ensure!(valid)
         }
         // we don't implement for givre variant here as it does not support verification

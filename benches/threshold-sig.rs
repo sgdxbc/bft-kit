@@ -2,7 +2,7 @@
 use std::iter::repeat_with;
 
 use bft_kit::crypto::{
-    DigestHash, SecretKey, UpdateHash, sign,
+    Digest, DigestHash, SecretKey, UpdateHash, sign,
     threshold::{self, ThresholdCryptoSigShare},
     verify,
 };
@@ -84,7 +84,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         });
 
         let (partial_sigs, public_key_set) =
-            prepare_combine_threshold_crypto(threshold, message.digest().into());
+            prepare_combine_threshold_crypto(threshold, message.digest());
         group.bench_function(BenchmarkId::new("ThresholdCrypto", threshold), |b| {
             b.iter(|| {
                 black_box(combine(
@@ -96,7 +96,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         });
 
         let (partial_sigs, signers, key_share) =
-            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.digest().into());
+            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.digest());
         let context = threshold::GivreAggregateContext {
             key_share: &key_share,
             signers: &signers,
@@ -130,7 +130,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         });
 
         let (partial_sigs, public_key_set) =
-            prepare_combine_threshold_crypto(threshold, message.digest().into());
+            prepare_combine_threshold_crypto(threshold, message.digest());
         let sig = combine(
             threshold::PartialSigs::ThresholdCrypto(Default::default()),
             &partial_sigs,
@@ -142,7 +142,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         });
 
         let (partial_sigs, signers, key_share) =
-            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.digest().into());
+            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.digest());
         let context = threshold::GivreAggregateContext {
             key_share: &key_share,
             signers: &signers,
@@ -192,7 +192,7 @@ fn prepare_combine_vec(
 
 fn prepare_combine_threshold_crypto(
     threshold: threshold::Index,
-    message: [u8; 32],
+    digest: Digest,
 ) -> (Vec<threshold::PartialSig>, threshold_crypto::PublicKeySet) {
     let secret_key_set =
         threshold_crypto::SecretKeySet::random((threshold - 1) as _, &mut rand07::thread_rng());
@@ -201,7 +201,7 @@ fn prepare_combine_threshold_crypto(
             threshold::PartialSig::ThresholdCrypto(ThresholdCryptoSigShare(
                 secret_key_set
                     .secret_key_share(i as usize)
-                    .sign(message)
+                    .sign(digest.0)
                     .into(),
             ))
         })
@@ -213,7 +213,7 @@ fn prepare_combine_threshold_crypto(
 fn prepare_combine_givre(
     n: threshold::Index,
     threshold: threshold::Index,
-    message: [u8; 32],
+    digest: Digest,
 ) -> (
     Vec<threshold::PartialSig>,
     Vec<(u16, threshold::GivrePublicCommitments)>,
@@ -247,7 +247,7 @@ fn prepare_combine_givre(
                 givre::signing::round2::sign::<threshold::GivreCiphersuite>(
                     key_share,
                     nonce,
-                    &message[..],
+                    &digest.0[..],
                     &signers,
                 )
                 .unwrap(),

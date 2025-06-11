@@ -24,23 +24,9 @@ impl Debug for Digest {
     }
 }
 
-impl AsRef<[u8]> for Digest {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-pub type Sha256Output = sha2::digest::Output<sha2::Sha256>;
-
-impl From<Sha256Output> for Digest {
-    fn from(value: Sha256Output) -> Self {
-        Digest(value.into())
-    }
-}
-
-impl From<Digest> for [u8; 32] {
-    fn from(Digest(bytes): Digest) -> Self {
-        bytes
+impl From<sha2::Sha256> for Digest {
+    fn from(value: sha2::Sha256) -> Self {
+        Digest(value.finalize().into())
     }
 }
 
@@ -57,7 +43,7 @@ impl<T: UpdateHash> UpdateHash for &[T] {
 }
 
 // the canonical digest in this codebase is 32 byte SHA256
-// swap to keccak256 in the future if have a good reason
+// can swap to keccak256 in the future if have a (very) good reason
 pub trait DigestHash {
     fn digest(&self) -> Digest;
 }
@@ -66,7 +52,7 @@ impl<T: UpdateHash> DigestHash for T {
     fn digest(&self) -> Digest {
         let mut state = sha2::Sha256::new();
         self.update(&mut state);
-        state.finalize().into()
+        state.into()
     }
 }
 
@@ -121,7 +107,7 @@ pub fn sign(message: &impl UpdateHash, secret_key: &SecretKey) -> Sig {
     }
     match secret_key {
         SecretKey::Secp256k1(secret_key) => {
-            let message = secp256k1::Message::from_digest(message.digest().into());
+            let message = secp256k1::Message::from_digest(message.digest().0);
             Sig::Secp256k1(SECP.with(|secp| secp.sign_ecdsa(&message, secret_key)))
         }
         SecretKey::Ed25519(signing_key) => {
@@ -142,7 +128,7 @@ pub fn verify(message: &impl UpdateHash, public_key: &PublicKey, sig: &Sig) -> a
     }
     match (public_key, sig) {
         (PublicKey::Secp256k1(public_key), Sig::Secp256k1(sig)) => {
-            let message = secp256k1::Message::from_digest(message.digest().into());
+            let message = secp256k1::Message::from_digest(message.digest().0);
             SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?
         }
         (PublicKey::Ed25519(verifying_key), Sig::Ed25519(sig)) => {
@@ -161,7 +147,7 @@ pub fn verify_digest(
     sig: &Sig,
 ) -> anyhow::Result<()> {
     let (PublicKey::Secp256k1(public_key), Sig::Secp256k1(sig)) = (public_key, sig) else {
-        anyhow::bail!("mismatched signature type")
+        anyhow::bail!("unsupported public key and/or signature types")
     };
     let message = secp256k1::Message::from_digest(digest);
     SECP.with(|secp| secp.verify_ecdsa(&message, sig, public_key))?;
@@ -211,7 +197,7 @@ impl Encode for Sig {
             Self::Uninitialized => Err(bincode::error::EncodeError::Other(
                 "cannot encode uninitialized signature",
             )),
-            // if these long tags affects performance, consider shorter ones
+            // if these long tags affects performance, switch to shorter ones
             Self::Secp256k1(sig) => {
                 Encode::encode("secp256k1", encoder)?;
                 Encode::encode(&sig.serialize_compact(), encoder)
