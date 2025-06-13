@@ -18,6 +18,7 @@
         "keccak",
         "libhotstuff",
         "newtype",
+        "newtypes",
         "Niko",
         "oneshot",
         "pbft",

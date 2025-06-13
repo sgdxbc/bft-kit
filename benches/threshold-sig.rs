@@ -67,47 +67,31 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     });
     group.finish();
 
-    let mut group = c.benchmark_group("Combine");
+    let mut group = c.benchmark_group("Aggregate");
     for f in [1, 10, 33] {
         let threshold = 2 * f + 1;
         let message = Message(random());
 
-        let (partial_sigs, _) = prepare_combine_vec(threshold, &message);
+        let (partial_sigs, public_master_key) = prepare_aggregate_vec(threshold, &message);
         group.bench_function(BenchmarkId::new("Vec", threshold), |b| {
-            b.iter(|| {
-                black_box(combine(
-                    threshold::PartialSigs::Vec(Default::default()),
-                    &partial_sigs,
-                    threshold::AggregateContext::Vec(threshold),
-                ))
-            })
+            b.iter(|| black_box(aggregate(&partial_sigs, &public_master_key)))
         });
 
-        let (partial_sigs, public_key_set) =
-            prepare_combine_threshold_crypto(threshold, message.digest());
+        let (partial_sigs, public_master_key) =
+            prepare_aggregate_threshold_crypto(threshold, message.digest());
         group.bench_function(BenchmarkId::new("ThresholdCrypto", threshold), |b| {
-            b.iter(|| {
-                black_box(combine(
-                    threshold::PartialSigs::ThresholdCrypto(Default::default()),
-                    &partial_sigs,
-                    threshold::AggregateContext::ThresholdCrypto(&public_key_set),
-                ))
-            })
+            b.iter(|| black_box(aggregate(&partial_sigs, &public_master_key)))
         });
 
         let (partial_sigs, signers, key_share) =
-            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.digest());
-        let context = threshold::GivreAggregateContext {
-            key_share: &key_share,
-            signers: &signers,
-            digest: &message.digest(),
-        };
+            prepare_aggregate_givre((3 * f + 1) as _, threshold as _, &message);
         group.bench_function(BenchmarkId::new("Givre", threshold), |b| {
             b.iter(|| {
-                black_box(combine(
-                    threshold::PartialSigs::Givre(Default::default()),
+                black_box(aggregate_givre(
                     &partial_sigs,
-                    threshold::AggregateContext::Givre(context),
+                    &signers,
+                    &key_share,
+                    &message,
                 ))
             })
         });
@@ -119,63 +103,59 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let threshold = 2 * f + 1;
         let message = Message(random());
 
-        let (partial_sigs, master_key) = prepare_combine_vec(threshold, &message);
-        let sig = combine(
-            threshold::PartialSigs::Vec(Default::default()),
-            &partial_sigs,
-            threshold::AggregateContext::Vec(threshold),
-        );
+        let (partial_sigs, public_master_key) = prepare_aggregate_vec(threshold, &message);
+        let sig = aggregate(&partial_sigs, &public_master_key);
         group.bench_function(BenchmarkId::new("Vec", threshold), |b| {
-            b.iter(|| black_box(threshold::verify(&message, &sig, &master_key).unwrap()))
+            b.iter(|| black_box(threshold::verify(&message, &sig, &public_master_key).unwrap()))
         });
 
-        let (partial_sigs, public_key_set) =
-            prepare_combine_threshold_crypto(threshold, message.digest());
-        let sig = combine(
-            threshold::PartialSigs::ThresholdCrypto(Default::default()),
-            &partial_sigs,
-            threshold::AggregateContext::ThresholdCrypto(&public_key_set),
-        );
-        let master_key = threshold::PublicMasterKey::ThresholdCrypto(public_key_set);
+        let (partial_sigs, public_master_key) =
+            prepare_aggregate_threshold_crypto(threshold, message.digest());
+        let sig = aggregate(&partial_sigs, &public_master_key);
         group.bench_function(BenchmarkId::new("ThresholdCrypto", threshold), |b| {
-            b.iter(|| black_box(threshold::verify(&message, &sig, &master_key).unwrap()))
+            b.iter(|| black_box(threshold::verify(&message, &sig, &public_master_key).unwrap()))
         });
 
         let (partial_sigs, signers, key_share) =
-            prepare_combine_givre((3 * f + 1) as _, threshold as _, message.digest());
-        let context = threshold::GivreAggregateContext {
-            key_share: &key_share,
-            signers: &signers,
-            digest: &message.digest(),
-        };
-        let sig = combine(
-            threshold::PartialSigs::Givre(Default::default()),
-            &partial_sigs,
-            threshold::AggregateContext::Givre(context),
-        );
-        let master_key = threshold::PublicMasterKey::givre(&key_share);
+            prepare_aggregate_givre((3 * f + 1) as _, threshold as _, &message);
+        let sig = aggregate_givre(&partial_sigs, &signers, &key_share, &message);
         group.bench_function(BenchmarkId::new("Givre", threshold), |b| {
-            b.iter(|| black_box(threshold::verify(&message, &sig, &master_key).unwrap()))
+            b.iter(|| black_box(threshold::verify(&message, &sig, &public_master_key).unwrap()))
         });
     }
 }
 
-fn combine(
-    mut partial_sigs: threshold::PartialSigs,
+fn aggregate(
     sigs: &[threshold::PartialSig],
-    context: threshold::AggregateContext<'_>,
+    public_master_key: &threshold::PublicMasterKey,
 ) -> threshold::Sig {
-    let mut sig = None;
-    for (i, partial_sig) in sigs.iter().enumerate() {
-        assert!(sig.is_none());
-        sig = partial_sigs
-            .add_partial(i as _, partial_sig.clone(), context)
-            .unwrap()
-    }
-    sig.unwrap()
+    threshold::aggregate(
+        sigs.iter()
+            .enumerate()
+            .map(|(i, partial_sig)| (i as _, partial_sig.clone())),
+        public_master_key,
+    )
+    .unwrap()
 }
 
-fn prepare_combine_vec(
+fn aggregate_givre(
+    partial_sigs: &[threshold::commit::PartialSig],
+    signers: &[(threshold::Index, threshold::GivrePublicCommitments)],
+    key_share: &threshold::GivreKeyShare,
+    message: &Message,
+) -> threshold::Sig {
+    threshold::commit::aggregate(
+        partial_sigs
+            .iter()
+            .enumerate()
+            .map(|(i, sig)| (i as _, sig.clone(), signers[i].1)),
+        key_share,
+        message,
+    )
+    .unwrap()
+}
+
+fn prepare_aggregate_vec(
     threshold: threshold::Index,
     message: &Message,
 ) -> (Vec<threshold::PartialSig>, threshold::PublicMasterKey) {
@@ -190,10 +170,10 @@ fn prepare_combine_vec(
     (sigs, master_key)
 }
 
-fn prepare_combine_threshold_crypto(
+fn prepare_aggregate_threshold_crypto(
     threshold: threshold::Index,
     digest: Digest,
-) -> (Vec<threshold::PartialSig>, threshold_crypto::PublicKeySet) {
+) -> (Vec<threshold::PartialSig>, threshold::PublicMasterKey) {
     let secret_key_set =
         threshold_crypto::SecretKeySet::random((threshold - 1) as _, &mut rand07::thread_rng());
     let sigs = (0..threshold)
@@ -206,17 +186,19 @@ fn prepare_combine_threshold_crypto(
             ))
         })
         .collect::<Vec<_>>();
-    (sigs, secret_key_set.public_keys())
+    (
+        sigs,
+        threshold::PublicMasterKey::ThresholdCrypto(secret_key_set.public_keys()),
+    )
 }
 
-#[allow(clippy::type_complexity)]
-fn prepare_combine_givre(
+fn prepare_aggregate_givre(
     n: threshold::Index,
     threshold: threshold::Index,
-    digest: Digest,
+    message: &Message,
 ) -> (
-    Vec<threshold::PartialSig>,
-    Vec<(u16, threshold::GivrePublicCommitments)>,
+    Vec<threshold::commit::PartialSig>,
+    Vec<(threshold::Index, threshold::GivrePublicCommitments)>,
     threshold::GivreKeyShare,
 ) {
     let key_shares = givre::trusted_dealer::builder(n)
@@ -237,27 +219,18 @@ fn prepare_combine_givre(
         .iter()
         .copied()
         .enumerate()
-        .map(|(i, public_commitments)| (i as u16, public_commitments))
+        .map(|(i, public_commitments)| {
+            (
+                i as _,
+                threshold::GivrePublicCommitments(public_commitments),
+            )
+        })
         .collect::<Vec<_>>();
     let sig_shares = secret_nonces
         .into_iter()
         .zip(&key_shares)
         .map(|(nonce, key_share)| {
-            threshold::PartialSig::Givre(threshold::GivreSigShare(
-                givre::signing::round2::sign::<threshold::GivreCiphersuite>(
-                    key_share,
-                    nonce,
-                    &digest.0[..],
-                    &signers,
-                )
-                .unwrap(),
-            ))
-        })
-        .collect();
-    let signers = signers
-        .into_iter()
-        .map(|(index, public_commitments)| {
-            (index, threshold::GivrePublicCommitments(public_commitments))
+            threshold::commit::sign(message, key_share, nonce, &signers).unwrap()
         })
         .collect();
     (sig_shares, signers, key_shares.into_iter().next().unwrap())

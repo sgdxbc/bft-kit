@@ -10,64 +10,33 @@ use bincode::{
 use super::{Digest, DigestHash, UpdateHash};
 
 // note on threshold definition
-// threshold_crypto defines threshold as the maximum number of faulty
-// participants, and combine signature with threshold + 1 partial signatures
-// givre defines threshold as the minimum number of signing participants
-// (actually the actual number, as the signing participants are selected before
-// signing), and combine signature with threshold partial signatures
+// threshold_crypto defines threshold t as the maximum number of faulty
+// participants, and combine signature with t + 1 partial signatures
+// givre defines threshold t as the minimum number of signing participants
+// (actually the exact number, as the signing participants are selected before
+// signing), and combine signature with t partial signatures
 // we follow the givre convention here because it's a bit consistent with the
-// targeted use case i.e. permissioned blockchain, and the threshold is set to
-// n - f as the same to a regular majority quorum size
+// targeted use case i.e. permissioned blockchain, so that the threshold is set
+// to n - f, the same as a regular (super)majority quorum size
 
 pub type Index = givre::SignerIndex;
 
+// newtypes for (partial) signatures serialization
 #[derive(Debug, Clone)]
 // box to prevent imbalance enum size below
 // box here instead of in enum for better pattern matching ergonomics
 pub struct ThresholdCryptoSig(pub Box<threshold_crypto::Signature>);
-
 #[derive(Debug, Clone)]
 pub struct ThresholdCryptoSigShare(pub Box<threshold_crypto::SignatureShare>);
-
-pub type GivreCiphersuite = givre::ciphersuite::Secp256k1;
-pub type GivreCurve = <GivreCiphersuite as givre::Ciphersuite>::Curve;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GivrePublicCommitments(pub givre::signing::round1::PublicCommitments<GivreCurve>);
-pub type GivreSecretNonces = givre::signing::round1::SecretNonces<GivreCurve>;
-
 #[derive(Debug, Clone)]
 pub struct GivreSig(pub Box<givre::signing::aggregate::Signature<GivreCiphersuite>>);
-
 #[derive(Debug, Clone)]
 pub struct GivreSigShare(pub givre::signing::round2::SigShare<GivreCurve>);
-
-pub type GivreKeyShare = givre::KeyShare<GivreCurve>;
-
-type GivrePublicKey = givre::ciphersuite::NormalizedPoint<
-    GivreCiphersuite,
-    givre::generic_ec::NonZero<givre::generic_ec::Point<GivreCurve>>,
->;
-
-#[derive(Debug, Clone, Encode, Decode)]
-pub enum Sig {
-    Vec(Vec<(Index, super::Sig)>),
-    ThresholdCrypto(ThresholdCryptoSig),
-    Givre(GivreSig),
-}
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum PartialSig {
     Vec(super::Sig),
     ThresholdCrypto(ThresholdCryptoSigShare),
-    Givre(GivreSigShare),
-}
-
-#[derive(Debug)]
-pub enum PartialSigs {
-    Vec(HashMap<Index, super::Sig>),
-    ThresholdCrypto(HashMap<Index, threshold_crypto::SignatureShare>),
-    Givre(HashMap<Index, givre::signing::round2::SigShare<GivreCurve>>),
 }
 
 #[derive(Debug)]
@@ -78,9 +47,9 @@ pub enum PartialSecretKey {
 
 // conventionally a (Partial)PublicKey type is provided to verify a partial
 // signature
-// however, since we always need to verify partial signatures from every
-// participants, what's the difference between a public master key and a vector
-// of (partial) public keys?
+// however, since we always need to (be prepared for) verify partial signatures
+// from every participants, what's the difference between a public master key
+// and a vector of (partial) public keys?
 
 #[derive(Debug)]
 pub enum PublicMasterKey {
@@ -89,26 +58,17 @@ pub enum PublicMasterKey {
     Givre(GivrePublicKey),
 }
 
-impl PublicMasterKey {
-    pub fn givre(key_share: &GivreKeyShare) -> PublicMasterKey {
-        Self::Givre(<GivreCiphersuite as givre::Ciphersuite>::normalize_point(
-            key_share.shared_public_key(),
-        ))
-    }
-}
-
-pub fn sign(message: &impl UpdateHash, secret_key: &PartialSecretKey) -> PartialSig {
+pub fn partial_sign(message: &impl UpdateHash, secret_key: &PartialSecretKey) -> PartialSig {
     match secret_key {
         PartialSecretKey::Vec(secret_key) => PartialSig::Vec(super::sign(message, secret_key)),
         // TODO avoid double hash (the other one is inside threshold_crypto)
         PartialSecretKey::ThresholdCrypto(secret_key_share) => PartialSig::ThresholdCrypto(
             ThresholdCryptoSigShare(secret_key_share.sign(message.digest().0).into()),
         ),
-        // givre sign require extra inputs and not implemented here
     }
 }
 
-pub fn verify_partial(
+pub fn partial_verify(
     message: &impl UpdateHash,
     master_key: &PublicMasterKey,
     index: Index,
@@ -127,94 +87,155 @@ pub fn verify_partial(
                 .verify(sig_share, message.digest().0);
             anyhow::ensure!(valid)
         }
-        // we don't implement for givre variant here as it does not support verification
-        // of signature shares (yet, as it claims)
-
         // TODO make exclusive error type
         _ => anyhow::bail!("unimplemented"),
     }
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-pub enum AggregateContext<'a> {
-    Vec(Index), // threshold
-    ThresholdCrypto(&'a threshold_crypto::PublicKeySet),
-    Givre(GivreAggregateContext<'a>),
+#[derive(Debug, Clone, Encode, Decode)]
+pub enum Sig {
+    Vec(Vec<(Index, super::Sig)>),
+    ThresholdCrypto(ThresholdCryptoSig),
+    Givre(GivreSig),
 }
 
-#[derive(Clone, Copy)]
-pub struct GivreAggregateContext<'a> {
-    pub key_share: &'a GivreKeyShare,
-    pub signers: &'a [(givre::SignerIndex, GivrePublicCommitments)],
-    pub digest: &'a Digest,
+pub fn aggregate(
+    partial_sigs: impl Iterator<Item = (Index, PartialSig)>,
+    public_master_key: &PublicMasterKey,
+) -> anyhow::Result<Sig> {
+    let sig = match public_master_key {
+        PublicMasterKey::Givre(_) => anyhow::bail!("unimplemented"),
+        &PublicMasterKey::Vec(_, threshold) => {
+            let mut index_sigs = Vec::new();
+            for (index, partial_sig) in partial_sigs {
+                let PartialSig::Vec(sig) = partial_sig else {
+                    anyhow::bail!("unexpected partial signature type")
+                };
+                index_sigs.push((index, sig))
+            }
+            anyhow::ensure!(index_sigs.len() >= threshold as usize);
+            Sig::Vec(index_sigs)
+        }
+        PublicMasterKey::ThresholdCrypto(public_key_set) => {
+            let mut indexes = Vec::new();
+            let mut sig_shares = Vec::new();
+            for (index, partial_sig) in partial_sigs {
+                let PartialSig::ThresholdCrypto(ThresholdCryptoSigShare(sig_share)) = partial_sig
+                else {
+                    anyhow::bail!("unexpected partial signature type")
+                };
+                indexes.push(index as usize);
+                sig_shares.push(*sig_share)
+            }
+            Sig::ThresholdCrypto(ThresholdCryptoSig(
+                public_key_set
+                    .combine_signatures(indexes.into_iter().zip(&sig_shares))
+                    .map_err(|err| anyhow::format_err!(err))?
+                    .into(),
+            ))
+        }
+    };
+    Ok(sig)
 }
 
-impl PartialSigs {
-    pub fn add_partial(
-        &mut self,
-        index: Index,
-        partial_sig: PartialSig,
-        context: AggregateContext<'_>,
-    ) -> anyhow::Result<Option<Sig>> {
-        Ok(match (self, partial_sig, context) {
-            (
-                Self::Vec(partial_sigs),
-                PartialSig::Vec(partial_sig),
-                AggregateContext::Vec(threshold),
-            ) => {
-                partial_sigs.insert(index, partial_sig);
-                if partial_sigs.len() < threshold as usize {
-                    None
-                } else {
-                    Some(Sig::Vec(partial_sigs.drain().collect()))
-                }
-            }
-            (
-                Self::ThresholdCrypto(sig_shares),
-                PartialSig::ThresholdCrypto(ThresholdCryptoSigShare(sig_share)),
-                AggregateContext::ThresholdCrypto(public_key_set),
-            ) => {
-                sig_shares.insert(index, *sig_share);
-                if sig_shares.len() <= public_key_set.threshold() {
-                    None
-                } else {
-                    let sig = public_key_set
-                        .combine_signatures(
-                            sig_shares.iter().map(|(&index, sig)| (index as usize, sig)),
-                        )
-                        .map_err(|err| anyhow::format_err!(err))?;
-                    Some(Sig::ThresholdCrypto(ThresholdCryptoSig(sig.into())))
-                }
-            }
-            (
-                Self::Givre(sig_shares),
-                PartialSig::Givre(GivreSigShare(sig_share)),
-                AggregateContext::Givre(context),
-            ) => {
-                sig_shares.insert(index, sig_share);
-                if sig_shares.len() < context.key_share.min_signers() as usize {
-                    None
-                } else {
-                    let mut signers = Vec::new();
-                    for &(index, GivrePublicCommitments(public_commitments)) in context.signers {
-                        let Some(sig_share) = sig_shares.remove(&index) else {
-                            anyhow::bail!("missing signature share for index {index}")
-                        };
-                        signers.push((index, public_commitments, sig_share))
-                    }
-                    Some(Sig::Givre(GivreSig(
-                        givre::signing::aggregate::aggregate(
-                            context.key_share.as_ref(),
-                            &signers,
-                            &context.digest.0,
-                        )?
-                        .into(),
-                    )))
-                }
-            }
-            _ => anyhow::bail!("unmatched public key and signature types"),
-        })
+// givre types/type aliases
+// type aliases are mostly for convenient and self-contained `use` i.e. only
+// need to `use` from this crate instead of directly from givre
+// types also for implementing serialization
+pub type GivreCiphersuite = givre::ciphersuite::Secp256k1;
+pub type GivreCurve = <GivreCiphersuite as givre::Ciphersuite>::Curve;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GivrePublicCommitments(pub givre::signing::round1::PublicCommitments<GivreCurve>);
+pub type GivreSecretNonces = givre::signing::round1::SecretNonces<GivreCurve>;
+pub type GivreKeyShare = givre::KeyShare<GivreCurve>;
+type GivrePublicKey = givre::ciphersuite::NormalizedPoint<
+    GivreCiphersuite,
+    givre::generic_ec::NonZero<givre::generic_ec::Point<GivreCurve>>,
+>;
+
+pub type KeyShare = GivreKeyShare;
+
+pub type Commitments = GivrePublicCommitments;
+
+#[derive(Default)]
+pub struct CommitStore {
+    pairs: HashMap<GivrePublicCommitments, GivreSecretNonces>,
+}
+
+impl CommitStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn commit(&mut self, key_share: &KeyShare) -> GivrePublicCommitments {
+        let (secret_nonces, public_commitments) = givre::signing::round1::commit::<GivreCiphersuite>(
+            &mut rand08::thread_rng(),
+            key_share,
+        );
+        let commitments = GivrePublicCommitments(public_commitments);
+        let replaced = self.pairs.insert(commitments, secret_nonces);
+        assert!(replaced.is_none());
+        commitments
+    }
+}
+
+pub mod commit {
+    use crate::crypto::DigestHash as _;
+
+    use super::{
+        Commitments, GivreCiphersuite, GivrePublicCommitments, GivreSecretNonces, GivreSig,
+        GivreSigShare, Index, KeyShare, Sig, UpdateHash,
+    };
+
+    pub type PartialSig = GivreSigShare;
+
+    pub fn sign(
+        message: &impl UpdateHash,
+        key_share: &KeyShare,
+        secret_nonces: GivreSecretNonces,
+        signer_commitments: &[(Index, Commitments)],
+    ) -> anyhow::Result<PartialSig> {
+        let signers = signer_commitments
+            .iter()
+            .map(|&(index, GivrePublicCommitments(public_commitments))| (index, public_commitments))
+            .collect::<Vec<_>>();
+        let sig_share = givre::signing::round2::sign::<GivreCiphersuite>(
+            key_share,
+            secret_nonces,
+            &message.digest().0,
+            &signers,
+        )?;
+        Ok(GivreSigShare(sig_share))
+    }
+
+    pub fn aggregate(
+        partial_sig_commitments: impl Iterator<Item = (Index, PartialSig, Commitments)>,
+        key_share: &KeyShare,
+        message: &impl UpdateHash,
+    ) -> anyhow::Result<Sig> {
+        let sig = givre::signing::aggregate::aggregate::<GivreCiphersuite>(
+            key_share.as_ref(),
+            &partial_sig_commitments
+                .map(
+                    |(
+                        index,
+                        GivreSigShare(sig_share),
+                        GivrePublicCommitments(public_commitments),
+                    )| (index, public_commitments, sig_share),
+                )
+                .collect::<Vec<_>>(),
+            &message.digest().0,
+        )?;
+        Ok(Sig::Givre(GivreSig(sig.into())))
+    }
+}
+
+impl PublicMasterKey {
+    pub fn givre(key_share: &GivreKeyShare) -> PublicMasterKey {
+        Self::Givre(<GivreCiphersuite as givre::Ciphersuite>::normalize_point(
+            key_share.shared_public_key(),
+        ))
     }
 }
 
@@ -262,7 +283,7 @@ pub fn verify_digest(
     Ok(())
 }
 
-pub fn givre_replica_key_shares(num_peer: usize, num_faulty: usize) -> Vec<GivreKeyShare> {
+pub fn givre_peer_key_shares(num_peer: usize, num_faulty: usize) -> Vec<KeyShare> {
     givre::trusted_dealer::builder(num_peer as _)
         .set_threshold(Some((num_peer - num_faulty) as _))
         .generate_shares(
