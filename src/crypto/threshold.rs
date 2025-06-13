@@ -143,12 +143,12 @@ pub fn aggregate(
 // type aliases are mostly for convenient and self-contained `use` i.e. only
 // need to `use` from this crate instead of directly from givre
 // types also for implementing serialization
-pub type GivreCiphersuite = givre::ciphersuite::Secp256k1;
-pub type GivreCurve = <GivreCiphersuite as givre::Ciphersuite>::Curve;
+type GivreCiphersuite = givre::ciphersuite::Secp256k1;
+type GivreCurve = <GivreCiphersuite as givre::Ciphersuite>::Curve;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GivrePublicCommitments(pub givre::signing::round1::PublicCommitments<GivreCurve>);
-pub type GivreSecretNonces = givre::signing::round1::SecretNonces<GivreCurve>;
-pub type GivreKeyShare = givre::KeyShare<GivreCurve>;
+type GivreSecretNonces = givre::signing::round1::SecretNonces<GivreCurve>;
+type GivreKeyShare = givre::KeyShare<GivreCurve>;
 type GivrePublicKey = givre::ciphersuite::NormalizedPoint<
     GivreCiphersuite,
     givre::generic_ec::NonZero<givre::generic_ec::Point<GivreCurve>>,
@@ -184,22 +184,33 @@ pub mod commit {
     use crate::crypto::DigestHash as _;
 
     use super::{
-        Commitments, GivreCiphersuite, GivrePublicCommitments, GivreSecretNonces, GivreSig,
+        CommitStore, Commitments, GivreCiphersuite, GivrePublicCommitments, GivreSig,
         GivreSigShare, Index, KeyShare, Sig, UpdateHash,
     };
 
     pub type PartialSig = GivreSigShare;
 
-    pub fn sign(
+    pub fn partial_sign(
         message: &impl UpdateHash,
         key_share: &KeyShare,
-        secret_nonces: GivreSecretNonces,
+        index: Index,
+        commit_store: &mut CommitStore,
         signer_commitments: &[(Index, Commitments)],
     ) -> anyhow::Result<PartialSig> {
         let signers = signer_commitments
             .iter()
             .map(|&(index, GivrePublicCommitments(public_commitments))| (index, public_commitments))
             .collect::<Vec<_>>();
+        let secret_nonces = commit_store
+            .pairs
+            .remove(
+                &signer_commitments
+                    .iter()
+                    .find(|&&(other_index, _)| other_index == index)
+                    .ok_or_else(|| anyhow::anyhow!("commitments not found"))?
+                    .1,
+            )
+            .ok_or_else(|| anyhow::anyhow!("commitments not found"))?;
         let sig_share = givre::signing::round2::sign::<GivreCiphersuite>(
             key_share,
             secret_nonces,

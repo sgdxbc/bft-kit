@@ -119,6 +119,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let (partial_sigs, signers, key_share) =
             prepare_aggregate_givre((3 * f + 1) as _, threshold as _, &message);
         let sig = aggregate_givre(&partial_sigs, &signers, &key_share, &message);
+        let public_master_key = threshold::PublicMasterKey::givre(&key_share);
         group.bench_function(BenchmarkId::new("Givre", threshold), |b| {
             b.iter(|| black_box(threshold::verify(&message, &sig, &public_master_key).unwrap()))
         });
@@ -140,8 +141,8 @@ fn aggregate(
 
 fn aggregate_givre(
     partial_sigs: &[threshold::commit::PartialSig],
-    signers: &[(threshold::Index, threshold::GivrePublicCommitments)],
-    key_share: &threshold::GivreKeyShare,
+    signers: &[(threshold::Index, threshold::Commitments)],
+    key_share: &threshold::KeyShare,
     message: &Message,
 ) -> threshold::Sig {
     threshold::commit::aggregate(
@@ -198,41 +199,33 @@ fn prepare_aggregate_givre(
     message: &Message,
 ) -> (
     Vec<threshold::commit::PartialSig>,
-    Vec<(threshold::Index, threshold::GivrePublicCommitments)>,
-    threshold::GivreKeyShare,
+    Vec<(threshold::Index, threshold::Commitments)>,
+    threshold::KeyShare,
 ) {
-    let key_shares = givre::trusted_dealer::builder(n)
-        .set_threshold(Some(threshold))
-        .generate_shares(&mut rand08::thread_rng())
-        .unwrap();
-    let (secret_nonces, public_commitments) = key_shares
+    let key_shares = threshold::givre_peer_key_shares(n as usize, (n - threshold) as usize);
+    let (mut commit_stores, public_commitments) = key_shares
         .iter()
-        .take(threshold as _) // first `threshold` participants are joining
         .map(|key_share| {
-            givre::signing::round1::commit::<threshold::GivreCiphersuite>(
-                &mut rand08::thread_rng(),
-                key_share,
-            )
+            let mut commit_store = threshold::CommitStore::new();
+            let public_commitments = commit_store.commit(key_share);
+            (commit_store, public_commitments)
         })
         .unzip::<_, _, Vec<_>, Vec<_>>();
     let signers = public_commitments
         .iter()
         .copied()
         .enumerate()
-        .map(|(i, public_commitments)| {
-            (
-                i as _,
-                threshold::GivrePublicCommitments(public_commitments),
-            )
+        .map(|(i, public_commitments)| (i as _, public_commitments))
+        .collect::<Vec<_>>();
+    let sig_shares = key_shares
+        .iter()
+        .enumerate()
+        .zip(commit_stores.iter_mut())
+        .map(|((i, key_share), commit_store)| {
+            threshold::commit::partial_sign(message, key_share, i as _, commit_store, &signers)
+                .unwrap()
         })
         .collect::<Vec<_>>();
-    let sig_shares = secret_nonces
-        .into_iter()
-        .zip(&key_shares)
-        .map(|(nonce, key_share)| {
-            threshold::commit::sign(message, key_share, nonce, &signers).unwrap()
-        })
-        .collect();
     (sig_shares, signers, key_shares.into_iter().next().unwrap())
 }
 
