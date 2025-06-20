@@ -30,7 +30,7 @@ impl System {
                     num_replica,
                     num_faulty_replica,
                     num_inflight_block: 1,
-                    max_block_size: batch_size,
+                    max_batch_size: batch_size,
                 };
                 let config = ReplicaConfig {
                     crypto: PeerConfig::new(id as _, num_replica as _),

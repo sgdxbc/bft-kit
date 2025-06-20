@@ -2,7 +2,10 @@ use std::{collections::HashMap, mem::take};
 
 use bincode::{Decode, Encode};
 
-use crate::crypto::{Digest, DigestHash as _, PeerConfig, Sig, UpdateHash, sign, verify};
+use crate::{
+    command::pool::CommandPool,
+    crypto::{Digest, DigestHash as _, PeerConfig, Sig, UpdateHash, sign, verify},
+};
 
 #[cfg(test)]
 mod tests;
@@ -308,7 +311,7 @@ struct ReplicaCore {
     proposed_op_num: OpNum,  // maintained only by primary
     finalized_op_num: OpNum, // maintained by all
     ops: HashMap<OpNum, Op>,
-    submitted_commands: Vec<Command>,
+    command_pool: CommandPool,
 }
 
 pub struct ReplicaCoreConfig {
@@ -316,7 +319,7 @@ pub struct ReplicaCoreConfig {
     num_replica: ReplicaId,
     num_faulty_replica: ReplicaId,
     num_inflight_block: OpNum,
-    max_block_size: usize,
+    max_batch_size: usize,
 }
 
 struct Op {
@@ -388,7 +391,7 @@ impl ReplicaCore {
             proposed_op_num: 0,
             finalized_op_num: 0,
             ops: Default::default(),
-            submitted_commands: Default::default(),
+            command_pool: CommandPool::close_loop(), // TODO: make it configurable
         }
     }
 
@@ -398,10 +401,8 @@ impl ReplicaCore {
             //
             return;
         }
-        self.submitted_commands.push(command);
-        if self.can_propose(self.view_num) {
-            self.propose(context)
-        }
+        self.command_pool.push(command);
+        self.propose(context)
     }
 
     // event handlers
@@ -442,11 +443,12 @@ impl ReplicaCore {
         op.commit_quorum.insert(vote.replica_id, vote);
         while self.can_finalize(self.finalized_op_num + 1) {
             self.finalized_op_num += 1;
-            context.finalize(self.finalized_op_num)
+            context.finalize(self.finalized_op_num);
+            for command in &self.ops.get(&self.finalized_op_num).unwrap().commands {
+                self.command_pool.commit(command)
+            }
         }
-        while !self.submitted_commands.is_empty() && self.can_propose(self.view_num) {
-            self.propose(context)
-        }
+        self.propose(context)
     }
 
     // internal helpers
@@ -473,17 +475,13 @@ impl ReplicaCore {
     }
 
     fn propose(&mut self, context: &mut ReplicaCoreContext) {
-        self.proposed_op_num += 1;
-        let commands = self
-            .submitted_commands
-            .drain(
-                ..self
-                    .submitted_commands
-                    .len()
-                    .min(self.config.max_block_size),
-            )
-            .collect();
-        context.propose(self.proposed_op_num, commands)
+        while self.can_propose(self.view_num) {
+            let Some(commands) = self.command_pool.close_batch(self.config.max_batch_size) else {
+                return;
+            };
+            self.proposed_op_num += 1;
+            context.propose(self.proposed_op_num, commands)
+        }
     }
 }
 
