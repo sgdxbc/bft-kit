@@ -2,6 +2,9 @@ pub mod command;
 pub mod crypto;
 pub mod pbft;
 
+pub use command::Command;
+pub use command::pool::CommandPool;
+
 // similar to tracing_subscriber::fmt::init() but reports spans
 // why init() defaults to not report spans? i don't understand
 // if this further grows move it into dedicated module

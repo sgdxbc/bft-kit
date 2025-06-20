@@ -3,14 +3,14 @@ use std::{collections::HashMap, mem::take};
 use bincode::{Decode, Encode};
 
 use crate::{
-    command::pool::CommandPool,
+    CommandPool,
     crypto::{Digest, DigestHash as _, PeerConfig, Sig, UpdateHash, sign, verify},
 };
 
 #[cfg(test)]
 mod tests;
 
-pub type Command = crate::command::Command;
+pub type Command = crate::Command;
 type Commands = Vec<Command>;
 
 // internal aliases for readability
