@@ -1,3 +1,4 @@
+pub mod command;
 pub mod crypto;
 pub mod pbft;
 

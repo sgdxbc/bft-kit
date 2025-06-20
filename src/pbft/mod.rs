@@ -58,7 +58,7 @@ impl Replica {
 
     pub fn submit(&mut self, request: Request, context: &mut impl Context) {
         self.core.submit(request, &mut self.core_context);
-        self.execute_core_commands(context)
+        self.perform_core_actions(context)
     }
 
     pub fn receive(&mut self, message: Message, context: &mut impl Context) {
@@ -186,13 +186,13 @@ impl Replica {
                 self.core.handle_commit(vote, &mut self.core_context);
             }
         }
-        self.execute_core_commands(context)
+        self.perform_core_actions(context)
     }
 
-    fn execute_core_commands(&mut self, context: &mut impl Context) {
-        for command in take(&mut self.core_context.0) {
-            match command {
-                ReplicaCoreCommand::Propose(op_num, requests) => {
+    fn perform_core_actions(&mut self, context: &mut impl Context) {
+        for action in take(&mut self.core_context.0) {
+            match action {
+                ReplicaCoreAction::Propose(op_num, requests) => {
                     let mut pre_prepare = PrePrepare {
                         view_num: self.core.view_num,
                         op_num,
@@ -208,7 +208,7 @@ impl Replica {
                         &mut self.core_context,
                     );
                 }
-                ReplicaCoreCommand::Prepare(op_num) => {
+                ReplicaCoreAction::Prepare(op_num) => {
                     let digest = self
                         .core
                         .ops
@@ -251,7 +251,7 @@ impl Replica {
                         }
                     }
                 }
-                ReplicaCoreCommand::Commit(op_num) => {
+                ReplicaCoreAction::Commit(op_num) => {
                     let digest = self
                         .core
                         .ops
@@ -294,14 +294,14 @@ impl Replica {
                         }
                     }
                 }
-                ReplicaCoreCommand::Finalize(op_num) => {
+                ReplicaCoreAction::Finalize(op_num) => {
                     let requests = self.core.ops.get(&op_num).unwrap().requests.clone();
                     context.finalize(requests, self.core.view_num)
                 }
             }
         }
         if !self.core_context.0.is_empty() {
-            self.execute_core_commands(context)
+            self.perform_core_actions(context)
         }
     }
 }
@@ -349,30 +349,30 @@ pub struct Vote {
     sig: Sig,
 }
 
-enum ReplicaCoreCommand {
+enum ReplicaCoreAction {
     Propose(OpNum, Vec<Request>),
     Prepare(OpNum),
     Commit(OpNum),
     Finalize(OpNum),
 }
 
-struct ReplicaCoreContext(Vec<ReplicaCoreCommand>);
+struct ReplicaCoreContext(Vec<ReplicaCoreAction>);
 
 impl ReplicaCoreContext {
     fn propose(&mut self, op_num: OpNum, requests: Requests) {
-        self.0.push(ReplicaCoreCommand::Propose(op_num, requests))
+        self.0.push(ReplicaCoreAction::Propose(op_num, requests))
     }
 
     fn prepare(&mut self, op_num: OpNum) {
-        self.0.push(ReplicaCoreCommand::Prepare(op_num))
+        self.0.push(ReplicaCoreAction::Prepare(op_num))
     }
 
     fn commit(&mut self, op_num: OpNum) {
-        self.0.push(ReplicaCoreCommand::Commit(op_num))
+        self.0.push(ReplicaCoreAction::Commit(op_num))
     }
 
     fn finalize(&mut self, op_num: OpNum) {
-        self.0.push(ReplicaCoreCommand::Finalize(op_num))
+        self.0.push(ReplicaCoreAction::Finalize(op_num))
     }
 }
 

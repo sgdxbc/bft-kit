@@ -49,20 +49,20 @@ impl System {
 }
 
 #[derive(Default)]
-struct Context(Vec<ReplicaCommand>);
+struct Context(Vec<ReplicaAction>);
 
-enum ReplicaCommand {
+enum ReplicaAction {
     Send(Message),
     Finalize(Requests, ViewNum),
 }
 
 impl super::Context for Context {
     fn send_message(&mut self, message: Message) {
-        self.0.push(ReplicaCommand::Send(message));
+        self.0.push(ReplicaAction::Send(message));
     }
 
     fn finalize(&mut self, requests: Requests, view_num: ViewNum) {
-        self.0.push(ReplicaCommand::Finalize(requests, view_num));
+        self.0.push(ReplicaAction::Finalize(requests, view_num));
     }
 }
 
@@ -70,7 +70,7 @@ impl System {
     fn submit(&mut self, replica_id: ReplicaId, request: Request) {
         let mut context = Context::default();
         self.replicas[replica_id as usize].submit(request, &mut context);
-        self.execute(replica_id, context);
+        self.perform(replica_id, context);
     }
 
     fn deliver(&mut self) -> bool {
@@ -80,21 +80,21 @@ impl System {
         tracing::info!(%replica_id, ?message, "deliver");
         let mut context = Context::default();
         self.replicas[replica_id as usize].receive(message, &mut context);
-        self.execute(replica_id, context);
+        self.perform(replica_id, context);
         true
     }
 
-    fn execute(&mut self, replica_id: ReplicaId, context: Context) {
-        for command in context.0 {
-            match command {
-                ReplicaCommand::Send(message) => {
+    fn perform(&mut self, replica_id: ReplicaId, context: Context) {
+        for action in context.0 {
+            match action {
+                ReplicaAction::Send(message) => {
                     for other_replica_id in 0..self.replicas.len() as ReplicaId {
                         if other_replica_id != replica_id {
                             self.messages.push_back((other_replica_id, message.clone()));
                         }
                     }
                 }
-                ReplicaCommand::Finalize(requests, view_num) => {
+                ReplicaAction::Finalize(requests, view_num) => {
                     self.log
                         .push(Event::Finalize(replica_id, requests, view_num));
                 }
