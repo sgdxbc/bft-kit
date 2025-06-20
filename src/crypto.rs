@@ -42,6 +42,12 @@ impl<T: UpdateHash> UpdateHash for &[T] {
     }
 }
 
+impl UpdateHash for Digest {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
+        state.update(self.0)
+    }
+}
+
 // the canonical digest in this codebase is 32 byte SHA256
 // can swap to keccak256 in the future if have a (very) good reason
 pub trait DigestHash {
