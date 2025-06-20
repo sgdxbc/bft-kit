@@ -7,7 +7,7 @@ use crate::crypto::UpdateHash;
 pub mod pool;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
-pub struct ClientId(u32);
+pub struct ClientId(pub u32);
 
 impl Display for ClientId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

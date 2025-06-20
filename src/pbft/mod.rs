@@ -7,14 +7,8 @@ use crate::crypto::{Digest, DigestHash as _, PeerConfig, Sig, UpdateHash, sign, 
 #[cfg(test)]
 mod tests;
 
-#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
-pub struct Request {
-    client_id: u32,
-    seq_num: u64,
-    op: Vec<u8>,
-}
-
-type Requests = Vec<Request>;
+pub type Command = crate::command::Command;
+type Commands = Vec<Command>;
 
 // internal aliases for readability
 type OpNum = u64;
@@ -23,14 +17,14 @@ type ReplicaId = u16;
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum Message {
-    PrePrepare(PrePrepare, Requests),
+    PrePrepare(PrePrepare, Commands),
     Prepare(Vote),
     Commit(Vote),
 }
 
 pub trait Context {
     fn send_message(&mut self, message: Message);
-    fn finalize(&mut self, requests: Requests, view_num: ViewNum);
+    fn finalize(&mut self, commands: Commands, view_num: ViewNum);
 }
 
 pub struct Replica {
@@ -56,14 +50,14 @@ impl Replica {
         }
     }
 
-    pub fn submit(&mut self, request: Request, context: &mut impl Context) {
-        self.core.submit(request, &mut self.core_context);
+    pub fn submit(&mut self, command: Command, context: &mut impl Context) {
+        self.core.submit(command, &mut self.core_context);
         self.perform_core_actions(context)
     }
 
     pub fn receive(&mut self, message: Message, context: &mut impl Context) {
         match message {
-            Message::PrePrepare(pre_prepare, requests) => {
+            Message::PrePrepare(pre_prepare, commands) => {
                 if pre_prepare.view_num != self.core.view_num {
                     tracing::warn!(
                         %self.core.view_num,
@@ -100,7 +94,7 @@ impl Replica {
                     return;
                 }
                 self.core
-                    .handle_pre_prepare(pre_prepare, requests, &mut self.core_context);
+                    .handle_pre_prepare(pre_prepare, commands, &mut self.core_context);
             }
             Message::Prepare(vote) => {
                 // it's a bit leaky to check can_commit here as ReplicaCore can check it by
@@ -192,19 +186,19 @@ impl Replica {
     fn perform_core_actions(&mut self, context: &mut impl Context) {
         for action in take(&mut self.core_context.0) {
             match action {
-                ReplicaCoreAction::Propose(op_num, requests) => {
+                ReplicaCoreAction::Propose(op_num, commands) => {
                     let mut pre_prepare = PrePrepare {
                         view_num: self.core.view_num,
                         op_num,
-                        digest: (&*requests).digest(),
+                        digest: (&*commands).digest(),
                         sig: Default::default(),
                     };
                     pre_prepare.sig = sign(&pre_prepare, &self.config.crypto.secret_key);
                     context
-                        .send_message(Message::PrePrepare(pre_prepare.clone(), requests.clone()));
+                        .send_message(Message::PrePrepare(pre_prepare.clone(), commands.clone()));
                     self.core.handle_pre_prepare(
                         pre_prepare,
-                        requests.clone(),
+                        commands.clone(),
                         &mut self.core_context,
                     );
                 }
@@ -295,8 +289,8 @@ impl Replica {
                     }
                 }
                 ReplicaCoreAction::Finalize(op_num) => {
-                    let requests = self.core.ops.get(&op_num).unwrap().requests.clone();
-                    context.finalize(requests, self.core.view_num)
+                    let commands = self.core.ops.get(&op_num).unwrap().commands.clone();
+                    context.finalize(commands, self.core.view_num)
                 }
             }
         }
@@ -309,12 +303,12 @@ impl Replica {
 struct ReplicaCore {
     config: ReplicaCoreConfig,
     view_num: ViewNum,
-    // following original work, "op" refers to a batch of requests, while in other
+    // following original work, "op" refers to a batch of commands, while in other
     // works it is usually called block
     proposed_op_num: OpNum,  // maintained only by primary
     finalized_op_num: OpNum, // maintained by all
     ops: HashMap<OpNum, Op>,
-    submitted_requests: Vec<Request>,
+    submitted_commands: Vec<Command>,
 }
 
 pub struct ReplicaCoreConfig {
@@ -326,7 +320,7 @@ pub struct ReplicaCoreConfig {
 }
 
 struct Op {
-    requests: Vec<Request>,
+    commands: Commands,
     pre_prepare: PrePrepare,
     prepare_quorum: HashMap<ReplicaId, Vote>,
     commit_quorum: HashMap<ReplicaId, Vote>,
@@ -350,7 +344,7 @@ pub struct Vote {
 }
 
 enum ReplicaCoreAction {
-    Propose(OpNum, Vec<Request>),
+    Propose(OpNum, Commands),
     Prepare(OpNum),
     Commit(OpNum),
     Finalize(OpNum),
@@ -359,8 +353,8 @@ enum ReplicaCoreAction {
 struct ReplicaCoreContext(Vec<ReplicaCoreAction>);
 
 impl ReplicaCoreContext {
-    fn propose(&mut self, op_num: OpNum, requests: Requests) {
-        self.0.push(ReplicaCoreAction::Propose(op_num, requests))
+    fn propose(&mut self, op_num: OpNum, commands: Commands) {
+        self.0.push(ReplicaCoreAction::Propose(op_num, commands))
     }
 
     fn prepare(&mut self, op_num: OpNum) {
@@ -394,17 +388,17 @@ impl ReplicaCore {
             proposed_op_num: 0,
             finalized_op_num: 0,
             ops: Default::default(),
-            submitted_requests: Default::default(),
+            submitted_commands: Default::default(),
         }
     }
 
     // actions
-    fn submit(&mut self, request: Request, context: &mut ReplicaCoreContext) {
+    fn submit(&mut self, command: Command, context: &mut ReplicaCoreContext) {
         if !self.config.is_primary_of(self.view_num) {
             //
             return;
         }
-        self.submitted_requests.push(request);
+        self.submitted_commands.push(command);
         if self.can_propose(self.view_num) {
             self.propose(context)
         }
@@ -414,14 +408,14 @@ impl ReplicaCore {
     fn handle_pre_prepare(
         &mut self,
         pre_prepare: PrePrepare,
-        requests: Requests,
+        commands: Commands,
         context: &mut ReplicaCoreContext,
     ) {
         let op_num = pre_prepare.op_num;
         let replaced = self.ops.insert(
             op_num,
             Op {
-                requests,
+                commands,
                 pre_prepare,
                 prepare_quorum: Default::default(),
                 commit_quorum: Default::default(),
@@ -450,7 +444,7 @@ impl ReplicaCore {
             self.finalized_op_num += 1;
             context.finalize(self.finalized_op_num)
         }
-        while !self.submitted_requests.is_empty() && self.can_propose(self.view_num) {
+        while !self.submitted_commands.is_empty() && self.can_propose(self.view_num) {
             self.propose(context)
         }
     }
@@ -480,24 +474,16 @@ impl ReplicaCore {
 
     fn propose(&mut self, context: &mut ReplicaCoreContext) {
         self.proposed_op_num += 1;
-        let requests = self
-            .submitted_requests
+        let commands = self
+            .submitted_commands
             .drain(
                 ..self
-                    .submitted_requests
+                    .submitted_commands
                     .len()
                     .min(self.config.max_block_size),
             )
             .collect();
-        context.propose(self.proposed_op_num, requests)
-    }
-}
-
-impl UpdateHash for Request {
-    fn update<D: sha2::Digest>(&self, state: &mut D) {
-        state.update(self.client_id.to_le_bytes());
-        state.update(self.seq_num.to_le_bytes());
-        state.update(&self.op)
+        context.propose(self.proposed_op_num, commands)
     }
 }
 

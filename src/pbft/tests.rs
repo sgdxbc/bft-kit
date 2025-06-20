@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 
 use test_log::test;
 
+use crate::command::ClientId;
+
 use super::*;
 
 struct System {
@@ -12,7 +14,7 @@ struct System {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Event {
-    Finalize(ReplicaId, Requests, ViewNum),
+    Finalize(ReplicaId, Commands, ViewNum),
 }
 
 impl System {
@@ -53,7 +55,7 @@ struct Context(Vec<ReplicaAction>);
 
 enum ReplicaAction {
     Send(Message),
-    Finalize(Requests, ViewNum),
+    Finalize(Commands, ViewNum),
 }
 
 impl super::Context for Context {
@@ -61,15 +63,15 @@ impl super::Context for Context {
         self.0.push(ReplicaAction::Send(message));
     }
 
-    fn finalize(&mut self, requests: Requests, view_num: ViewNum) {
-        self.0.push(ReplicaAction::Finalize(requests, view_num));
+    fn finalize(&mut self, commands: Commands, view_num: ViewNum) {
+        self.0.push(ReplicaAction::Finalize(commands, view_num));
     }
 }
 
 impl System {
-    fn submit(&mut self, replica_id: ReplicaId, request: Request) {
+    fn submit(&mut self, replica_id: ReplicaId, command: Command) {
         let mut context = Context::default();
-        self.replicas[replica_id as usize].submit(request, &mut context);
+        self.replicas[replica_id as usize].submit(command, &mut context);
         self.perform(replica_id, context);
     }
 
@@ -94,9 +96,9 @@ impl System {
                         }
                     }
                 }
-                ReplicaAction::Finalize(requests, view_num) => {
+                ReplicaAction::Finalize(commands, view_num) => {
                     self.log
-                        .push(Event::Finalize(replica_id, requests, view_num));
+                        .push(Event::Finalize(replica_id, commands, view_num));
                 }
             }
         }
@@ -112,63 +114,63 @@ impl System {
         unreachable!()
     }
 
-    fn finalized_of(&self, replica_id: ReplicaId, view_num: ViewNum) -> Vec<Requests> {
+    fn finalized_of(&self, replica_id: ReplicaId, view_num: ViewNum) -> Vec<Commands> {
         self.log
             .iter()
             .filter_map(|event| match event {
-                Event::Finalize(other_replica_id, requests, other_view_num)
+                Event::Finalize(other_replica_id, commands, other_view_num)
                     if *other_replica_id == replica_id && *other_view_num == view_num =>
                 {
-                    Some(requests.clone())
+                    Some(commands.clone())
                 }
                 _ => None,
             })
             .collect()
     }
 
-    fn has_finalized_all(&self, view_num: ViewNum, expected: &[Request]) -> bool {
+    fn has_finalized_all(&self, view_num: ViewNum, expected: &[Command]) -> bool {
         let replica0_log = self.finalized_of(0, view_num);
         let other_replica_logs = (1..self.replicas.len())
             .map(|replica_id| self.finalized_of(replica_id as _, view_num))
             .collect::<Vec<_>>();
         other_replica_logs.iter().all(|log| log == &replica0_log)
-            && expected.iter().all(|request| {
+            && expected.iter().all(|command| {
                 replica0_log
                     .iter()
-                    .any(|requests| requests.contains(request))
+                    .any(|commands| commands.contains(command))
             })
     }
 }
 
-fn request(client_id: u32, seq_num: u64) -> Request {
-    Request {
-        client_id,
-        seq_num,
-        op: format!("request@{client_id}#{seq_num}").into_bytes(),
+fn command(client_id: u32, seq: u64) -> Command {
+    Command {
+        client_id: ClientId(client_id),
+        seq,
+        op: format!("command@{client_id}#{seq}").into_bytes(),
     }
 }
 
 #[test]
 fn basic() {
     let mut system = System::new(4, 1);
-    system.submit(0, request(0, 1));
+    system.submit(0, command(0, 1));
     system.deliver_all(100);
     tracing::debug!("log: {:?}", system.log);
-    assert!(system.has_finalized_all(0, &[request(0, 1)]))
+    assert!(system.has_finalized_all(0, &[command(0, 1)]))
 }
 
 #[test]
 fn concurrent_submit() {
     let mut system = System::new(4, 1);
     for client_id in 0..4 {
-        system.submit(0, request(client_id, 1));
+        system.submit(0, command(client_id, 1));
     }
     system.deliver_all(100);
     assert!(
         system.has_finalized_all(
             0,
             &(0..4)
-                .map(|client_id| request(client_id, 1))
+                .map(|client_id| command(client_id, 1))
                 .collect::<Vec<_>>(),
         )
     )
@@ -178,14 +180,14 @@ fn concurrent_submit() {
 fn concurrent_submit_batched() {
     let mut system = System::with_batch_size(4, 1, 10);
     for client_id in 0..4 {
-        system.submit(0, request(client_id, 1));
+        system.submit(0, command(client_id, 1));
     }
     system.deliver_all(100);
     assert!(
         system.has_finalized_all(
             0,
             &(0..4)
-                .map(|client_id| request(client_id, 1))
+                .map(|client_id| command(client_id, 1))
                 .collect::<Vec<_>>(),
         )
     );
