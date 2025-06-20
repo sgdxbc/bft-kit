@@ -16,7 +16,11 @@ enum Event {
 }
 
 impl System {
-    fn new(num_replica: ReplicaId, num_faulty_replica: ReplicaId) -> Self {
+    fn with_batch_size(
+        num_replica: ReplicaId,
+        num_faulty_replica: ReplicaId,
+        batch_size: usize,
+    ) -> Self {
         let replicas = (0..num_replica)
             .map(|id| {
                 let core_config = ReplicaCoreConfig {
@@ -24,7 +28,7 @@ impl System {
                     num_replica,
                     num_faulty_replica,
                     num_inflight_block: 1,
-                    max_block_size: 100,
+                    max_block_size: batch_size,
                 };
                 let config = ReplicaConfig {
                     crypto: PeerConfig::new(id as _, num_replica as _),
@@ -37,6 +41,10 @@ impl System {
             messages: Default::default(),
             log: Default::default(),
         }
+    }
+
+    fn new(num_replica: ReplicaId, num_faulty_replica: ReplicaId) -> Self {
+        Self::with_batch_size(num_replica, num_faulty_replica, 1)
     }
 }
 
@@ -104,14 +112,31 @@ impl System {
         unreachable!()
     }
 
-    fn has_finalized(&self, replica_id: ReplicaId, requests: Requests, view_num: ViewNum) -> bool {
+    fn finalized_of(&self, replica_id: ReplicaId, view_num: ViewNum) -> Vec<Requests> {
         self.log
-            .contains(&Event::Finalize(replica_id, requests, view_num))
+            .iter()
+            .filter_map(|event| match event {
+                Event::Finalize(other_replica_id, requests, other_view_num)
+                    if *other_replica_id == replica_id && *other_view_num == view_num =>
+                {
+                    Some(requests.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
-    fn has_finalized_all(&self, requests: Requests, view_num: ViewNum) -> bool {
-        (0..self.replicas.len())
-            .all(|replica_id| self.has_finalized(replica_id as _, requests.clone(), view_num))
+    fn has_finalized_all(&self, view_num: ViewNum, expected: &[Request]) -> bool {
+        let replica0_log = self.finalized_of(0, view_num);
+        let other_replica_logs = (1..self.replicas.len())
+            .map(|replica_id| self.finalized_of(replica_id as _, view_num))
+            .collect::<Vec<_>>();
+        other_replica_logs.iter().all(|log| log == &replica0_log)
+            && expected.iter().all(|request| {
+                replica0_log
+                    .iter()
+                    .any(|requests| requests.contains(request))
+            })
     }
 }
 
@@ -129,5 +154,40 @@ fn basic() {
     system.submit(0, request(0, 1));
     system.deliver_all(100);
     tracing::debug!("log: {:?}", system.log);
-    assert!(system.has_finalized_all(vec![request(0, 1)], 0));
+    assert!(system.has_finalized_all(0, &[request(0, 1)]))
+}
+
+#[test]
+fn concurrent_submit() {
+    let mut system = System::new(4, 1);
+    for client_id in 0..4 {
+        system.submit(0, request(client_id, 1));
+    }
+    system.deliver_all(100);
+    assert!(
+        system.has_finalized_all(
+            0,
+            &(0..4)
+                .map(|client_id| request(client_id, 1))
+                .collect::<Vec<_>>(),
+        )
+    )
+}
+
+#[test]
+fn concurrent_submit_batched() {
+    let mut system = System::with_batch_size(4, 1, 10);
+    for client_id in 0..4 {
+        system.submit(0, request(client_id, 1));
+    }
+    system.deliver_all(100);
+    assert!(
+        system.has_finalized_all(
+            0,
+            &(0..4)
+                .map(|client_id| request(client_id, 1))
+                .collect::<Vec<_>>(),
+        )
+    );
+    assert!(system.replicas[0].core.ops.len() < 4)
 }

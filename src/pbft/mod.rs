@@ -404,7 +404,6 @@ impl ReplicaCore {
             //
             return;
         }
-
         self.submitted_requests.push(request);
         if self.can_propose(self.view_num) {
             self.propose(context)
@@ -459,7 +458,7 @@ impl ReplicaCore {
     // internal helpers
     fn can_propose(&self, view_num: ViewNum) -> bool {
         self.config.is_primary_of(view_num)
-            && self.proposed_op_num <= self.finalized_op_num + self.config.num_inflight_block
+            && self.proposed_op_num < self.finalized_op_num + self.config.num_inflight_block
     }
 
     fn can_commit(&self, op_num: OpNum) -> bool {
