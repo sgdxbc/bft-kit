@@ -1,4 +1,5 @@
 pub mod crypto;
+pub mod pbft;
 
 // similar to tracing_subscriber::fmt::init() but reports spans
 // why init() defaults to not report spans? i don't understand
