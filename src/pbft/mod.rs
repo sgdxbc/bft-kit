@@ -3,7 +3,11 @@ use std::{collections::HashMap, mem::take};
 use crate::crypto::{Digest, DigestHash as _, PeerConfig, Sig, UpdateHash, sign, verify};
 
 #[derive(Clone)]
-pub struct Request {}
+pub struct Request {
+    client_id: u32,
+    seq_num: u64,
+    op: Vec<u8>,
+}
 
 type Requests = Vec<Request>;
 
@@ -83,8 +87,9 @@ impl Replica {
                     .handle_pre_prepare(pre_prepare, requests, &mut self.core_context);
             }
             Message::Prepare(vote) => {
-                // it's a bit leaky to check can_commit here as ReplicaCore can check it by itself
-                // as easily. however doing it anyway to avoid unnecessary verification overhead
+                // it's a bit leaky to check can_commit here as ReplicaCore can check it by
+                // itself as easily
+                // however doing it anyway to avoid unnecessary verification overhead
                 if self.core.can_commit(vote.op_num) {
                     return;
                 }
@@ -282,6 +287,8 @@ impl Replica {
 struct ReplicaCore {
     config: ReplicaCoreConfig,
     view_num: ViewNum,
+    // following original work, "op" refers to a batch of requests, while in other
+    // works it is usually called block
     proposed_op_num: OpNum,  // maintained only by primary
     finalized_op_num: OpNum, // maintained by all
     ops: HashMap<OpNum, Op>,
@@ -455,7 +462,9 @@ impl ReplicaCore {
 
 impl UpdateHash for Request {
     fn update<D: sha2::Digest>(&self, state: &mut D) {
-        //
+        state.update(self.client_id.to_le_bytes());
+        state.update(self.seq_num.to_le_bytes());
+        state.update(&self.op)
     }
 }
 
