@@ -1,8 +1,13 @@
 use std::{collections::HashMap, mem::take};
 
+use bincode::{Decode, Encode};
+
 use crate::crypto::{Digest, DigestHash as _, PeerConfig, Sig, UpdateHash, sign, verify};
 
-#[derive(Clone)]
+#[cfg(test)]
+mod tests;
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Request {
     client_id: u32,
     seq_num: u64,
@@ -16,6 +21,7 @@ type OpNum = u64;
 type ViewNum = u64;
 type ReplicaId = u16;
 
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum Message {
     PrePrepare(PrePrepare, Requests),
     Prepare(Vote),
@@ -40,6 +46,16 @@ pub struct ReplicaConfig {
 }
 
 impl Replica {
+    pub fn new(core_config: ReplicaCoreConfig, config: ReplicaConfig) -> Self {
+        Self {
+            config,
+            core: ReplicaCore::new(core_config),
+            core_context: ReplicaCoreContext(Default::default()),
+            reordered_prepares: Default::default(),
+            reordered_commits: Default::default(),
+        }
+    }
+
     pub fn submit(&mut self, request: Request, context: &mut impl Context) {
         self.core.submit(request, &mut self.core_context);
         self.execute_core_commands(context)
@@ -184,7 +200,13 @@ impl Replica {
                         sig: Default::default(),
                     };
                     pre_prepare.sig = sign(&pre_prepare, &self.config.crypto.secret_key);
-                    context.send_message(Message::PrePrepare(pre_prepare, requests))
+                    context
+                        .send_message(Message::PrePrepare(pre_prepare.clone(), requests.clone()));
+                    self.core.handle_pre_prepare(
+                        pre_prepare,
+                        requests.clone(),
+                        &mut self.core_context,
+                    );
                 }
                 ReplicaCoreCommand::Prepare(op_num) => {
                     let digest = self
@@ -295,7 +317,7 @@ struct ReplicaCore {
     submitted_requests: Vec<Request>,
 }
 
-struct ReplicaCoreConfig {
+pub struct ReplicaCoreConfig {
     id: ReplicaId,
     num_replica: ReplicaId,
     num_faulty_replica: ReplicaId,
@@ -310,6 +332,7 @@ struct Op {
     commit_quorum: HashMap<ReplicaId, Vote>,
 }
 
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct PrePrepare {
     view_num: ViewNum,
     op_num: OpNum,
@@ -317,7 +340,7 @@ pub struct PrePrepare {
     sig: Sig,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct Vote {
     view_num: ViewNum,
     op_num: OpNum,
@@ -364,6 +387,17 @@ impl ReplicaCoreConfig {
 }
 
 impl ReplicaCore {
+    fn new(config: ReplicaCoreConfig) -> Self {
+        Self {
+            config,
+            view_num: 0,
+            proposed_op_num: 0,
+            finalized_op_num: 0,
+            ops: Default::default(),
+            submitted_requests: Default::default(),
+        }
+    }
+
     // actions
     fn submit(&mut self, request: Request, context: &mut ReplicaCoreContext) {
         if !self.config.is_primary_of(self.view_num) {
@@ -431,7 +465,7 @@ impl ReplicaCore {
     fn can_commit(&self, op_num: OpNum) -> bool {
         op_num <= self.finalized_op_num
             || if let Some(op) = self.ops.get(&op_num) {
-                op.prepare_quorum.len() as ReplicaId
+                op.prepare_quorum.len() as ReplicaId + 1
                     >= self.config.num_replica - self.config.num_faulty_replica
             } else {
                 false
