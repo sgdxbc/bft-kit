@@ -443,10 +443,7 @@ impl ReplicaCore {
         op.commit_quorum.insert(vote.replica_id, vote);
         while self.can_finalize(self.finalized_op_num + 1) {
             self.finalized_op_num += 1;
-            context.finalize(self.finalized_op_num);
-            for command in &self.ops.get(&self.finalized_op_num).unwrap().commands {
-                self.command_pool.commit(command)
-            }
+            context.finalize(self.finalized_op_num)
         }
         self.propose(context)
     }

@@ -45,13 +45,6 @@ impl CommandPool {
             Self::OpenLoop(pool) => pool.close_batch(max_batch_size),
         }
     }
-
-    pub fn commit(&mut self, command: &Command) {
-        match self {
-            Self::CloseLoop(pool) => pool.commit(command),
-            Self::OpenLoop(pool) => pool.commit(command),
-        }
-    }
 }
 
 // open loop pool allows multiple concurrent commands (sequence numbers) from
@@ -68,10 +61,9 @@ pub mod open_loop {
 
     #[derive(Debug, Default)]
     pub struct CommandPool {
+        // using a VecDeque as a ring buffer
         pending_buf: VecDeque<Command>,
         client_seqs: HashMap<ClientId, ClientSeq>,
-        num_push: usize,
-        num_commit: usize,
     }
 
     impl CommandPool {
@@ -82,7 +74,6 @@ pub mod open_loop {
         const MAX_LEN: usize = 5000;
 
         pub fn push(&mut self, command: Command) -> bool {
-            self.num_push += 1;
             if matches!(self.client_seqs.get(&command.client_id), Some(&seq) if seq >= command.seq)
             {
                 return false;
@@ -107,24 +98,6 @@ pub mod open_loop {
                 Some(self.pending_buf.drain(..).skip(num_skipped).collect())
             }
         }
-
-        pub fn commit(&mut self, command: &Command) {
-            self.num_commit += 1;
-            let seq = self.client_seqs.entry(command.client_id).or_default();
-            *seq = (*seq).max(command.seq)
-            // it is possible to achieve "high resolution" command purging here, based on
-            // the fact that the replicated service will not respect any future committed
-            // commands from the same client with lower sequence numbers
-            // however, based on how open loop works (e.g. implied by the `close_batch`
-            // logic), those older commands are probably not in the buffer already
-        }
-    }
-
-    impl Drop for CommandPool {
-        fn drop(&mut self) {
-            let commit_rate = self.num_commit as f32 / self.num_push as f32;
-            tracing::info!(%commit_rate)
-        }
     }
 }
 
@@ -135,16 +108,14 @@ pub mod open_loop {
 // common ordering property this becomes fairness, which is critical for tail
 // latency
 pub mod close_loop {
-    use std::{collections::HashMap, mem::swap};
+    use std::{collections::HashMap, mem::replace};
 
     use super::{ClientId, ClientSeq, Command};
 
     #[derive(Debug, Default)]
     pub struct CommandPool {
         pending_queue: Vec<Command>,
-        pending_queue_offset: usize,
-        client_pending_offsets: HashMap<ClientId, usize>,
-        submitted_seqs: HashMap<ClientId, ClientSeq>,
+        client_seqs: HashMap<ClientId, ClientSeq>,
     }
 
     impl CommandPool {
@@ -152,36 +123,13 @@ pub mod close_loop {
             Self::default()
         }
 
-        fn client_pending_index(&self, client_id: ClientId) -> Option<usize> {
-            Some(self.client_pending_offsets.get(&client_id)? - self.pending_queue_offset)
-        }
-
         pub fn push(&mut self, command: Command) -> bool {
-            if self.submitted_seqs.get(&command.client_id) >= Some(&command.seq) {
+            if self.client_seqs.get(&command.client_id) >= Some(&command.seq) {
                 return false;
             }
-            if let Some(pending_index) = self.client_pending_index(command.client_id) {
-                let pending_command = &mut self.pending_queue[pending_index];
-                assert_eq!(pending_command.client_id, command.client_id);
-                if command.seq > pending_command.seq {
-                    // pending command has been committed by other replicas; we are out of sync with
-                    // majority's view
-                    // in place replace defeats the ordering (and hence the fairness) a little bit,
-                    // but it is simple and the damage is strictly limited by the fact that each
-                    // close loop client has at most one active command
-                    *pending_command = command;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                self.client_pending_offsets.insert(
-                    command.client_id,
-                    self.pending_queue_offset + self.pending_queue.len(),
-                );
-                self.pending_queue.push(command);
-                true
-            }
+            self.client_seqs.insert(command.client_id, command.seq);
+            self.pending_queue.push(command);
+            true
         }
 
         pub fn close_batch(&mut self, max_batch_size: usize) -> Option<Vec<Command>> {
@@ -189,37 +137,8 @@ pub mod close_loop {
                 None
             } else {
                 let batch_size = max_batch_size.min(self.pending_queue.len());
-                let mut commands = self.pending_queue.split_off(batch_size);
-                swap(&mut commands, &mut self.pending_queue);
-                self.pending_queue_offset += batch_size;
-                // for (i, request) in requests.iter().enumerate() {
-                for command in &commands {
-                    let client_id = command.client_id;
-                    // assert_eq!(self.client_pending_index(client_id), Some(i));
-                    self.client_pending_offsets.remove(&client_id);
-                    let replaced = self.submitted_seqs.insert(client_id, command.seq);
-                    assert!(replaced < Some(command.seq))
-                }
-                Some(commands)
-            }
-        }
-
-        pub fn commit(&mut self, command: &Command) {
-            let seq = self.submitted_seqs.entry(command.client_id).or_default();
-            // committed sequence may be less than submitted sequence
-            // is it necessary to separately count the two sequences?
-            *seq = (*seq).max(command.seq);
-            if let Some(pending_index) = self.client_pending_index(command.client_id) {
-                if self.pending_queue[pending_index].seq <= command.seq {
-                    self.pending_queue.swap_remove(pending_index);
-                    self.client_pending_offsets.remove(&command.client_id);
-                    if let Some(swapped_request) = self.pending_queue.get(pending_index) {
-                        self.client_pending_offsets.insert(
-                            swapped_request.client_id,
-                            self.pending_queue_offset + pending_index,
-                        );
-                    }
-                }
+                let remaining_queue = self.pending_queue.split_off(batch_size);
+                Some(replace(&mut self.pending_queue, remaining_queue))
             }
         }
     }
@@ -266,70 +185,6 @@ pub mod close_loop {
             assert!(!pushed2);
             let batch2 = pool.close_batch(100);
             assert!(batch2.is_none())
-        }
-
-        #[test]
-        fn resend_committed() {
-            let mut pool = CommandPool::new();
-            pool.commit(&command(1));
-            let pushed = pool.push(command(1));
-            assert!(!pushed);
-            let batch = pool.close_batch(100);
-            assert!(batch.is_none())
-        }
-
-        #[test]
-        fn stalled_pending_superior_push() {
-            let mut pool = CommandPool::new();
-            pool.push(command(1));
-            let pushed = pool.push(command(2));
-            assert!(pushed);
-            let batch = pool.close_batch(100);
-            let Some([command]) = batch.as_deref() else {
-                unreachable!()
-            };
-            assert_eq!(command.seq, 2)
-        }
-
-        fn stalled_pending_commit(seq: ClientSeq) {
-            let mut pool = CommandPool::new();
-            pool.push(command(1));
-            pool.commit(&command(seq));
-            let batch = pool.close_batch(100);
-            assert!(batch.is_none())
-        }
-
-        #[test]
-        fn stalled_pending_commit_1() {
-            stalled_pending_commit(1)
-        }
-
-        #[test]
-        fn stalled_pending_commit_2() {
-            stalled_pending_commit(2)
-        }
-
-        #[test]
-        fn stalled_pending_commit_multiple_clients() {
-            let mut pool = CommandPool::new();
-            pool.push(command(1));
-            pool.push(Command {
-                client_id: ClientId(1),
-                seq: 1,
-                op: Default::default(),
-            });
-            pool.commit(&command(1));
-            let batch = pool.close_batch(100);
-            let Some([command]) = batch.as_deref() else {
-                unreachable!()
-            };
-            assert_eq!(command.client_id, ClientId(1))
-        }
-
-        #[test]
-        fn commit_remote() {
-            let mut pool = CommandPool::new();
-            pool.commit(&command(1))
         }
     }
 }
