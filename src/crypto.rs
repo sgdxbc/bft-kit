@@ -1,3 +1,4 @@
+//! https://github.com/sgdxbc/bft-kit/discussions/1
 use std::fmt::{Debug, Display};
 
 use bincode::{BorrowDecode, Decode, Encode, error::DecodeError};

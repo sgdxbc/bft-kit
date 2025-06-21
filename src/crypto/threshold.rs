@@ -1,3 +1,4 @@
+//! https://github.com/sgdxbc/bft-kit/discussions/2
 use std::{collections::HashMap, hash::Hash};
 
 use bincode::{
