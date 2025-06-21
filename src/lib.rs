@@ -1,5 +1,6 @@
 pub mod command;
 pub mod crypto;
+pub mod parse;
 pub mod pbft;
 
 pub use command::Command;
