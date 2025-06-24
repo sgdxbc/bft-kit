@@ -17,6 +17,9 @@ use crate::crypto::cert::quinn::{client_config, server_config};
 type Id = u64;
 
 pub struct Transport {
+    // read_tasks never return Ok, while write_tasks return Ok when write channel is
+    // closed. this fact is not leveraged by current abstraction, but saving this
+    // read/write task separation just in case it becomes useful
     read_tasks: JoinSet<anyhow::Result<()>>,
     write_tasks: JoinSet<anyhow::Result<()>>,
 }
@@ -79,14 +82,13 @@ impl Transport {
         Ok(())
     }
 
-    // change to return anyhow::Result<!> after ! is stabilized
     pub async fn join_next(&mut self) -> anyhow::Result<()> {
         tokio::select! {
             Some(result) = self.read_tasks.join_next() => result??,
             Some(result) = self.write_tasks.join_next() => result??,
             else => pending().await
         }
-        unreachable!()
+        Ok(())
     }
 }
 

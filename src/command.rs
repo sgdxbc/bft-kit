@@ -1,5 +1,8 @@
 //! https://github.com/sgdxbc/bft-kit/discussions/3
-use std::fmt::{Debug, Display};
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Display},
+};
 
 use bincode::{Decode, Encode};
 
@@ -31,13 +34,62 @@ pub struct Command {
     pub op: Vec<u8>,
 }
 
-// produce a more informative compile error hopefully
-#[cfg(test)]
-const _: () = assert!(size_of::<u32>() == size_of::<ClientId>());
+pub trait Execute {
+    fn execute(&mut self, op: &[u8]) -> Vec<u8>;
+}
+
+pub struct ServiceState<E> {
+    inner: E,
+    replies: HashMap<ClientId, (ClientSeq, Vec<u8>)>,
+}
+
+impl<E> ServiceState<E> {
+    pub fn new(inner: E) -> Self {
+        Self {
+            inner,
+            replies: Default::default(),
+        }
+    }
+}
+
+pub enum ReceiveAction {
+    Ignore,
+    Submit,
+    Reply(Vec<u8>),
+}
+
+impl<E: Execute> ServiceState<E> {
+    pub fn receive(&self, command: &Command) -> ReceiveAction {
+        match self.replies.get(&command.client_id) {
+            Some((seq, _)) if seq > &command.seq => ReceiveAction::Ignore,
+            Some((seq, reply)) if seq == &command.seq => ReceiveAction::Reply(reply.clone()),
+            _ => ReceiveAction::Submit,
+        }
+    }
+
+    pub fn execute(&mut self, commands: &[Command]) -> impl Iterator<Item = (ClientId, Vec<u8>)> {
+        commands.iter().filter_map(|command| {
+            if matches!(self.replies.get(&command.client_id), Some((seq, _)) if seq >= &command.seq)
+            {
+                None
+            } else {
+                let reply = self.inner.execute(&command.op);
+                self.replies
+                    .insert(command.client_id, (command.seq, reply.clone()));
+                Some((command.client_id, reply))
+            }
+        })
+    }
+}
 
 #[cfg(test)]
 impl Command {
     pub fn new(client_id: u32, seq: ClientSeq) -> Self {
+        // produce a more informative compile error hopefully
+        const _: () = assert!(
+            size_of::<u32>() == size_of::<ClientId>(),
+            "need to update `client_id` type to match ClientId size"
+        );
         Self {
             client_id: ClientId(client_id),
             seq,
