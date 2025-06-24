@@ -1,16 +1,20 @@
-use std::{collections::HashMap, future::pending, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint, Incoming, TransportConfig};
 use tokio::{
-    sync::mpsc::{self, Receiver, Sender, error::TrySendError},
+    sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
     time::sleep,
     try_join,
 };
 use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
-use crate::crypto::cert::quinn::{client_config, server_config};
+use crate::{
+    Command,
+    command::{ClientSeq, Execute, ReceiveAction, ServiceState},
+    crypto::cert::quinn::{client_config, server_config},
+};
 
 // pub mod tcp;
 
@@ -82,13 +86,24 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn join_next(&mut self) -> anyhow::Result<()> {
-        tokio::select! {
-            Some(result) = self.read_tasks.join_next() => result??,
-            Some(result) = self.write_tasks.join_next() => result??,
-            else => pending().await
+    pub async fn select(&mut self) -> Option<anyhow::Result<()>> {
+        async fn join_next(
+            tasks: &mut JoinSet<anyhow::Result<()>>,
+            allow_exit: bool,
+        ) -> Option<anyhow::Result<()>> {
+            Some(match (tasks.join_next().await, allow_exit) {
+                (Some(Ok(Ok(()))), true) => Ok(()),
+                (Some(Ok(Ok(()))), false) => unreachable!(),
+                (Some(Err(err)), _) => Err(err.into()),
+                (Some(Ok(Err(err))), _) => Err(err),
+                (None, _) => return None,
+            })
         }
-        Ok(())
+        tokio::select! {
+            Some(result) = join_next(&mut self.read_tasks, false) => Some(result),
+            Some(result) = join_next(&mut self.write_tasks, true) => Some(result),
+            else => None,
+        }
     }
 }
 
@@ -110,7 +125,7 @@ pub struct ServiceConfig {
 
 pub type TransportAndSenders = (Transport, HashMap<Id, Sender<Bytes>>);
 
-pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
+pub async fn start_client<M: Decode<()> + Send + Sync + 'static>(
     id: Id,
     service_config: ServiceConfig,
     message_sender: Sender<M>,
@@ -131,6 +146,115 @@ pub async fn boot_client<M: Decode<()> + Send + Sync + 'static>(
         write_senders.insert(replica_id, write_sender);
     }
     Ok((transport, write_senders))
+}
+
+pub trait ReplyProtocol {
+    type FinalizeMetadata;
+    type Reply;
+
+    fn new_reply(
+        seq: ClientSeq,
+        result: Vec<u8>,
+        finalize_metadata: &Self::FinalizeMetadata,
+    ) -> Self::Reply;
+}
+
+pub async fn run_service<E: Execute, P: ReplyProtocol>(
+    mut service: ServiceState<E>,
+    external_address: SocketAddr,
+    submit_sender: Sender<Command>,
+    mut finalized_receiver: Receiver<(Vec<Command>, P::FinalizeMetadata)>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()>
+where
+    P::Reply: Encode,
+{
+    let endpoint = Endpoint::server(server_config(), external_address)?;
+    let mut transport = Transport::new();
+    let mut last_finalized_metadata = None;
+    let (read_sender, mut read_receiver) = mpsc::channel(10_000);
+    let mut write_senders = HashMap::new();
+    loop {
+        enum Select<M> {
+            Accept(Option<Incoming>),
+            Read(Option<Command>),
+            Finalized(Option<(Vec<Command>, M)>),
+            TransportSelect(anyhow::Result<()>),
+            Cancel,
+        }
+        use Select::*;
+        match tokio::select! {
+            accept = endpoint.accept() => Accept(accept),
+            command = read_receiver.recv() => Read(command),
+            finalized = finalized_receiver.recv() => Finalized(finalized),
+            Some(result) = transport.select() => TransportSelect(result),
+            () = cancel.cancelled() => Cancel,
+        } {
+            Cancel => break Ok(()),
+            Accept(None) => anyhow::bail!("endpoint closed"),
+            Finalized(None) => anyhow::bail!("finalized channel closed"),
+            Read(None) => unreachable!("read channel closed"),
+            TransportSelect(Ok(())) => unreachable!("active close of write task"),
+            TransportSelect(Err(err)) => {
+                if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
+                    // TODO remove corresponding write sender to garbage collect
+                    // current evaluation setups only work with one batch of clients so should be
+                    // fine to leak the senders
+                } else {
+                    anyhow::bail!(err)
+                }
+            }
+            Accept(Some(incoming)) => {
+                let connection = incoming.await?;
+                let mut client_id = [0; size_of::<Id>()];
+                connection
+                    .accept_uni()
+                    .await?
+                    .read_exact(&mut client_id)
+                    .await?;
+                let client_id = Id::from_le_bytes(client_id);
+                let (write_sender, write_receiver) = mpsc::channel(100);
+                transport.add_connection::<Command>(
+                    connection,
+                    read_sender.clone(),
+                    write_receiver,
+                );
+                write_senders.insert(client_id, write_sender);
+            }
+            Read(Some(command)) => match service.receive(&command) {
+                ReceiveAction::Ignore => {}
+                ReceiveAction::Submit => {
+                    if submit_sender.capacity() == 0 {
+                        tracing::warn!("submit channel full");
+                    }
+                    submit_sender.send(command).await?
+                }
+                ReceiveAction::Reply(result) => {
+                    let Some(finalized_metadata) = &last_finalized_metadata else {
+                        anyhow::bail!("missing finalized metadata")
+                    };
+                    Transport::write(
+                        P::new_reply(command.seq, result, finalized_metadata),
+                        write_senders.get(&(command.client_id.0 as Id)),
+                    )
+                    .await?;
+                }
+            },
+            Finalized(Some((commands, metadata))) => {
+                for (client_id, seq, result) in service.execute(&commands) {
+                    let sender = write_senders.get(&(client_id.0 as Id));
+                    if sender.is_none() {
+                        // assume the client has closed the connection during service processing
+                        // this command and don't care about the result anymore
+                        tracing::info!(%client_id, "send to closed connection");
+                        continue;
+                    }
+                    Transport::write(P::new_reply(seq, result, &metadata), sender).await?
+                }
+                last_finalized_metadata = Some(metadata);
+            }
+        }
+    }
 }
 
 // pub struct ServiceTask<S: AbstractService> {
@@ -269,7 +393,7 @@ pub struct ReplicaConfig {
     pub interconnect_delay: Duration,
 }
 
-pub async fn boot_replica<M: Decode<()> + Send + Sync + 'static>(
+pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
     id: Id,
     config: ReplicaConfig,
     message_sender: Sender<M>,

@@ -25,7 +25,7 @@ impl Debug for ClientId {
     }
 }
 
-type ClientSeq = u64;
+pub type ClientSeq = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Command {
@@ -67,7 +67,10 @@ impl<E: Execute> ServiceState<E> {
         }
     }
 
-    pub fn execute(&mut self, commands: &[Command]) -> impl Iterator<Item = (ClientId, Vec<u8>)> {
+    pub fn execute(
+        &mut self,
+        commands: &[Command],
+    ) -> impl Iterator<Item = (ClientId, ClientSeq, Vec<u8>)> {
         commands.iter().filter_map(|command| {
             if matches!(self.replies.get(&command.client_id), Some((seq, _)) if seq >= &command.seq)
             {
@@ -76,7 +79,7 @@ impl<E: Execute> ServiceState<E> {
                 let reply = self.inner.execute(&command.op);
                 self.replies
                     .insert(command.client_id, (command.seq, reply.clone()));
-                Some((command.client_id, reply))
+                Some((command.client_id, command.seq, reply))
             }
         })
     }
