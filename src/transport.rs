@@ -1,11 +1,11 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, pin::pin, time::Duration};
 
 use bincode::{Decode, Encode};
-use quinn::{Connection, ConnectionError, Endpoint, Incoming, TransportConfig};
+use quinn::{Connection, ConnectionError, Endpoint, Incoming};
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
-    time::sleep,
+    time::{Instant, sleep},
     try_join,
 };
 use tokio_util::{bytes::Bytes, sync::CancellationToken};
@@ -14,6 +14,7 @@ use crate::{
     Command,
     command::{ClientSeq, Execute, ReceiveAction, ServiceState},
     crypto::cert::quinn::{client_config, server_config},
+    replica::ReplicaProtocol,
 };
 
 // pub mod tcp;
@@ -172,28 +173,29 @@ where
     let endpoint = Endpoint::server(server_config(), external_address)?;
     let mut transport = Transport::new();
     let mut last_finalized_metadata = None;
-    let (read_sender, mut read_receiver) = mpsc::channel(10_000);
+    let (message_sender, mut message_receiver) = mpsc::channel(10_000);
     let mut write_senders = HashMap::new();
     loop {
         enum Select<M> {
-            Accept(Option<Incoming>),
-            Read(Option<Command>),
-            Finalized(Option<(Vec<Command>, M)>),
+            Accept(Option<Box<Incoming>>),
+            MessageRecv(Option<Command>),
+            FinalizedRecv(Option<(Vec<Command>, M)>),
+            #[allow(clippy::enum_variant_names)]
             TransportSelect(anyhow::Result<()>),
             Cancel,
         }
         use Select::*;
         match tokio::select! {
-            accept = endpoint.accept() => Accept(accept),
-            command = read_receiver.recv() => Read(command),
-            finalized = finalized_receiver.recv() => Finalized(finalized),
+            accept = endpoint.accept() => Accept(accept.map(Into::into)),
+            command = message_receiver.recv() => MessageRecv(command),
+            finalized = finalized_receiver.recv() => FinalizedRecv(finalized),
             Some(result) = transport.select() => TransportSelect(result),
             () = cancel.cancelled() => Cancel,
         } {
             Cancel => break Ok(()),
-            Accept(None) => anyhow::bail!("endpoint closed"),
-            Finalized(None) => anyhow::bail!("finalized channel closed"),
-            Read(None) => unreachable!("read channel closed"),
+            FinalizedRecv(None) => anyhow::bail!("finalized channel closed"),
+            Accept(None) => unreachable!("endpoint closed"),
+            MessageRecv(None) => unreachable!("read channel closed"),
             TransportSelect(Ok(())) => unreachable!("active close of write task"),
             TransportSelect(Err(err)) => {
                 if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
@@ -205,7 +207,7 @@ where
                 }
             }
             Accept(Some(incoming)) => {
-                let connection = incoming.await?;
+                let connection = (*incoming).await?;
                 let mut client_id = [0; size_of::<Id>()];
                 connection
                     .accept_uni()
@@ -214,14 +216,10 @@ where
                     .await?;
                 let client_id = Id::from_le_bytes(client_id);
                 let (write_sender, write_receiver) = mpsc::channel(100);
-                transport.add_connection::<Command>(
-                    connection,
-                    read_sender.clone(),
-                    write_receiver,
-                );
+                transport.add_connection(connection, message_sender.clone(), write_receiver);
                 write_senders.insert(client_id, write_sender);
             }
-            Read(Some(command)) => match service.receive(&command) {
+            MessageRecv(Some(command)) => match service.receive(&command) {
                 ReceiveAction::Ignore => {}
                 ReceiveAction::Submit => {
                     if submit_sender.capacity() == 0 {
@@ -240,7 +238,7 @@ where
                     .await?;
                 }
             },
-            Finalized(Some((commands, metadata))) => {
+            FinalizedRecv(Some((commands, metadata))) => {
                 for (client_id, seq, result) in service.execute(&commands) {
                     let sender = write_senders.get(&(client_id.0 as Id));
                     if sender.is_none() {
@@ -257,132 +255,6 @@ where
     }
 }
 
-// pub struct ServiceTask<S: AbstractService> {
-//     pub replies: HashMap<ClientId, S::Reply>,
-//     pub request_sender: Sender<Command>,
-//     // TODO service state machine
-//     pub replica_id: ReplicaId,
-// }
-
-// pub trait AbstractService: Sized {
-//     type Reply;
-//     type Finalized;
-
-//     // extract a Reply trait if necessary
-//     fn reply_seq(reply: &Self::Reply) -> ClientSeq;
-//     fn on_finalized(
-//         &mut self,
-//         finalized: Self::Finalized,
-//         task: &mut ServiceTask<Self>,
-//     ) -> impl Iterator<Item = (ClientId, Self::Reply)>;
-// }
-
-// impl<S: AbstractService> ServiceTask<S> {
-//     pub fn new(replica_id: ReplicaId, request_sender: Sender<Command>) -> Self {
-//         Self {
-//             replica_id,
-//             request_sender,
-//             replies: Default::default(),
-//         }
-//     }
-
-//     pub async fn run(
-//         mut self,
-//         mut service: S,
-//         config: ServiceConfig,
-//         mut finalized_receiver: Receiver<S::Finalized>,
-//         cancel: CancellationToken,
-//     ) -> anyhow::Result<()>
-//     where
-//         S::Reply: Encode,
-//     {
-//         let mut transport = TransportConfig::default();
-//         transport.max_idle_timeout(None);
-//         let external_endpoint = Endpoint::server(
-//             // server_config(),
-//             {
-//                 let mut config = server_config();
-//                 config.transport_config(transport.into());
-//                 config
-//             },
-//             config.server_external_addresses[&self.replica_id],
-//         )?;
-//         let (message_sender, mut message_receiver) = mpsc::channel(1 << 12);
-//         let mut transport = Transport::new();
-//         let mut write_senders = HashMap::new();
-//         loop {
-//             enum Select<F> {
-//                 Accept(Option<Incoming>),
-//                 Message(Option<Command>),
-//                 Finalized(Option<F>),
-//                 TransportJoinNext(anyhow::Result<()>),
-//                 Cancel,
-//             }
-//             use Select::*;
-//             match tokio::select! {
-//                 accept = external_endpoint.accept() => Accept(accept),
-//                 message = message_receiver.recv() => Message(message),
-//                 finalize = finalized_receiver.recv() => Finalized(finalize),
-//                 result = transport.join_next() => TransportJoinNext(result),
-//                 () = cancel.cancelled() => Cancel,
-//             } {
-//                 Finalized(None) | TransportJoinNext(Ok(())) => unreachable!(),
-//                 Cancel => break Ok(()),
-//                 Accept(None) => anyhow::bail!("endpoint closed"),
-//                 Accept(Some(incoming)) => {
-//                     let connection = incoming.await?;
-//                     let mut client_id = [0; size_of::<ClientId>()];
-//                     connection
-//                         .accept_uni()
-//                         .await?
-//                         .read_exact(&mut client_id)
-//                         .await?;
-//                     let client_id = ClientId::from_le_bytes(client_id);
-//                     tracing::debug!(%client_id, "accept client connection");
-//                     let (write_sender, write_receiver) = mpsc::channel(1000);
-//                     transport.add_connection(connection, message_sender.clone(), write_receiver);
-//                     let replaced = write_senders.insert(client_id, write_sender);
-//                     anyhow::ensure!(replaced.is_none());
-//                 }
-//                 Message(None) => unreachable!(),
-//                 Message(Some(command)) => match self.replies.get(&command.client_id) {
-//                     Some(reply) if S::reply_seq(reply) > command.seq => {}
-//                     Some(reply) if S::reply_seq(reply) == command.seq => {
-//                         let sender = write_senders.get(&command.client_id);
-//                         anyhow::ensure!(
-//                             sender.is_some(),
-//                             "send to unexpected client id {}",
-//                             command.client_id
-//                         );
-//                         Transport::write(reply, sender).await?
-//                     }
-//                     _ => {
-//                         if !checked_send(&self.request_sender, command).await? {
-//                             tracing::warn!("request channel full");
-//                         }
-//                     }
-//                 },
-//                 Finalized(Some(finalized)) => {
-//                     for (client_id, reply) in service.on_finalized(finalized, &mut self) {
-//                         let sender = write_senders.get(&client_id);
-//                         anyhow::ensure!(
-//                             sender.is_some(),
-//                             "send to unexpected client id {client_id}",
-//                         );
-//                         Transport::write(reply, sender).await?
-//                     }
-//                 }
-//                 TransportJoinNext(Err(err)) => 'transport_err: {
-//                     if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
-//                         break 'transport_err;
-//                     }
-//                     tracing::info!(%err)
-//                 }
-//             }
-//         }
-//     }
-// }
-
 #[derive(Debug, Clone)]
 pub struct ReplicaConfig {
     pub internal_addresses: HashMap<Id, SocketAddr>,
@@ -391,6 +263,7 @@ pub struct ReplicaConfig {
     // accept. set longer in higher latency environments (or human action is
     // involved)
     pub interconnect_delay: Duration,
+    pub tick_interval: Duration,
 }
 
 pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
@@ -398,31 +271,9 @@ pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
     config: ReplicaConfig,
     message_sender: Sender<M>,
 ) -> anyhow::Result<TransportAndSenders> {
-    let mut transport_config = TransportConfig::default();
-    transport_config.max_idle_timeout(None);
-    let transport_config = Arc::new(transport_config);
-    let mut internal_endpoint = Endpoint::server(
-        // server_config(),
-        {
-            let mut config = server_config();
-            config.transport_config(transport_config.clone());
-            config
-        },
-        config.internal_addresses[&id],
-    )?;
-    internal_endpoint.set_default_client_config({
-        let mut config = client_config();
-        config.transport_config(transport_config);
-        config
-    });
+    let mut internal_endpoint = Endpoint::server(server_config(), config.internal_addresses[&id])?;
+    internal_endpoint.set_default_client_config(client_config());
     let active_task = async {
-        if !config.interconnect_delay.is_zero() {
-            tracing::info!(
-                "start server interconnect after {:?}",
-                config.interconnect_delay
-            );
-            sleep(config.interconnect_delay).await
-        }
         let mut connections = HashMap::new();
         for (&i, &addr) in &config.internal_addresses {
             if i <= id {
@@ -474,120 +325,75 @@ pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
     Ok((transport, write_senders))
 }
 
-// pub trait AbstractReplica: crate::replica::AbstractReplica {
-//     type Finalized;
+struct ReplicaContext<M> {
+    send_buffer: Vec<M>,
+    finalize_buffer: Vec<Vec<Command>>,
+}
 
-//     fn finalized(&self, commands: Vec<Command>) -> Self::Finalized;
-// }
+impl<M> crate::replica::ReplicaContext<M> for ReplicaContext<M> {
+    fn send(&mut self, message: M) {
+        self.send_buffer.push(message)
+    }
 
-// pub struct ReplicaTask<R: AbstractReplica> {
-//     pub write_senders: HashMap<ReplicaId, Sender<Bytes>>,
-//     pub finalized_sender: Sender<R::Finalized>,
-//     pub replica: R,
-// }
+    fn finalize(&mut self, commands: Vec<Command>) {
+        self.finalize_buffer.push(commands)
+    }
+}
 
-// pub trait Effect<R: AbstractReplica> {
-//     fn effect(self, task: &mut ReplicaTask<R>) -> impl Future<Output = anyhow::Result<()>>;
-// }
-
-// impl<R: AbstractReplica> ReplicaTask<R> {
-//     pub fn new(replica: R, finalized_sender: Sender<R::Finalized>) -> Self {
-//         Self {
-//             write_senders: Default::default(),
-//             finalized_sender,
-//             replica,
-//         }
-//     }
-
-//     pub async fn run(
-//         self,
-//         replica_id: ReplicaId,
-//         config: ReplicaConfig,
-//         tick_interval: Duration,
-//         request_receiver: Receiver<Command>,
-//     ) -> anyhow::Result<()>
-//     where
-//         R::Action: Effect<R>,
-//         R::Message: Decode<()> + Send + Sync + 'static,
-//     {
-//         self.run_with_bootstrap(tick_interval, request_receiver, |message_sender| {
-//             boot_replica(replica_id, config, message_sender)
-//         })
-//         .await
-//     }
-
-//     pub async fn run_with_bootstrap(
-//         mut self,
-//         tick_interval: Duration,
-//         mut request_receiver: Receiver<Command>,
-//         bootstrap: impl AsyncFnOnce(Sender<R::Message>) -> anyhow::Result<TransportAndSenders>,
-//     ) -> Result<(), anyhow::Error>
-//     where
-//         R::Action: Effect<R>,
-//     {
-//         let (message_sender, mut message_receiver) = mpsc::channel(100);
-//         let mut transport;
-//         (transport, self.write_senders) = bootstrap(message_sender).await?;
-//         tracing::info!("replica ready");
-
-//         let mut actions = Vec::new();
-//         self.replica.init(&mut actions);
-//         loop {
-//             for action in actions.drain(..) {
-//                 action.effect(&mut self).await?
-//             }
-
-//             enum Select<M> {
-//                 Sleep,
-//                 Request(Option<Command>),
-//                 Message(Option<M>),
-//                 TransportJoinNext(()),
-//             }
-//             use Select::*;
-//             match tokio::select! {
-//                 () = sleep(tick_interval) => Sleep,
-//                 request = request_receiver.recv() => Request(request),
-//                 message = message_receiver.recv() => Message(message),
-//                 result = transport.join_next() => TransportJoinNext(result?),
-//             } {
-//                 Message(None) | TransportJoinNext(()) => unreachable!(),
-//                 Request(None) => break,
-//                 Sleep => self.replica.tick(&mut actions),
-//                 Request(Some(command)) => self.replica.request(command, &mut actions),
-//                 Message(Some(message)) => self.replica.receive(message, &mut actions),
-//             }
-//         }
-//         transport.read_tasks.abort_all();
-//         // delay releasing transport until remote replicas are canceled and actively
-//         // close the connection from read_task side (as above)
-//         sleep(Duration::from_secs(1)).await;
-//         Ok(())
-//     }
-// }
-
-// impl<R: AbstractReplica<Action = Self>, M: Encode> Effect<R> for ReplicaAction<M>
-// where
-//     R::Finalized: Send + Sync + 'static,
-// {
-//     async fn effect(self, task: &mut ReplicaTask<R>) -> anyhow::Result<()> {
-//         match self {
-//             ReplicaAction::SendToReplica(replica_id, message) => {
-//                 let write_sender = task.write_senders.get(&replica_id);
-//                 anyhow::ensure!(
-//                     write_sender.is_some(),
-//                     "send to unexpected replica id {replica_id}"
-//                 );
-//                 Transport::write(message, write_sender).await?
-//             }
-//             ReplicaAction::SendToAllReplicas(message) => {
-//                 Transport::write(message, task.write_senders.values()).await?
-//             }
-//             ReplicaAction::Finalize(commands) => {
-//                 if !checked_send(&task.finalized_sender, task.replica.finalized(commands)).await? {
-//                     tracing::warn!("finalized channel full");
-//                 }
-//             }
-//         }
-//         Ok(())
-//     }
-// }
+pub async fn run_replica<R: ReplicaProtocol>(
+    mut replica: R,
+    id: Id,
+    config: ReplicaConfig,
+    mut submit_receiver: Receiver<Command>,
+    finalized_sender: Sender<(Vec<Command>, R::FinalizeMetadata)>,
+) -> anyhow::Result<()>
+where
+    R::Message: Encode + Decode<()> + Send + Sync + 'static,
+    R::FinalizeMetadata: Send + Sync + 'static,
+{
+    let (message_sender, mut message_receiver) = mpsc::channel(100);
+    let tick_interval = config.tick_interval;
+    let (mut transport, write_senders) = start_replica(id, config, message_sender).await?;
+    let mut context = ReplicaContext {
+        send_buffer: Default::default(),
+        finalize_buffer: Default::default(),
+    };
+    let mut sleep = pin!(sleep(tick_interval));
+    loop {
+        enum Select<M> {
+            SubmitRecv(Option<Command>),
+            MessageRecv(M),
+            Sleep,
+            #[allow(clippy::enum_variant_names)]
+            TransportSelect(anyhow::Result<()>),
+        }
+        use Select::*;
+        match tokio::select! {
+            command = submit_receiver.recv() => SubmitRecv(command),
+            Some(message) = message_receiver.recv() => MessageRecv(message),
+            () = sleep.as_mut() => Sleep,
+            Some(result) = transport.select() => TransportSelect(result),
+        } {
+            SubmitRecv(None) => break Ok(()),
+            TransportSelect(Ok(())) => unreachable!("active close of write task"),
+            TransportSelect(Err(err)) => anyhow::bail!(err),
+            SubmitRecv(Some(command)) => replica.submit(command, &mut context),
+            MessageRecv(message) => replica.receive(message, &mut context),
+            Sleep => {
+                sleep.as_mut().reset(Instant::now() + tick_interval);
+                replica.tick(&mut context)
+            }
+        }
+        for message in context.send_buffer.drain(..) {
+            Transport::write(message, write_senders.values()).await?
+        }
+        for commands in context.finalize_buffer.drain(..) {
+            if finalized_sender.capacity() == 0 {
+                tracing::warn!("finalized channel full");
+            }
+            finalized_sender
+                .send((commands, replica.finalize_metadata()))
+                .await?
+        }
+    }
+}

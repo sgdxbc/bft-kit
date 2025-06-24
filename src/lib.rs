@@ -2,6 +2,7 @@ pub mod command;
 pub mod crypto;
 pub mod parse;
 pub mod pbft;
+pub mod replica;
 pub mod transport;
 
 pub use command::Command;
