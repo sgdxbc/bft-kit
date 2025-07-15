@@ -18,6 +18,10 @@ enum Event {
 }
 
 impl System {
+    fn new(num_replica: ReplicaId, num_faulty_replica: ReplicaId) -> Self {
+        Self::with_batch_size(num_replica, num_faulty_replica, 1)
+    }
+
     fn with_batch_size(
         num_replica: ReplicaId,
         num_faulty_replica: ReplicaId,
@@ -43,10 +47,6 @@ impl System {
             messages: Default::default(),
             log: Default::default(),
         }
-    }
-
-    fn new(num_replica: ReplicaId, num_faulty_replica: ReplicaId) -> Self {
-        Self::with_batch_size(num_replica, num_faulty_replica, 1)
     }
 }
 

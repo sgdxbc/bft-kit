@@ -42,6 +42,8 @@ pub struct ReplicaConfig {
     crypto: PeerConfig,
 }
 
+struct ReplicaCoreContext(Vec<ReplicaCoreAction>);
+
 impl Replica {
     pub fn new(core_config: ReplicaCoreConfig, config: ReplicaConfig) -> Self {
         Self {
@@ -352,8 +354,6 @@ enum ReplicaCoreAction {
     Commit(OpNum),
     Finalize(OpNum),
 }
-
-struct ReplicaCoreContext(Vec<ReplicaCoreAction>);
 
 impl ReplicaCoreContext {
     fn propose(&mut self, op_num: OpNum, commands: Commands) {
