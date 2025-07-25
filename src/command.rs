@@ -38,12 +38,12 @@ pub trait Execute {
     fn execute(&mut self, op: &[u8]) -> Vec<u8>;
 }
 
-pub struct ServiceState<E> {
+pub struct Service<E> {
     inner: E,
     replies: HashMap<ClientId, (ClientSeq, Vec<u8>)>,
 }
 
-impl<E> ServiceState<E> {
+impl<E> Service<E> {
     pub fn new(inner: E) -> Self {
         Self {
             inner,
@@ -58,7 +58,7 @@ pub enum ReceiveAction {
     Reply(Vec<u8>),
 }
 
-impl<E: Execute> ServiceState<E> {
+impl<E: Execute> Service<E> {
     pub fn receive(&self, command: &Command) -> ReceiveAction {
         match self.replies.get(&command.client_id) {
             Some((seq, _)) if seq > &command.seq => ReceiveAction::Ignore,
