@@ -12,7 +12,7 @@ use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
 use crate::{
     Command,
-    command::{ClientSeq, Execute, ReceiveAction, ServiceState},
+    command::{ClientSeq, Execute, ReceiveAction, Service},
     crypto::cert::quinn::{client_config, server_config},
     replica::ReplicaProtocol,
 };
@@ -55,7 +55,7 @@ impl Transport {
                     if read_sender.capacity() == 0 {
                         tracing::warn!("read channel full")
                     }
-                    read_sender.send(message).await?;
+                    read_sender.send(message).await?
                 }
             }
         });
@@ -161,7 +161,7 @@ pub trait ReplyProtocol {
 }
 
 pub async fn run_service<E: Execute, P: ReplyProtocol>(
-    mut service: ServiceState<E>,
+    mut service: Service<E>,
     external_address: SocketAddr,
     submit_sender: Sender<Command>,
     mut finalized_receiver: Receiver<(Vec<Command>, P::FinalizeMetadata)>,
