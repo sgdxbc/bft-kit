@@ -102,16 +102,16 @@ pub struct ServiceConfig {
     pub external_addresses: HashMap<Id, SocketAddr>,
 }
 
-pub type TransportAndSenders = (
+pub type Transport = (
     FutureGroup<Boxed<anyhow::Result<()>>>,
     HashMap<Id, Sender<Bytes>>,
 );
 
 pub async fn start_client<M: Decode<()> + Send + Sync + 'static>(
     id: Id,
-    service_config: ServiceConfig,
+    service_config: &ServiceConfig,
     message_sender: Sender<M>,
-) -> anyhow::Result<TransportAndSenders> {
+) -> anyhow::Result<Transport> {
     let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(client_config());
     let mut tasks = FutureGroup::new();
@@ -270,9 +270,9 @@ pub struct ReplicaConfig {
 
 pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
     id: Id,
-    config: ReplicaConfig,
+    config: &ReplicaConfig,
     message_sender: Sender<M>,
-) -> anyhow::Result<TransportAndSenders> {
+) -> anyhow::Result<Transport> {
     let mut internal_endpoint = Endpoint::server(server_config(), config.internal_addresses[&id])?;
     internal_endpoint.set_default_client_config(client_config());
     let active_task = async {
@@ -331,22 +331,12 @@ pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
     Ok((tasks, write_senders))
 }
 
-struct ReplicaContext<M> {
+pub struct ReplicaContext<M> {
     send_buffer: Vec<M>,
     finalize_buffer: Vec<Vec<Command>>,
 }
 
-impl<M> crate::replica::ReplicaContext<M> for ReplicaContext<M> {
-    fn send(&mut self, message: M) {
-        self.send_buffer.push(message)
-    }
-
-    fn finalize(&mut self, commands: Vec<Command>) {
-        self.finalize_buffer.push(commands)
-    }
-}
-
-pub async fn run_replica<R: ReplicaProtocol>(
+pub async fn run_replica<R: ReplicaProtocol<ReplicaContext<M>, Message = M>, M>(
     mut replica: R,
     id: Id,
     config: ReplicaConfig,
@@ -358,13 +348,16 @@ where
     R::FinalizeMetadata: Send + Sync + 'static,
 {
     let (message_sender, mut message_receiver) = mpsc::channel(100);
-    let tick_interval = config.tick_interval;
-    let (mut transport_tasks, write_senders) = start_replica(id, config, message_sender).await?;
+    let (mut transport_tasks, write_senders) = start_replica(id, &config, message_sender).await?;
     let mut context = ReplicaContext {
         send_buffer: Default::default(),
         finalize_buffer: Default::default(),
     };
-    let mut sleep = pin!(sleep(tick_interval));
+
+    replica.init(&mut context);
+
+    let mut sleep = pin!(sleep(config.tick_interval));
+    let mut last_tick = Instant::now();
     loop {
         enum Race<M> {
             SubmitRecv(Option<Command>),
@@ -407,8 +400,9 @@ where
             SubmitRecv(Some(command)) => replica.submit(command, &mut context),
             MessageRecv(message) => replica.receive(message, &mut context),
             Sleep => {
-                sleep.as_mut().reset(Instant::now() + tick_interval);
-                replica.tick(&mut context)
+                replica.tick(last_tick.elapsed(), &mut context);
+                last_tick = Instant::now();
+                sleep.as_mut().reset(last_tick + config.tick_interval);
             }
         }
         for message in context.send_buffer.drain(..) {

@@ -1,17 +1,15 @@
+use std::time::Duration;
+
 use crate::Command;
 
-pub trait ReplicaContext<M> {
-    fn send(&mut self, message: M);
-    fn finalize(&mut self, commands: Vec<Command>);
-}
-
-pub trait ReplicaProtocol {
+pub trait ReplicaProtocol<C> {
     type Message;
-    type FinalizeMetadata;
 
-    fn init(&mut self, context: &mut impl ReplicaContext<Self::Message>);
-    fn submit(&mut self, command: Command, context: &mut impl ReplicaContext<Self::Message>);
-    fn receive(&mut self, message: Self::Message, context: &mut impl ReplicaContext<Self::Message>);
-    fn tick(&mut self, context: &mut impl ReplicaContext<Self::Message>);
+    fn init(&mut self, context: &mut C);
+    fn submit(&mut self, command: Command, context: &mut C);
+    fn receive(&mut self, message: Self::Message, context: &mut C);
+    fn tick(&mut self, duration: Duration, context: &mut C);
+
+    type FinalizeMetadata;
     fn finalize_metadata(&self) -> Self::FinalizeMetadata;
 }

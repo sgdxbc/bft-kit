@@ -1,14 +1,16 @@
-use std::{collections::HashMap, mem::take};
+use std::{collections::HashMap, mem::take, time::Duration};
 
 use bincode::{Decode, Encode};
 
 use crate::{
     CommandPool,
     crypto::{Digest, DigestHash as _, PeerConfig, Sig, UpdateHash, sign, verify},
+    replica::ReplicaProtocol,
 };
 
 #[cfg(test)]
 mod tests;
+// pub mod transport;
 
 pub type Command = crate::Command;
 type Commands = Vec<Command>;
@@ -479,6 +481,31 @@ impl ReplicaCore {
             self.proposed_op_num += 1;
             context.propose(self.proposed_op_num, commands)
         }
+    }
+}
+
+impl<C: Context> ReplicaProtocol<C> for Replica {
+    type Message = Message;
+
+    fn init(&mut self, _: &mut C) {}
+
+    fn submit(&mut self, command: crate::Command, context: &mut C) {
+        Replica::submit(self, command, context)
+    }
+
+    fn receive(&mut self, message: Self::Message, context: &mut C) {
+        Replica::receive(self, message, context)
+    }
+
+    #[allow(unused)]
+    fn tick(&mut self, duration: Duration, context: &mut C) {
+        todo!()
+    }
+
+    type FinalizeMetadata = ViewNum;
+
+    fn finalize_metadata(&self) -> Self::FinalizeMetadata {
+        self.core.view_num
     }
 }
 
