@@ -13,9 +13,9 @@ use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
 use crate::{
     Command,
-    command::{ClientSeq, Execute, ReceiveAction, Service},
+    command::{Execute, ReceiveAction, Service},
     crypto::cert::quinn::{client_config, server_config},
-    replica::ReplicaProtocol,
+    replica::{ReplicaProtocol, ReplyProtocol},
 };
 
 // pub mod tcp;
@@ -102,16 +102,15 @@ pub struct ServiceConfig {
     pub external_addresses: HashMap<Id, SocketAddr>,
 }
 
-pub type Transport = (
-    FutureGroup<Boxed<anyhow::Result<()>>>,
-    HashMap<Id, Sender<Bytes>>,
-);
+pub type TransportTasks = FutureGroup<Boxed<anyhow::Result<()>>>;
+pub type WriteSenders = HashMap<Id, Sender<Bytes>>;
+pub type Start = (TransportTasks, WriteSenders);
 
 pub async fn start_client<M: Decode<()> + Send + Sync + 'static>(
     id: Id,
     service_config: &ServiceConfig,
     message_sender: Sender<M>,
-) -> anyhow::Result<Transport> {
+) -> anyhow::Result<Start> {
     let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(client_config());
     let mut tasks = FutureGroup::new();
@@ -128,17 +127,6 @@ pub async fn start_client<M: Decode<()> + Send + Sync + 'static>(
         write_senders.insert(replica_id, write_sender);
     }
     Ok((tasks, write_senders))
-}
-
-pub trait ReplyProtocol {
-    type FinalizeMetadata;
-    type Reply;
-
-    fn new_reply(
-        seq: ClientSeq,
-        result: Vec<u8>,
-        finalize_metadata: &Self::FinalizeMetadata,
-    ) -> Self::Reply;
 }
 
 pub async fn run_service<E: Execute, P: ReplyProtocol>(
@@ -161,13 +149,13 @@ where
             Accept(Option<Box<Incoming>>),
             RequestRecv(Option<Command>),
             FinalizedRecv(Option<(Vec<Command>, M)>),
-            TransportTasks(anyhow::Result<()>),
+            TransportTask(anyhow::Result<()>),
             Cancel,
         }
         use Race::*;
         let transport = async {
             if let Some(result) = transport_tasks.next().await {
-                TransportTasks(result)
+                TransportTask(result)
             } else {
                 pending().await
             }
@@ -188,7 +176,7 @@ where
             Cancel => break Ok(()),
 
             FinalizedRecv(None) => anyhow::bail!("finalized channel closed"),
-            TransportTasks(Err(err)) => {
+            TransportTask(Err(err)) => {
                 if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
                     // TODO remove corresponding write sender to garbage collect
                     // current evaluation setups only work with one batch of clients so should be
@@ -201,7 +189,7 @@ where
             // local endpoint and no code path closes it
             Accept(None) => unreachable!("endpoint closed"),
             RequestRecv(None) => unreachable!("read channel closed"),
-            TransportTasks(Ok(())) => unreachable!("active close of write task"),
+            TransportTask(Ok(())) => unreachable!("active close of write task"),
 
             Accept(Some(incoming)) => {
                 let connection = (*incoming).await?;
@@ -272,7 +260,7 @@ pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
     id: Id,
     config: &ReplicaConfig,
     message_sender: Sender<M>,
-) -> anyhow::Result<Transport> {
+) -> anyhow::Result<Start> {
     let mut internal_endpoint = Endpoint::server(server_config(), config.internal_addresses[&id])?;
     internal_endpoint.set_default_client_config(client_config());
     let active_task = async {
@@ -363,7 +351,7 @@ where
             SubmitRecv(Option<Command>),
             MessageRecv(M),
             Sleep,
-            TransportTasks(anyhow::Result<()>),
+            TransportTask(anyhow::Result<()>),
         }
         use Race::*;
         let message = async {
@@ -376,8 +364,11 @@ where
         };
         let transport = async {
             if let Some(result) = transport_tasks.next().await {
-                TransportTasks(result)
+                TransportTask(result)
             } else {
+                // it is probably fine to assert unreachable here since "replica" is supposed to
+                // be more than one
+                tracing::warn!("no transport task exists");
                 pending().await
             }
         };
@@ -394,8 +385,8 @@ where
             .await
         {
             SubmitRecv(None) => break Ok(()),
-            TransportTasks(Err(err)) => anyhow::bail!(err),
-            TransportTasks(Ok(())) => unreachable!("active close of write task"),
+            TransportTask(Err(err)) => anyhow::bail!(err),
+            TransportTask(Ok(())) => unreachable!("active close of write task"),
 
             SubmitRecv(Some(command)) => replica.submit(command, &mut context),
             MessageRecv(message) => replica.receive(message, &mut context),

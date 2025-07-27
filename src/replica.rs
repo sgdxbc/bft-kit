@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::Command;
+use crate::{Command, command::ClientSeq};
 
 pub trait ReplicaProtocol<C> {
     type Message;
@@ -12,4 +12,15 @@ pub trait ReplicaProtocol<C> {
 
     type FinalizeMetadata;
     fn finalize_metadata(&self) -> Self::FinalizeMetadata;
+}
+
+pub trait ReplyProtocol {
+    type FinalizeMetadata;
+    type Reply;
+
+    fn new_reply(
+        seq: ClientSeq,
+        result: Vec<u8>,
+        finalize_metadata: &Self::FinalizeMetadata,
+    ) -> Self::Reply;
 }

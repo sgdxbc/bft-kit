@@ -4,13 +4,14 @@ use bincode::{Decode, Encode};
 
 use crate::{
     CommandPool,
+    command::ClientSeq,
     crypto::{Digest, DigestHash as _, PeerConfig, Sig, UpdateHash, sign, verify},
-    replica::ReplicaProtocol,
+    replica::{ReplicaProtocol, ReplyProtocol},
 };
 
 #[cfg(test)]
 mod tests;
-// pub mod transport;
+pub mod transport;
 
 pub type Command = crate::Command;
 type Commands = Vec<Command>;
@@ -506,6 +507,32 @@ impl<C: Context> ReplicaProtocol<C> for Replica {
 
     fn finalize_metadata(&self) -> Self::FinalizeMetadata {
         self.core.view_num
+    }
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct Reply {
+    pub seq: ClientSeq,
+    pub result: Vec<u8>,
+    pub replica_id: ReplicaId,
+    pub view_num: ViewNum,
+}
+
+impl ReplyProtocol for Replica {
+    type FinalizeMetadata = (ReplicaId, ViewNum);
+    type Reply = Reply;
+
+    fn new_reply(
+        seq: ClientSeq,
+        result: Vec<u8>,
+        &(replica_id, view_num): &Self::FinalizeMetadata,
+    ) -> Self::Reply {
+        Self::Reply {
+            seq,
+            result,
+            replica_id,
+            view_num,
+        }
     }
 }
 
