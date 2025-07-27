@@ -99,7 +99,7 @@ pub async fn run_transport(
 
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
-    pub external_addresses: HashMap<Id, SocketAddr>,
+    external_addresses: HashMap<Id, SocketAddr>,
 }
 
 pub type TransportTasks = FutureGroup<Boxed<anyhow::Result<()>>>;
@@ -247,13 +247,13 @@ where
 
 #[derive(Debug, Clone)]
 pub struct ReplicaConfig {
-    pub internal_addresses: HashMap<Id, SocketAddr>,
+    internal_addresses: HashMap<Id, SocketAddr>,
     // how long should replicas wait before attempting to connect each other's
     // internal addresses. not necessary for QUIC because it allows connect before
     // accept. set longer in higher latency environments (or human action is
     // involved)
-    pub interconnect_delay: Duration,
-    pub tick_interval: Duration,
+    interconnect_delay: Duration,
+    tick_interval: Duration,
 }
 
 pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
@@ -406,6 +406,50 @@ where
             finalized_sender
                 .send((commands, replica.finalize_metadata()))
                 .await?
+        }
+    }
+}
+
+mod parse {
+    use std::time::Duration;
+
+    use crate::parse::Settings;
+
+    impl TryFrom<Settings> for crate::transport::ServiceConfig {
+        type Error = anyhow::Error;
+
+        fn try_from(settings: Settings) -> Result<Self, Self::Error> {
+            Ok(Self {
+                // if necessary, allow nonconsecutive replica id
+                external_addresses: settings
+                    .get_values("server_external_address")?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, addr)| (i as _, addr))
+                    .collect(),
+            })
+        }
+    }
+
+    impl TryFrom<Settings> for super::ReplicaConfig {
+        type Error = anyhow::Error;
+
+        fn try_from(settings: Settings) -> Result<Self, Self::Error> {
+            Ok(Self {
+                // if necessary, allow nonconsecutive replica id
+                internal_addresses: settings
+                    .get_values("server_internal_address")?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, addr)| (i as _, addr))
+                    .collect(),
+                interconnect_delay: Duration::from_secs_f32(
+                    settings
+                        .get_option("server_interconnect_delay")?
+                        .unwrap_or(0.),
+                ),
+                tick_interval: Duration::from_secs_f32(settings.get("server_tick_interval")?),
+            })
         }
     }
 }

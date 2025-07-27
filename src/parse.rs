@@ -29,7 +29,7 @@ impl Settings {
         Ok(values.last().unwrap().parse()?) // later one overrides
     }
 
-    pub fn try_get<T: FromStr>(&self, key: &str) -> anyhow::Result<Option<T>>
+    pub fn get_option<T: FromStr>(&self, key: &str) -> anyhow::Result<Option<T>>
     where
         T::Err: std::error::Error + Send + Sync + 'static,
     {
@@ -52,41 +52,6 @@ impl Settings {
             .collect::<Result<_, _>>()?)
     }
 }
-
-// impl TryFrom<Options> for crate::transport::ReplicaConfig {
-//     type Error = anyhow::Error;
-
-//     fn try_from(options: Options) -> Result<Self, Self::Error> {
-//         Ok(Self {
-//             // if necessary, allow nonconsecutive replica id
-//             server_internal_addresses: options
-//                 .get_values("server_internal_address")?
-//                 .into_iter()
-//                 .enumerate()
-//                 .map(|(i, addr)| (i as _, addr))
-//                 .collect(),
-//             server_interconnect_delay: Duration::from_secs_f32(
-//                 options.get("server_interconnect_delay")?,
-//             ),
-//         })
-//     }
-// }
-
-// impl TryFrom<Options> for crate::transport::ServiceConfig {
-//     type Error = anyhow::Error;
-
-//     fn try_from(options: Options) -> Result<Self, Self::Error> {
-//         Ok(Self {
-//             // if necessary, allow nonconsecutive replica id
-//             server_external_addresses: options
-//                 .get_values("server_external_address")?
-//                 .into_iter()
-//                 .enumerate()
-//                 .map(|(i, addr)| (i as _, addr))
-//                 .collect(),
-//         })
-//     }
-// }
 
 // impl TryFrom<Options> for crate::workload::ClientConfig {
 //     type Error = anyhow::Error;

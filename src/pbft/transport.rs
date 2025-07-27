@@ -13,44 +13,56 @@ use crate::{
     transport::{ServiceConfig, TransportTasks, WriteSenders, start_client, write},
 };
 
+use super::ReplicaId;
+
+pub struct ClientConfig {
+    num_replica: ReplicaId,
+    num_faulty_replica: ReplicaId,
+}
+
 pub struct Client {
     id: ClientId,
+    config: ClientConfig,
     transport_tasks: TransportTasks,
     write_senders: WriteSenders,
     message_receiver: Receiver<super::Reply>,
 
     seq: ClientSeq,
     request_states: HashMap<ClientSeq, RequestState>,
-    timeouts: FutureGroup<Boxed<ClientTimeout>>,
+    ticks: FutureGroup<Boxed<ClientTick>>,
     view_num: u64,
 }
 
 struct RequestState {
     op: Vec<u8>,
-    results: HashMap<super::ReplicaId, Vec<u8>>,
+    results: HashMap<ReplicaId, Vec<u8>>,
     result_sender: oneshot::Sender<Vec<u8>>,
-    resend_key: Key,
-    remove_key: Key,
+    tick_key: Key,
 }
 
-enum ClientTimeout {
-    Resend(ClientSeq),
-    Remove(ClientSeq),
+struct ClientTick {
+    seq: ClientSeq,
+    count: usize,
 }
 
 impl Client {
-    pub async fn start(id: ClientId, service_config: &ServiceConfig) -> anyhow::Result<Self> {
+    pub async fn start(
+        id: ClientId,
+        config: ClientConfig,
+        service_config: &ServiceConfig,
+    ) -> anyhow::Result<Self> {
         let (message_sender, message_receiver) = mpsc::channel(100);
         let (transport_tasks, write_senders) =
             start_client(id.0 as _, service_config, message_sender).await?;
         Ok(Self {
             id,
+            config,
             transport_tasks,
             write_senders,
             message_receiver,
             seq: 0,
             request_states: Default::default(),
-            timeouts: Default::default(),
+            ticks: Default::default(),
             view_num: 0,
         })
     }
@@ -59,21 +71,19 @@ impl Client {
         let (result_sender, result_receiver) = oneshot::channel();
         self.seq += 1;
         let seq = self.seq;
-        let resend_key = self
-            .timeouts
-            .insert(Box::pin(async move { ClientTimeout::Resend(seq) }));
-        let remove_key = self.timeouts.insert(Box::pin(async move {
-            //
-            ClientTimeout::Remove(seq)
-        }));
+        let tick_key = self
+            .ticks
+            // the first tick of a sequence number fires immediately to send the initial
+            // request. this is probably not desirably efficient, but it can keep the async
+            // (or "un-pure") stuff out of this method
+            .insert(Box::pin(async move { ClientTick { seq, count: 0 } }));
         self.request_states.insert(
             seq,
             RequestState {
                 op,
                 results: Default::default(),
                 result_sender,
-                resend_key,
-                remove_key,
+                tick_key,
             },
         );
         result_receiver
@@ -83,7 +93,7 @@ impl Client {
         loop {
             enum Race {
                 MessageRecv(super::Reply),
-                Timeout(ClientTimeout),
+                Tick(ClientTick),
                 TransportTask(Option<anyhow::Result<()>>),
             }
             use Race::*;
@@ -96,8 +106,8 @@ impl Client {
                 }
             };
             let timeout = async {
-                if let Some(timeout) = self.timeouts.next().await {
-                    Timeout(timeout)
+                if let Some(timeout) = self.ticks.next().await {
+                    Tick(timeout)
                 } else {
                     pending().await
                 }
@@ -122,38 +132,41 @@ impl Client {
                         .values()
                         .filter(|&result| result == &reply.result)
                         .count()
-                        // TODO
-                        > 1
+                        > self.config.num_faulty_replica as usize
                     {
                         let state = self.request_states.remove(&reply.seq).unwrap();
                         if state.result_sender.send(reply.result).is_err() {
                             tracing::warn!("result channel closed")
                         }
-                        self.timeouts.remove(state.resend_key);
-                        self.timeouts.remove(state.remove_key);
+                        self.ticks.remove(state.tick_key);
                     }
                 }
-                Timeout(ClientTimeout::Resend(seq)) => {
+                Tick(ClientTick { seq, count }) => {
                     let Some(state) = self.request_states.get_mut(&seq) else {
                         unreachable!()
                     };
-                    let command = Command {
-                        client_id: self.id,
-                        seq,
-                        op: state.op.clone(),
-                    };
-                    // TODO
-                    write(command, self.write_senders.get(&0)).await?;
-                    state.resend_key = self.timeouts.insert(Box::pin(async move {
-                        //
-                        ClientTimeout::Resend(seq)
-                    }))
-                }
-                Timeout(ClientTimeout::Remove(seq)) => {
-                    let Some(state) = self.request_states.remove(&seq) else {
-                        unreachable!()
-                    };
-                    self.timeouts.remove(state.resend_key);
+                    if count == 0 {
+                        let command = Command {
+                            client_id: self.id,
+                            seq,
+                            op: state.op.clone(),
+                        };
+                        let index = self.view_num as ReplicaId % self.config.num_replica;
+                        write(command, self.write_senders.get(&(index as _))).await?;
+                        state.tick_key = self.ticks.insert(Box::pin(async move {
+                            // TODO timeout
+                            ClientTick {
+                                seq,
+                                count: count + 1,
+                            }
+                        }))
+                    } else {
+                        let Some(state) = self.request_states.get_mut(&seq) else {
+                            unreachable!()
+                        };
+                        // TODO error in close loop case
+                        self.ticks.remove(state.tick_key);
+                    }
                 }
             }
         }
