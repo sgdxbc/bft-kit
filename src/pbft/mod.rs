@@ -92,7 +92,7 @@ impl Replica {
                 if let Err(err) = verify(
                     &pre_prepare,
                     &self.config.crypto.public_keys
-                        [self.core.config.primary_of(self.core.view_num) as usize],
+                        [self.core.config.params.primary_of(self.core.view_num) as usize],
                     &pre_prepare.sig,
                 ) {
                     tracing::warn!(
@@ -319,10 +319,15 @@ struct ReplicaCore {
     command_pool: CommandPool,
 }
 
-pub struct ReplicaCoreConfig {
-    id: ReplicaId,
+#[derive(Debug, Clone)]
+pub struct SecurityParams {
     num_replica: ReplicaId,
     num_faulty_replica: ReplicaId,
+}
+
+pub struct ReplicaCoreConfig {
+    id: ReplicaId,
+    params: SecurityParams,
     num_inflight_block: OpNum,
     max_batch_size: usize,
 }
@@ -376,13 +381,15 @@ impl ReplicaCoreContext {
     }
 }
 
-impl ReplicaCoreConfig {
-    fn is_primary_of(&self, view_num: ViewNum) -> bool {
-        self.primary_of(view_num) == self.id as ViewNum
-    }
-
+impl SecurityParams {
     fn primary_of(&self, view_num: ViewNum) -> ViewNum {
         view_num % self.num_replica as ViewNum
+    }
+}
+
+impl ReplicaCoreConfig {
+    fn is_primary_of(&self, view_num: ViewNum) -> bool {
+        self.params.primary_of(view_num) == self.id as ViewNum
     }
 }
 
@@ -461,7 +468,7 @@ impl ReplicaCore {
         op_num <= self.finalized_op_num
             || if let Some(op) = self.ops.get(&op_num) {
                 op.prepare_quorum.len() as ReplicaId + 1
-                    >= self.config.num_replica - self.config.num_faulty_replica
+                    >= self.config.params.num_replica - self.config.params.num_faulty_replica
             } else {
                 false
             }
@@ -471,7 +478,7 @@ impl ReplicaCore {
         op_num <= self.finalized_op_num
             || self.can_commit(op_num)
                 && self.ops.get(&op_num).unwrap().commit_quorum.len() as ReplicaId
-                    >= self.config.num_replica - self.config.num_faulty_replica
+                    >= self.config.params.num_replica - self.config.params.num_faulty_replica
     }
 
     fn propose(&mut self, context: &mut ReplicaCoreContext) {

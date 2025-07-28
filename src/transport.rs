@@ -344,8 +344,8 @@ where
 
     replica.init(&mut context);
 
-    let mut sleep = pin!(sleep(config.tick_interval));
-    let mut last_tick = Instant::now();
+    let mut next_tick = pin!(sleep(config.tick_interval));
+    let mut ticked_at = Instant::now();
     loop {
         enum Race<M> {
             SubmitRecv(Option<Command>),
@@ -376,7 +376,7 @@ where
             async { SubmitRecv(submit_receiver.recv().await) },
             message,
             async {
-                sleep.as_mut().await;
+                next_tick.as_mut().await;
                 Sleep
             },
             transport,
@@ -391,9 +391,9 @@ where
             SubmitRecv(Some(command)) => replica.submit(command, &mut context),
             MessageRecv(message) => replica.receive(message, &mut context),
             Sleep => {
-                replica.tick(last_tick.elapsed(), &mut context);
-                last_tick = Instant::now();
-                sleep.as_mut().reset(last_tick + config.tick_interval);
+                replica.tick(ticked_at.elapsed(), &mut context);
+                ticked_at = Instant::now();
+                next_tick.as_mut().reset(ticked_at + config.tick_interval);
             }
         }
         for message in context.send_buffer.drain(..) {

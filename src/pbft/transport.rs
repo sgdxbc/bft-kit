@@ -1,10 +1,14 @@
-use std::{collections::HashMap, future::pending};
+use std::{collections::HashMap, future::pending, pin::pin, time::Duration};
 
 use futures_concurrency::future::{FutureGroup, Race, future_group::Key};
 use futures_lite::{StreamExt as _, future::Boxed};
-use tokio::sync::{
-    mpsc::{self, Receiver},
-    oneshot,
+use rand::random;
+use tokio::{
+    sync::{
+        mpsc::{self, Receiver},
+        oneshot,
+    },
+    time::{Instant, sleep},
 };
 
 use crate::{
@@ -13,11 +17,18 @@ use crate::{
     transport::{ServiceConfig, TransportTasks, WriteSenders, start_client, write},
 };
 
-use super::ReplicaId;
+use super::{ReplicaId, SecurityParams};
 
+#[derive(Debug, Clone)]
 pub struct ClientConfig {
-    num_replica: ReplicaId,
-    num_faulty_replica: ReplicaId,
+    params: SecurityParams,
+    tick: ClientTickConfig,
+}
+
+#[derive(Debug, Clone)]
+pub enum ClientTickConfig {
+    CloseLoop(Duration), // of resending
+    OpenLoop(Duration),  // of timeout
 }
 
 pub struct Client {
@@ -42,6 +53,9 @@ struct RequestState {
 
 struct ClientTick {
     seq: ClientSeq,
+    // currently a boolean flag of count == 0 should be sufficient
+    // record richer information in case of e.g. supporting maximum number of
+    // retries
     count: usize,
 }
 
@@ -132,13 +146,14 @@ impl Client {
                         .values()
                         .filter(|&result| result == &reply.result)
                         .count()
-                        > self.config.num_faulty_replica as usize
+                        > self.config.params.num_faulty_replica as usize
                     {
                         let state = self.request_states.remove(&reply.seq).unwrap();
                         if state.result_sender.send(reply.result).is_err() {
                             tracing::warn!("result channel closed")
                         }
                         self.ticks.remove(state.tick_key);
+                        self.view_num = reply.view_num
                     }
                 }
                 Tick(ClientTick { seq, count }) => {
@@ -151,21 +166,36 @@ impl Client {
                             seq,
                             op: state.op.clone(),
                         };
-                        let index = self.view_num as ReplicaId % self.config.num_replica;
+                        let index = self.config.params.primary_of(self.view_num);
                         write(command, self.write_senders.get(&(index as _))).await?;
+
+                        let tick_after = match self.config.tick {
+                            ClientTickConfig::OpenLoop(timeout) => timeout,
+                            ClientTickConfig::CloseLoop(timeout) => timeout,
+                        };
                         state.tick_key = self.ticks.insert(Box::pin(async move {
-                            // TODO timeout
+                            sleep(tick_after).await;
                             ClientTick {
                                 seq,
                                 count: count + 1,
                             }
                         }))
                     } else {
-                        let Some(state) = self.request_states.get_mut(&seq) else {
-                            unreachable!()
-                        };
-                        // TODO error in close loop case
-                        self.ticks.remove(state.tick_key);
+                        match self.config.tick {
+                            ClientTickConfig::OpenLoop(_) => {
+                                self.ticks.remove(state.tick_key);
+                                // implicitly close result channel
+                            }
+                            ClientTickConfig::CloseLoop(tick_after) => {
+                                state.tick_key = self.ticks.insert(Box::pin(async move {
+                                    sleep(tick_after).await;
+                                    ClientTick {
+                                        seq,
+                                        count: count + 1,
+                                    }
+                                }));
+                            }
+                        }
                     }
                 }
             }
@@ -173,6 +203,124 @@ impl Client {
     }
 }
 
-pub async fn run_client(service_config: ServiceConfig) -> anyhow::Result<()> {
+pub enum WorkloadConfig {
+    CloseLoop(CloseLoopWorkloadConfig),
+    OpenLoop(OpenLoopWorkloadConfig),
+}
+
+pub struct CloseLoopWorkloadConfig {
+    concurrency: usize,
+    resend_internal: Duration,
+}
+
+pub struct OpenLoopWorkloadConfig {
+    sending_rate: f32, // #request per second
+    timeout: Duration,
+}
+
+impl WorkloadConfig {
+    fn tick_config(&self) -> ClientTickConfig {
+        match self {
+            WorkloadConfig::CloseLoop(config) => {
+                ClientTickConfig::CloseLoop(config.resend_internal)
+            }
+            WorkloadConfig::OpenLoop(config) => ClientTickConfig::OpenLoop(config.timeout),
+        }
+    }
+}
+
+pub async fn run_client(
+    params: SecurityParams,
+    workload_config: WorkloadConfig,
+    service_config: ServiceConfig,
+) -> anyhow::Result<()> {
+    let client_config = ClientConfig {
+        params,
+        tick: workload_config.tick_config(),
+    };
+    match workload_config {
+        WorkloadConfig::CloseLoop(config) => {
+            let mut clients = FutureGroup::new();
+            for _ in 0..config.concurrency {
+                let mut client =
+                    Client::start(ClientId(random()), client_config.clone(), &service_config)
+                        .await?;
+                clients.insert(async move {
+                    loop {
+                        let result = client.invoke(Default::default()); // TODO
+
+                        enum Race {
+                            ResultRecv(Result<Vec<u8>, oneshot::error::RecvError>),
+                            Run(anyhow::Result<()>),
+                        }
+                        use Race::*;
+                        match (async { ResultRecv(result.await) }, async {
+                            Run(client.run().await)
+                        })
+                            .race()
+                            .await
+                        {
+                            Run(Ok(())) | ResultRecv(Err(_)) => unreachable!(),
+                            Run(Err(err)) => anyhow::bail!(err),
+                            ResultRecv(Ok(_result)) => {}
+                        }
+                    }
+                    #[allow(unreachable_code)]
+                    anyhow::Ok(())
+                });
+            }
+            //
+        }
+        WorkloadConfig::OpenLoop(config) => {
+            let mut client =
+                Client::start(ClientId(random()), client_config, &service_config).await?;
+            let mut results = FutureGroup::new();
+
+            let mut next_invoke = pin!(sleep(Duration::ZERO));
+            loop {
+                enum Race {
+                    NextInvoke,
+                    ResultRecv(Result<Vec<u8>, oneshot::error::RecvError>),
+                    Run(anyhow::Result<()>),
+                }
+                use Race::*;
+
+                let result = async {
+                    if let Some(result) = results.next().await {
+                        ResultRecv(result)
+                    } else {
+                        pending().await
+                    }
+                };
+                match (
+                    async {
+                        next_invoke.as_mut().await;
+                        NextInvoke
+                    },
+                    result,
+                    async { Run(client.run().await) },
+                )
+                    .race()
+                    .await
+                {
+                    Run(Ok(())) => unreachable!(),
+                    Run(Err(err)) => anyhow::bail!(err),
+
+                    NextInvoke => {
+                        let result = client.invoke(Default::default()); // TODO
+                        results.insert(result);
+                        // randomize?
+                        next_invoke.as_mut().reset(
+                            Instant::now() + Duration::from_secs_f32(1.0 / config.sending_rate),
+                        );
+                    }
+                    ResultRecv(Ok(_result)) => {
+                        // TODO
+                    }
+                    ResultRecv(Err(_)) => {} // open loop abort on timeout
+                }
+            }
+        }
+    }
     Ok(())
 }

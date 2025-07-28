@@ -31,8 +31,10 @@ impl System {
             .map(|id| {
                 let core_config = ReplicaCoreConfig {
                     id,
-                    num_replica,
-                    num_faulty_replica,
+                    params: SecurityParams {
+                        num_replica,
+                        num_faulty_replica,
+                    },
                     num_inflight_block: 1,
                     max_batch_size: batch_size,
                 };
