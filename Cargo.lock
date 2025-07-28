@@ -157,7 +157,7 @@ dependencies = [
  "criterion",
  "ed25519-dalek",
  "futures-concurrency",
- "futures-lite",
+ "futures-util",
  "givre",
  "hdrhistogram",
  "quinn",

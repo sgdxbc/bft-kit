@@ -1,7 +1,7 @@
 use std::{collections::HashMap, future::pending, pin::pin, time::Duration};
 
 use futures_concurrency::future::{FutureGroup, Race, future_group::Key};
-use futures_lite::{StreamExt as _, future::Boxed};
+use futures_util::{StreamExt as _, future::BoxFuture};
 use rand::random;
 use tokio::{
     sync::{
@@ -40,7 +40,7 @@ pub struct Client {
 
     seq: ClientSeq,
     request_states: HashMap<ClientSeq, RequestState>,
-    ticks: FutureGroup<Boxed<ClientTick>>,
+    ticks: FutureGroup<BoxFuture<'static, ClientTick>>,
     view_num: u64,
 }
 

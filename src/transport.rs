@@ -2,7 +2,7 @@ use std::{collections::HashMap, future::pending, net::SocketAddr, pin::pin, time
 
 use bincode::{Decode, Encode};
 use futures_concurrency::future::{FutureGroup, Race, TryJoin};
-use futures_lite::{FutureExt, StreamExt, future::Boxed};
+use futures_util::{FutureExt, StreamExt as _, future::BoxFuture};
 use quinn::{Connection, ConnectionError, Endpoint, Incoming};
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
@@ -27,11 +27,11 @@ pub async fn run_read(
     sender: Sender<impl Decode<()> + Send + Sync + 'static>,
 ) -> anyhow::Result<()> {
     let mut stream = connection.accept_uni().await?;
-    loop {
-        let bytes = stream.read_to_end(1 << 16).await?;
-        if bytes.is_empty() {
-            break;
-        }
+    let mut bytes;
+    while {
+        bytes = stream.read_to_end(1 << 16).await?;
+        !bytes.is_empty()
+    } {
         let (message, len) = bincode::decode_from_slice(&bytes, bincode::config::standard())?;
         anyhow::ensure!(len == bytes.len());
         if sender.capacity() == 0 {
@@ -72,7 +72,7 @@ pub async fn write(
     Ok(())
 }
 
-async fn spawn<T: Send + 'static>(
+async fn submitted<T: Send + 'static>(
     task: impl Future<Output = anyhow::Result<T>> + Send + 'static,
 ) -> anyhow::Result<T> {
     tokio::spawn(task).await?
@@ -84,13 +84,17 @@ pub async fn run_transport(
     write_receiver: Receiver<Bytes>,
 ) -> anyhow::Result<()> {
     (
-        spawn(run_read(connection.clone(), read_sender)),
-        spawn(run_write(connection, write_receiver)),
+        submitted(run_read(connection.clone(), read_sender)),
+        submitted(run_write(connection, write_receiver)),
     )
         .try_join()
         .await?;
     Ok(())
 }
+
+pub type TransportTasks = FutureGroup<BoxFuture<'static, anyhow::Result<()>>>;
+pub type WriteSenders = HashMap<Id, Sender<Bytes>>;
+pub type Start = (TransportTasks, WriteSenders);
 
 // TODO extract client skeleton
 // not sure whether that is possible or not since (simple) clients are inline
@@ -101,10 +105,6 @@ pub async fn run_transport(
 pub struct ServiceConfig {
     external_addresses: HashMap<Id, SocketAddr>,
 }
-
-pub type TransportTasks = FutureGroup<Boxed<anyhow::Result<()>>>;
-pub type WriteSenders = HashMap<Id, Sender<Bytes>>;
-pub type Start = (TransportTasks, WriteSenders);
 
 pub async fn start_client<M: Decode<()> + Send + Sync + 'static>(
     id: Id,
@@ -313,7 +313,7 @@ pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
             connection,
             message_sender.clone(),
             write_receiver,
-        )) as Boxed<_>);
+        )) as _);
         write_senders.insert(id, write_sender);
     }
     Ok((tasks, write_senders))
