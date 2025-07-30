@@ -1,11 +1,11 @@
-use std::{collections::HashMap, future::pending, net::SocketAddr, pin::pin, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, pin::pin, time::Duration};
 
 use bincode::{Decode, Encode};
-use futures_concurrency::future::{FutureGroup, Race, TryJoin};
-use futures_util::{FutureExt, StreamExt as _, future::BoxFuture};
 use quinn::{Connection, ConnectionError, Endpoint, Incoming};
 use tokio::{
+    select,
     sync::mpsc::{self, Receiver, Sender},
+    task::{JoinError, JoinSet},
     time::{Instant, sleep},
     try_join,
 };
@@ -72,29 +72,18 @@ pub async fn write(
     Ok(())
 }
 
-async fn submitted<T: Send + 'static>(
-    task: impl Future<Output = anyhow::Result<T>> + Send + 'static,
-) -> anyhow::Result<T> {
-    tokio::spawn(task).await?
-}
-
 pub async fn run_transport(
     connection: Connection,
     read_sender: Sender<impl Decode<()> + Send + Sync + 'static>,
     write_receiver: Receiver<Bytes>,
 ) -> anyhow::Result<()> {
-    (
-        submitted(run_read(connection.clone(), read_sender)),
-        submitted(run_write(connection, write_receiver)),
-    )
-        .try_join()
-        .await?;
-    Ok(())
+    select! {
+        result = run_read(connection.clone(), read_sender) => result,
+        result = run_write(connection, write_receiver) => result,
+    }
 }
 
-pub type TransportTasks = FutureGroup<BoxFuture<'static, anyhow::Result<()>>>;
 pub type WriteSenders = HashMap<Id, Sender<Bytes>>;
-pub type Start = (TransportTasks, WriteSenders);
 
 // TODO extract client skeleton
 // not sure whether that is possible or not since (simple) clients are inline
@@ -110,10 +99,10 @@ pub async fn start_client<M: Decode<()> + Send + Sync + 'static>(
     id: Id,
     service_config: &ServiceConfig,
     message_sender: Sender<M>,
-) -> anyhow::Result<Start> {
+    tasks: &mut JoinSet<anyhow::Result<()>>,
+) -> anyhow::Result<WriteSenders> {
     let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(client_config());
-    let mut tasks = FutureGroup::new();
     let mut write_senders = HashMap::new();
     for (&replica_id, &addr) in &service_config.external_addresses {
         let connection = endpoint.connect(addr, "server.example")?.await?;
@@ -123,10 +112,14 @@ pub async fn start_client<M: Decode<()> + Send + Sync + 'static>(
             .write_all(&id.to_le_bytes())
             .await?;
         let (write_sender, write_receiver) = mpsc::channel(1000);
-        tasks.insert(run_transport(connection, message_sender.clone(), write_receiver).boxed());
+        tasks.spawn(run_transport(
+            connection,
+            message_sender.clone(),
+            write_receiver,
+        ));
         write_senders.insert(replica_id, write_sender);
     }
-    Ok((tasks, write_senders))
+    Ok(write_senders)
 }
 
 pub async fn run_service<E: Execute, P: ReplyProtocol>(
@@ -138,59 +131,32 @@ pub async fn run_service<E: Execute, P: ReplyProtocol>(
 ) -> anyhow::Result<()>
 where
     P::Reply: Encode,
+    P::FinalizeMetadata: Send + Sync + 'static,
 {
     let endpoint = Endpoint::server(server_config(), external_address)?;
     let (request_sender, mut request_receiver) = mpsc::channel(10_000);
-    let mut transport_tasks = FutureGroup::new();
-    let mut last_finalized_metadata = None;
+    let mut last_finalize_metadata = None;
     let mut write_senders = HashMap::new();
+    let mut transport_tasks = JoinSet::new();
+
+    enum Event<M> {
+        Accept(Option<Box<Incoming>>),
+        Request(Option<Command>),
+        Finalized((Vec<Command>, M)),
+        Transport(Result<(Id, anyhow::Result<()>), JoinError>),
+        Cancel,
+    }
+    use Event::*;
+
     loop {
-        enum Race<M> {
-            Accept(Option<Box<Incoming>>),
-            RequestRecv(Option<Command>),
-            FinalizedRecv(Option<(Vec<Command>, M)>),
-            TransportTask(anyhow::Result<()>),
-            Cancel,
-        }
-        use Race::*;
-        let transport = async {
-            if let Some(result) = transport_tasks.next().await {
-                TransportTask(result)
-            } else {
-                pending().await
-            }
-        };
-        match (
-            async { Accept(endpoint.accept().await.map(Into::into)) },
-            async { RequestRecv(request_receiver.recv().await) },
-            async { FinalizedRecv(finalized_receiver.recv().await) },
-            async {
-                cancel.cancelled().await;
-                Cancel
-            },
-            transport,
-        )
-            .race()
-            .await
-        {
-            Cancel => break Ok(()),
-
-            FinalizedRecv(None) => anyhow::bail!("finalized channel closed"),
-            TransportTask(Err(err)) => {
-                if let Some(ConnectionError::ApplicationClosed(_)) = err.downcast_ref() {
-                    // TODO remove corresponding write sender to garbage collect
-                    // current evaluation setups only work with one batch of clients so should be
-                    // fine to leak the senders
-                } else {
-                    anyhow::bail!(err)
-                }
-            }
-
-            // local endpoint and no code path closes it
-            Accept(None) => unreachable!("endpoint closed"),
-            RequestRecv(None) => unreachable!("read channel closed"),
-            TransportTask(Ok(())) => unreachable!("active close of write task"),
-
+        match select! {
+            accept = endpoint.accept() => Accept(accept.map(Into::into)),
+            request = request_receiver.recv() => Request(request),
+            Some(finalized) = finalized_receiver.recv() => Finalized(finalized),
+            Some(transport) = transport_tasks.join_next() => Transport(transport),
+            () = cancel.cancelled() => Cancel,
+        } {
+            Accept(None) => unreachable!("locally-kept endpoint is not closed anywhere"),
             Accept(Some(incoming)) => {
                 let connection = (*incoming).await?;
                 let mut client_id = [0; size_of::<Id>()];
@@ -201,13 +167,17 @@ where
                     .await?;
                 let client_id = Id::from_le_bytes(client_id);
                 let (write_sender, write_receiver) = mpsc::channel(100);
-                transport_tasks.insert(
-                    run_transport(connection, request_sender.clone(), write_receiver).boxed(),
-                );
+                let request_sender = request_sender.clone();
+                transport_tasks.spawn(async move {
+                    (
+                        client_id,
+                        run_transport(connection, request_sender, write_receiver).await,
+                    )
+                });
                 write_senders.insert(client_id, write_sender);
             }
-
-            RequestRecv(Some(command)) => match service.receive(&command) {
+            Request(None) => unreachable!("the original request sender is never dropped"),
+            Request(Some(command)) => match service.receive(&command) {
                 ReceiveAction::Ignore => {}
                 ReceiveAction::Submit => {
                     if submit_sender.capacity() == 0 {
@@ -216,19 +186,20 @@ where
                     submit_sender.send(command).await?
                 }
                 ReceiveAction::Reply(result) => {
-                    let Some(finalized_metadata) = &last_finalized_metadata else {
+                    let Some(metadata) = &last_finalize_metadata else {
                         anyhow::bail!("missing finalized metadata")
                     };
-                    // maybe not a good idea to silently ignore the missing sender
-                    write(
-                        P::new_reply(command.seq, result, finalized_metadata),
-                        write_senders.get(&(command.client_id.0 as Id)),
-                    )
-                    .await?;
+                    let sender = write_senders.get(&(command.client_id.0 as Id));
+                    if sender.is_none() {
+                        // assume the client has closed the connection during this request buffering
+                        // at service ingress and don't care about the result anymore
+                        tracing::info!(%command.client_id, "send to closed connection");
+                        continue;
+                    }
+                    write(P::new_reply(command.seq, result, metadata), sender).await?
                 }
             },
-
-            FinalizedRecv(Some((commands, metadata))) => {
+            Finalized((commands, metadata)) => {
                 for (client_id, seq, result) in service.execute(&commands) {
                     let sender = write_senders.get(&(client_id.0 as Id));
                     if sender.is_none() {
@@ -239,10 +210,26 @@ where
                     }
                     write(P::new_reply(seq, result, &metadata), sender).await?
                 }
-                last_finalized_metadata = Some(metadata);
+                last_finalize_metadata = Some(metadata)
             }
+            Transport(result) => {
+                let (client_id, result) = result?;
+                write_senders.remove(&client_id);
+                if let Err(err) = result {
+                    if !matches!(
+                        err.downcast_ref(),
+                        Some(ConnectionError::ApplicationClosed(_))
+                    ) {
+                        tracing::warn!(%client_id, %err)
+                    }
+                }
+            }
+            Cancel => break,
         }
     }
+
+    // dump log here, if useful
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -260,7 +247,8 @@ pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
     id: Id,
     config: &ReplicaConfig,
     message_sender: Sender<M>,
-) -> anyhow::Result<Start> {
+    tasks: &mut JoinSet<anyhow::Result<()>>,
+) -> anyhow::Result<WriteSenders> {
     let mut internal_endpoint = Endpoint::server(server_config(), config.internal_addresses[&id])?;
     internal_endpoint.set_default_client_config(client_config());
     let active_task = async {
@@ -305,18 +293,17 @@ pub async fn start_replica<M: Decode<()> + Send + Sync + 'static>(
     connections.extend(other_connections);
     anyhow::ensure!(connections.len() == config.internal_addresses.len() - 1);
 
-    let mut tasks = FutureGroup::new();
     let mut write_senders = HashMap::new();
     for (id, connection) in connections {
         let (write_sender, write_receiver) = mpsc::channel(100);
-        tasks.insert(Box::pin(run_transport(
+        tasks.spawn(run_transport(
             connection,
             message_sender.clone(),
             write_receiver,
-        )) as _);
+        ));
         write_senders.insert(id, write_sender);
     }
-    Ok((tasks, write_senders))
+    Ok(write_senders)
 }
 
 pub struct ReplicaContext<M> {
@@ -336,7 +323,8 @@ where
     R::FinalizeMetadata: Send + Sync + 'static,
 {
     let (message_sender, mut message_receiver) = mpsc::channel(100);
-    let (mut transport_tasks, write_senders) = start_replica(id, &config, message_sender).await?;
+    let mut transport_tasks = JoinSet::new();
+    let write_senders = start_replica(id, &config, message_sender, &mut transport_tasks).await?;
     let mut context = ReplicaContext {
         send_buffer: Default::default(),
         finalize_buffer: Default::default(),
@@ -346,54 +334,32 @@ where
 
     let mut next_tick = pin!(sleep(config.tick_interval));
     let mut ticked_at = Instant::now();
-    loop {
-        enum Race<M> {
-            SubmitRecv(Option<Command>),
-            MessageRecv(M),
-            Sleep,
-            TransportTask(anyhow::Result<()>),
-        }
-        use Race::*;
-        let message = async {
-            if let Some(message) = message_receiver.recv().await {
-                MessageRecv(message)
-            } else {
-                tracing::warn!("message channel closed");
-                pending().await
-            }
-        };
-        let transport = async {
-            if let Some(result) = transport_tasks.next().await {
-                TransportTask(result)
-            } else {
-                // it is probably fine to assert unreachable here since "replica" is supposed to
-                // be more than one
-                tracing::warn!("no transport task exists");
-                pending().await
-            }
-        };
-        match (
-            async { SubmitRecv(submit_receiver.recv().await) },
-            message,
-            async {
-                next_tick.as_mut().await;
-                Sleep
-            },
-            transport,
-        )
-            .race()
-            .await
-        {
-            SubmitRecv(None) => break Ok(()),
-            TransportTask(Err(err)) => anyhow::bail!(err),
-            TransportTask(Ok(())) => unreachable!("active close of write task"),
 
-            SubmitRecv(Some(command)) => replica.submit(command, &mut context),
-            MessageRecv(message) => replica.receive(message, &mut context),
-            Sleep => {
+    enum Event<M> {
+        Submit(Option<Command>),
+        Message(M),
+        Tick,
+        Transport(Result<anyhow::Result<()>, JoinError>),
+    }
+    use Event::*;
+    loop {
+        match select! {
+            submit = submit_receiver.recv() => Submit(submit),
+            Some(message) = message_receiver.recv() => Message(message),
+            () = &mut next_tick => Tick,
+            Some(result) = transport_tasks.join_next() => Transport(result),
+        } {
+            Submit(None) => break Ok(()),
+            Submit(Some(command)) => replica.submit(command, &mut context),
+            Message(message) => replica.receive(message, &mut context),
+            Tick => {
                 replica.tick(ticked_at.elapsed(), &mut context);
                 ticked_at = Instant::now();
                 next_tick.as_mut().reset(ticked_at + config.tick_interval);
+            }
+            Transport(result) => {
+                let result = result?;
+                tracing::warn!(?result, "unexpected transport task exited")
             }
         }
         for message in context.send_buffer.drain(..) {
@@ -401,7 +367,7 @@ where
         }
         for commands in context.finalize_buffer.drain(..) {
             if finalized_sender.capacity() == 0 {
-                tracing::warn!("finalized channel full");
+                tracing::warn!("finalized channel full")
             }
             finalized_sender
                 .send((commands, replica.finalize_metadata()))

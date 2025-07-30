@@ -11,7 +11,7 @@ use crate::{
 
 #[cfg(test)]
 mod tests;
-pub mod transport;
+// pub mod transport;
 
 pub type Command = crate::Command;
 type Commands = Vec<Command>;
