@@ -1,4 +1,6 @@
 pub mod crypto;
+pub mod service;
+pub mod state;
 
 // similar to tracing_subscriber::fmt::init() but reports spans
 // why init() defaults to not report spans? i don't understand
@@ -22,14 +24,14 @@ pub fn init_logging() {
         .with(match env::var("RUST_LOG") {
             Ok(var) => Targets::from_str(&var)
                 .map_err(|e| {
-                    eprintln!("Ignoring `RUST_LOG={:?}`: {}", var, e);
+                    eprintln!("Ignoring `RUST_LOG={var:?}`: {e}");
                 })
                 .unwrap_or_default(),
             Err(env::VarError::NotPresent) => {
                 Targets::new().with_default(Subscriber::DEFAULT_MAX_LEVEL)
             }
             Err(e) => {
-                eprintln!("Ignoring `RUST_LOG`: {}", e);
+                eprintln!("Ignoring `RUST_LOG`: {e}");
                 Targets::new().with_default(Subscriber::DEFAULT_MAX_LEVEL)
             }
         })
