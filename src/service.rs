@@ -34,7 +34,7 @@ pub struct ServiceState<R: ReplicationState<A::Op>, A: AppState> {
     replication: R,
     app: A,
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
-    send_buffer: Vec<ServiceSend<A::Res, R::Metadata, R::Send>>,
+    send_buffer: Vec<(ClientId, Reply<A::Res, R::Metadata>)>,
 }
 
 pub enum ServiceSend<Res, M, S> {
@@ -55,9 +55,12 @@ where
     type Send = ServiceSend<A::Res, R::Metadata, R::Send>;
     type Output = Never;
     fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
+        if let Some((client_id, reply)) = self.send_buffer.pop() {
+            return Proceed::Send(ServiceSend::Reply(client_id, reply));
+        }
         match self.replication.proceed() {
-            Proceed::Pending => {}
-            Proceed::Send(send) => self.send_buffer.push(ServiceSend::Replication(send)),
+            Proceed::Pending => Proceed::Pending,
+            Proceed::Send(send) => Proceed::Send(ServiceSend::Replication(send)),
             Proceed::Output(output) => {
                 for request in output.requests {
                     let reply = Reply {
@@ -66,15 +69,10 @@ where
                         replication_metadata: output.metadata.clone(),
                     };
                     self.replies.insert(request.client_id, reply.clone());
-                    self.send_buffer
-                        .push(ServiceSend::Reply(request.client_id, reply))
+                    self.send_buffer.push((request.client_id, reply))
                 }
+                self.proceed()
             }
-        }
-
-        match self.send_buffer.pop() {
-            Some(send) => Proceed::Send(send),
-            None => Proceed::Pending,
         }
     }
 
@@ -89,9 +87,9 @@ where
         };
         match self.replies.get(&request.client_id) {
             Some(reply) if reply.seq < request.seq => {}
-            Some(reply) if reply.seq == request.seq => self
-                .send_buffer
-                .push(ServiceSend::Reply(request.client_id, reply.clone())),
+            Some(reply) if reply.seq == request.seq => {
+                self.send_buffer.push((request.client_id, reply.clone()))
+            }
             _ => self.replication.submit(request),
         }
     }
