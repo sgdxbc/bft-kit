@@ -1,9 +1,9 @@
 use std::{collections::HashMap, net::SocketAddr, pin::pin, time::Duration};
 
 use bincode::{Decode, Encode};
-use quinn::{Connection, ConnectionError, Endpoint, Incoming};
+use quinn::{Connection, ConnectionError, Endpoint, Incoming, ReadError, ReadToEndError};
 use tokio::{
-    select,
+    select, spawn,
     sync::mpsc::{self, Receiver, Sender},
     task::{JoinError, JoinSet},
     time::{Instant, sleep},
@@ -22,24 +22,42 @@ use crate::{
 
 type Id = u64;
 
-pub async fn run_read(
+pub async fn run_read<M: Decode<()> + Send + Sync + 'static>(
     connection: Connection,
-    sender: Sender<impl Decode<()> + Send + Sync + 'static>,
+    sender: Sender<M>,
 ) -> anyhow::Result<()> {
-    let mut stream = connection.accept_uni().await?;
-    let mut bytes;
-    while {
-        bytes = stream.read_to_end(1 << 16).await?;
-        !bytes.is_empty()
-    } {
+    while let Some(bytes) = read_connection(&connection).await? {
         let (message, len) = bincode::decode_from_slice(&bytes, bincode::config::standard())?;
         anyhow::ensure!(len == bytes.len());
         if sender.capacity() == 0 {
             tracing::warn!("read channel full")
         }
-        sender.send(message).await?
+        if sender.send(message).await.is_err() {
+            tracing::warn!("read channel closed, exiting");
+            break;
+        }
     }
     Ok(())
+}
+
+async fn read_connection(connection: &Connection) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut stream = match connection.accept_uni().await {
+        Ok(stream) => stream,
+        Err(ConnectionError::LocallyClosed | ConnectionError::ApplicationClosed(_)) => {
+            return Ok(None);
+        }
+        Err(err) => anyhow::bail!(err),
+    };
+    match stream.read_to_end(1 << 16).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(ReadToEndError::Read(ReadError::ConnectionLost(
+            ConnectionError::LocallyClosed | ConnectionError::ApplicationClosed(_),
+        ))) => {
+            tracing::warn!("connection closed while reading");
+            Ok(None)
+        }
+        Err(err) => Err(err)?,
+    }
 }
 
 pub async fn run_write(
@@ -50,8 +68,16 @@ pub async fn run_write(
         let mut stream = connection.open_uni().await?;
         // TODO figure a way to concurrently write into a connection (via multiple
         // streams) if that matters to performance
-        stream.write_chunk(message).await?
+        stream.write_all(&message).await?
     }
+    // the safe reasoning of read side could be a bit counterintuitive
+    // the assumption is that the write sender is kept by same owner of the read
+    // receiver, and it would only close the write channel (signaling the connection
+    // should be closed) after it has read everything (it wants)
+    // so, if this LocallyClosed interrupts read task when some messages are yet to
+    // be delivered, those are messages _unexpected_ by the owner, i.e., owner will
+    // not read them anyway
+    connection.close(Default::default(), Default::default());
     Ok(())
 }
 
@@ -67,20 +93,27 @@ pub async fn write(
         if sender.capacity() == 0 {
             tracing::warn!("write channel full")
         }
-        sender.send(bytes.clone()).await?;
+        if sender.send(bytes.clone()).await.is_err() {
+            tracing::warn!("write channel closed")
+        }
     }
     Ok(())
 }
 
-pub async fn run_transport(
+pub async fn run_transport<M: Decode<()> + Send + Sync + 'static>(
     connection: Connection,
-    read_sender: Sender<impl Decode<()> + Send + Sync + 'static>,
+    read_sender: Sender<M>,
     write_receiver: Receiver<Bytes>,
 ) -> anyhow::Result<()> {
-    select! {
-        result = run_read(connection.clone(), read_sender) => result,
-        result = run_write(connection, write_receiver) => result,
+    let read_task = spawn(run_read(connection.clone(), read_sender));
+    if let Err(err) = run_write(connection, write_receiver).await {
+        read_task.abort();
+        anyhow::bail!(err)
     }
+    // if write task exits successfully, it must have closed the connection so read
+    // task will exit (soon)
+    read_task.await.unwrap()?; // nowhere cancel the task and propagate panic
+    Ok(())
 }
 
 pub type WriteSenders = HashMap<Id, Sender<Bytes>>;
