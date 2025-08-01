@@ -12,11 +12,17 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     crypto::cert::quinn::{client_config, server_config},
-    service::{ClientId, ReplicationState, Reply, Request, ServiceMessage, ServiceSend},
+    service::{
+        ClientId, ReplicaIndex, ReplicationState, Reply, Request, ServiceMessage, ServiceSend,
+    },
     state::{AppState, Never, Proceed, State},
 };
 
 const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
+
+pub trait ReplicationSend {
+    fn apply(self, replica_connections: &HashMap<ReplicaIndex, Connection>);
+}
 
 pub async fn run_replicated_service<
     R: ReplicationState<A::Op>,
@@ -24,7 +30,7 @@ pub async fn run_replicated_service<
     S: State<Send = ServiceSend<R, A>, Output = Never, Message = ServiceMessage<R, A>>,
 >(
     mut service: S,
-    replica_index: u16,
+    replica_index: ReplicaIndex,
     addrs: Vec<SocketAddr>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()>
@@ -32,6 +38,7 @@ where
     Request<A::Op>: Decode<()>,
     Reply<A::Res, R::Metadata>: Encode,
     R::Message: Decode<()>,
+    R::Send: ReplicationSend,
 {
     let mut endpoint = Endpoint::server(server_config(), addrs[replica_index as usize])?;
     endpoint.set_default_client_config(client_config());
@@ -55,7 +62,7 @@ where
                 .await
                 .expect("connection not closed")
                 .await?;
-            let mut index = [0; size_of::<u16>()];
+            let mut index = [0; size_of::<ReplicaIndex>()];
             connection
                 .accept_uni()
                 .await?
@@ -64,7 +71,7 @@ where
             connections
                 .lock()
                 .unwrap()
-                .insert(u16::from_le_bytes(index), connection);
+                .insert(ReplicaIndex::from_le_bytes(index), connection);
         }
         anyhow::Ok(())
     };
@@ -86,7 +93,7 @@ where
     for connection in replica_connections.values() {
         tracker.spawn(trace_error(
             "replica connection read",
-            run_read_loop(
+            read_loop(
                 connection.clone(),
                 event_sender.clone(),
                 Event::ReplicationMessage,
@@ -131,7 +138,7 @@ where
 
                 tracker.spawn(trace_error(
                     "connection read",
-                    run_read_loop(
+                    read_loop(
                         connection.clone(),
                         event_sender.clone(),
                         Event::Message,
@@ -199,11 +206,12 @@ fn service_proceed<
 >(
     service: &mut S,
     client_connections: &HashMap<ClientId, Connection>,
-    replica_connections: &HashMap<u16, Connection>,
+    replica_connections: &HashMap<ReplicaIndex, Connection>,
     tracker: &TaskTracker,
 ) -> anyhow::Result<Option<Duration>>
 where
     Reply<A::Res, R::Metadata>: Encode,
+    R::Send: ReplicationSend,
 {
     loop {
         match service.proceed() {
@@ -221,12 +229,12 @@ where
                     ),
                 ));
             }
-            Proceed::Send(ServiceSend::Replication(send)) => todo!(),
+            Proceed::Send(ServiceSend::Replication(send)) => send.apply(replica_connections),
         }
     }
 }
 
-async fn run_read_loop<E: Send + Sync + 'static>(
+async fn read_loop<E: Send + Sync + 'static>(
     connection: Connection,
     event_sender: mpsc::Sender<E>,
     into_event: impl Fn(Vec<u8>) -> E,
@@ -263,5 +271,11 @@ async fn run_write(connection: Connection, message: Vec<u8>) -> anyhow::Result<(
 async fn trace_error<T>(label: &str, task: impl Future<Output = anyhow::Result<T>>) {
     if let Err(err) = task.await {
         tracing::error!(%label, %err)
+    }
+}
+
+impl ReplicationSend for Never {
+    fn apply(self, _replica_connections: &HashMap<ReplicaIndex, Connection>) {
+        unreachable!()
     }
 }

@@ -4,8 +4,13 @@ use crate::state::{AppState, Never, Proceed, State};
 
 pub mod transport;
 
+// id is randomly assigned while index is continuously assigned
+// index is statically assigned while sequence is monotonically increasing
+
 pub type ClientId = u32;
 pub type ClientSeq = u64;
+
+pub type ReplicaIndex = u16;
 
 #[derive(Debug, Clone)]
 pub struct Request<Op> {
@@ -32,10 +37,16 @@ pub trait ReplicationState<Op>: State<Output = ReplicationOutput<Op, Self::Metad
     fn submit(&mut self, request: Request<Op>);
 }
 
-pub struct ReplicatedService<R: ReplicationState<A::Op>, A: AppState> {
+pub enum ReplicationRecipient {
+    All,
+    Replica(ReplicaIndex),
+}
+
+pub struct Service<R: ReplicationState<A::Op>, A: AppState> {
     replication: R,
     app: A,
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
+    #[allow(clippy::type_complexity)]
     send_buffer: Vec<(ClientId, Reply<A::Res, R::Metadata>)>,
 }
 
@@ -49,7 +60,7 @@ pub enum ServiceMessage<R: ReplicationState<A::Op>, A: AppState> {
     Replication(R::Message),
 }
 
-impl<R: ReplicationState<A::Op>, A: AppState> State for ReplicatedService<R, A>
+impl<R: ReplicationState<A::Op>, A: AppState> State for Service<R, A>
 where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
