@@ -14,7 +14,7 @@ pub struct Client<A: AppState> {
     num_tick: u32,
     submits: BTreeMap<ClientSeq, ClientSubmit<A::Op>>,
     send_buffer: Vec<Request<A::Op>>,
-    output_buffer: Vec<(A::Op, A::Res)>,
+    output_buffer: Vec<(ClientSeq, A::Res)>,
 }
 
 pub struct ClientConfig {
@@ -22,6 +22,7 @@ pub struct ClientConfig {
 }
 
 struct ClientSubmit<Op> {
+    #[allow(unused)]
     op: Op,
     after: u32,
 }
@@ -30,7 +31,7 @@ impl<A: AppState> ClientState<A::Op> for Client<A>
 where
     A::Op: Clone,
 {
-    fn submit(&mut self, op: A::Op) {
+    fn submit(&mut self, op: A::Op) -> ClientSeq {
         self.seq += 1;
         self.submits.insert(
             self.seq,
@@ -43,13 +44,14 @@ where
             client_id: self.id,
             seq: self.seq,
             op,
-        })
+        });
+        self.seq
     }
 }
 
 impl<A: AppState> State for Client<A> {
     type Send = Request<A::Op>;
-    type Output = (A::Op, A::Res);
+    type Output = (ClientSeq, A::Res);
     fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
         match self.output_buffer.pop() {
             Some(output) => Proceed::Output(output),
@@ -62,10 +64,10 @@ impl<A: AppState> State for Client<A> {
 
     type Message = Reply<A::Res, ()>;
     fn receive(&mut self, message: Self::Message) {
-        let Some(submit) = self.submits.remove(&message.seq) else {
+        if self.submits.remove(&message.seq).is_none() {
             return;
         };
-        self.output_buffer.push((submit.op, message.res))
+        self.output_buffer.push((message.seq, message.res))
     }
 
     fn tick(&mut self, _elapsed: Duration) {

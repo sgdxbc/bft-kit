@@ -42,6 +42,7 @@
         "Sonnino",
         "specpaxos",
         "thiserror",
+        "tput",
         "txns",
         "unreplicated"
     ],
