@@ -11,20 +11,43 @@ pub struct Client<A: AppState> {
     config: ClientConfig,
 
     seq: ClientSeq,
-    num_tick: u32,
+    now: Duration,
     submits: BTreeMap<ClientSeq, ClientSubmit<A::Op>>,
     send_buffer: Vec<Request<A::Op>>,
     output_buffer: Vec<(ClientSeq, A::Res)>,
 }
 
 pub struct ClientConfig {
-    timeout: u32, // number of full ticks
+    timeout: Duration,
+    tick_resolution: Duration,
 }
 
 struct ClientSubmit<Op> {
     #[allow(unused)]
     op: Op,
-    after: u32,
+    timeout_at: Duration,
+}
+
+impl<A: AppState> Client<A> {
+    pub fn new(id: ClientId, config: ClientConfig) -> Self {
+        Self {
+            id,
+            config,
+            seq: 0,
+            now: Duration::ZERO,
+            submits: Default::default(),
+            send_buffer: Default::default(),
+            output_buffer: Default::default(),
+        }
+    }
+
+    fn tick_at(&self) -> Duration {
+        let mut tick_at = self.config.tick_resolution;
+        if let Some((_, submit)) = self.submits.first_key_value() {
+            tick_at = tick_at.min(submit.timeout_at - self.now)
+        }
+        tick_at
+    }
 }
 
 impl<A: AppState> ClientState<A::Op> for Client<A>
@@ -37,7 +60,7 @@ where
             self.seq,
             ClientSubmit {
                 op: op.clone(),
-                after: self.num_tick,
+                timeout_at: self.now + self.config.timeout + self.config.tick_resolution,
             },
         );
         self.send_buffer.push(Request {
@@ -57,7 +80,7 @@ impl<A: AppState> State for Client<A> {
             Some(output) => Proceed::Output(output),
             None => match self.send_buffer.pop() {
                 Some(req) => Proceed::Send(req),
-                None => Proceed::Pending,
+                None => Proceed::Pending(Some(self.tick_at())),
             },
         }
     }
@@ -70,10 +93,10 @@ impl<A: AppState> State for Client<A> {
         self.output_buffer.push((message.seq, message.res))
     }
 
-    fn tick(&mut self, _elapsed: Duration) {
-        self.num_tick += 1;
+    fn tick(&mut self, elapsed: Duration) {
+        self.now += elapsed;
         while let Some((_, submit)) = self.submits.first_key_value()
-            && submit.after + self.config.timeout < self.num_tick
+            && submit.timeout_at <= self.now
         {
             self.submits.pop_first();
         }
@@ -101,7 +124,7 @@ impl<A: AppState> State for Replica<A> {
     fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
         match self.output_buffer.pop() {
             Some(output) => Proceed::Output(output),
-            None => Proceed::Pending,
+            None => Proceed::Pending(None),
         }
     }
 

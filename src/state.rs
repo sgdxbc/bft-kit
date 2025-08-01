@@ -14,7 +14,7 @@ pub trait State {
 pub enum Never {}
 
 pub enum Proceed<S, O = Never> {
-    Pending,
+    Pending(Option<Duration>),
     Send(S),
     Output(O),
 }
@@ -45,7 +45,7 @@ impl<A: AppState> State for AdaptedApp<A> {
     fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
         match self.results.pop_front() {
             Some(res) => Proceed::Output(res),
-            None => Proceed::Pending,
+            None => Proceed::Pending(None),
         }
     }
 

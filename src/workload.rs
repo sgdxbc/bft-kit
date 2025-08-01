@@ -59,7 +59,7 @@ where
             self.submitted = Some((Instant::now(), op))
         }
         match self.client.proceed() {
-            Proceed::Pending => Proceed::Pending,
+            Proceed::Pending(tick_at) => Proceed::Pending(tick_at),
             Proceed::Send(send) => Proceed::Send(send),
             Proceed::Output((_, res)) => {
                 let Some((start, op)) = self.submitted.take() else {
@@ -119,8 +119,12 @@ where
         if self.submitted.is_empty() && self.workload.completed() {
             return Proceed::Output(self.latencies.clone());
         }
+        let until_next_submit = self.next_submit.saturating_duration_since(Instant::now());
         match self.client.proceed() {
-            Proceed::Pending => Proceed::Pending,
+            Proceed::Pending(None) => Proceed::Pending(Some(until_next_submit)),
+            Proceed::Pending(Some(tick_at)) => {
+                Proceed::Pending(Some(tick_at.min(until_next_submit)))
+            }
             Proceed::Send(send) => Proceed::Send(send),
             Proceed::Output((seq, res)) => {
                 let Some((start, op)) = self.submitted.remove(&seq) else {
@@ -141,9 +145,6 @@ where
         self.client.receive(msg)
     }
 
-    // tick based model is not the best fit for open loop sending, for sure
-    // nevertheless, given existing practice (Caladan) works just fine, sufficiently
-    // frequent ticks should make it works well enough
     fn tick(&mut self, _elapsed: Duration) {
         let now = Instant::now();
         while self.next_submit <= now {

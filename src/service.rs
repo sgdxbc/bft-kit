@@ -2,6 +2,8 @@ use std::{collections::HashMap, time::Duration};
 
 use crate::state::{AppState, Never, Proceed, State};
 
+pub mod transport;
+
 pub type ClientId = u32;
 pub type ClientSeq = u64;
 
@@ -30,36 +32,36 @@ pub trait ReplicationState<Op>: State<Output = ReplicationOutput<Op, Self::Metad
     fn submit(&mut self, request: Request<Op>);
 }
 
-pub struct ServiceState<R: ReplicationState<A::Op>, A: AppState> {
+pub struct ReplicatedService<R: ReplicationState<A::Op>, A: AppState> {
     replication: R,
     app: A,
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     send_buffer: Vec<(ClientId, Reply<A::Res, R::Metadata>)>,
 }
 
-pub enum ServiceSend<Res, M, S> {
-    Reply(ClientId, Reply<Res, M>),
-    Replication(S),
+pub enum ServiceSend<R: ReplicationState<A::Op>, A: AppState> {
+    Reply(ClientId, Reply<A::Res, R::Metadata>),
+    Replication(R::Send),
 }
 
-pub enum ServiceMessage<Op, M> {
-    Request(Request<Op>),
-    Replication(M),
+pub enum ServiceMessage<R: ReplicationState<A::Op>, A: AppState> {
+    Request(Request<A::Op>),
+    Replication(R::Message),
 }
 
-impl<R: ReplicationState<A::Op>, A: AppState> State for ServiceState<R, A>
+impl<R: ReplicationState<A::Op>, A: AppState> State for ReplicatedService<R, A>
 where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
 {
-    type Send = ServiceSend<A::Res, R::Metadata, R::Send>;
+    type Send = ServiceSend<R, A>;
     type Output = Never;
     fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
         if let Some((client_id, reply)) = self.send_buffer.pop() {
             return Proceed::Send(ServiceSend::Reply(client_id, reply));
         }
         match self.replication.proceed() {
-            Proceed::Pending => Proceed::Pending,
+            Proceed::Pending(tick_at) => Proceed::Pending(tick_at),
             Proceed::Send(send) => Proceed::Send(ServiceSend::Replication(send)),
             Proceed::Output(output) => {
                 for request in output.requests {
@@ -76,7 +78,7 @@ where
         }
     }
 
-    type Message = ServiceMessage<A::Op, R::Message>;
+    type Message = ServiceMessage<R, A>;
     fn receive(&mut self, message: Self::Message) {
         let request = match message {
             ServiceMessage::Request(request) => request,
