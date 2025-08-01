@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use crate::state::{AppState, Never, Proceed, State};
 
@@ -7,16 +7,16 @@ pub type ClientSeq = u64;
 
 #[derive(Debug, Clone)]
 pub struct Request<Op> {
-    client_id: ClientId,
-    seq: ClientSeq,
-    op: Op,
+    pub client_id: ClientId,
+    pub seq: ClientSeq,
+    pub op: Op,
 }
 
 #[derive(Debug, Clone)]
 pub struct Reply<Res, M> {
-    seq: ClientSeq,
-    res: Res,
-    replication_metadata: M,
+    pub seq: ClientSeq,
+    pub res: Res,
+    pub replication_metadata: M,
 }
 
 pub struct ReplicationOutput<Op, M> {
@@ -40,6 +40,11 @@ pub struct ServiceState<R: ReplicationState<A::Op>, A: AppState> {
 pub enum ServiceSend<Res, M, S> {
     Reply(ClientId, Reply<Res, M>),
     Replication(S),
+}
+
+pub enum ServiceMessage<Op, M> {
+    Request(Request<Op>),
+    Replication(M),
 }
 
 impl<R: ReplicationState<A::Op>, A: AppState> State for ServiceState<R, A>
@@ -73,8 +78,15 @@ where
         }
     }
 
-    type Message = Request<A::Op>;
-    fn receive(&mut self, request: Self::Message) {
+    type Message = ServiceMessage<A::Op, R::Message>;
+    fn receive(&mut self, message: Self::Message) {
+        let request = match message {
+            ServiceMessage::Request(request) => request,
+            ServiceMessage::Replication(metadata) => {
+                self.replication.receive(metadata);
+                return;
+            }
+        };
         match self.replies.get(&request.client_id) {
             Some(reply) if reply.seq < request.seq => {}
             Some(reply) if reply.seq == request.seq => self
@@ -84,7 +96,7 @@ where
         }
     }
 
-    fn tick(&mut self, elapsed: std::time::Duration) {
+    fn tick(&mut self, elapsed: Duration) {
         self.replication.tick(elapsed)
     }
 }
