@@ -59,7 +59,7 @@ where
             self.submitted = Some((Instant::now(), op))
         }
         match self.client.proceed() {
-            Proceed::Pending(tick_at) => Proceed::Pending(tick_at),
+            Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
             Proceed::Send(send) => Proceed::Send(send),
             Proceed::Output((_, res)) => {
                 let Some((start, op)) = self.submitted.take() else {
@@ -122,8 +122,8 @@ where
         let until_next_submit = self.next_submit.saturating_duration_since(Instant::now());
         match self.client.proceed() {
             Proceed::Pending(None) => Proceed::Pending(Some(until_next_submit)),
-            Proceed::Pending(Some(tick_at)) => {
-                Proceed::Pending(Some(tick_at.min(until_next_submit)))
+            Proceed::Pending(Some(tick_after)) => {
+                Proceed::Pending(Some(tick_after.min(until_next_submit)))
             }
             Proceed::Send(send) => Proceed::Send(send),
             Proceed::Output((seq, res)) => {

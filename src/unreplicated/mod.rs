@@ -41,12 +41,12 @@ impl<A: AppState> Client<A> {
         }
     }
 
-    fn tick_at(&self) -> Duration {
-        let mut tick_at = self.config.tick_resolution;
+    fn tick_after(&self) -> Duration {
+        let mut tick_after = self.config.tick_resolution;
         if let Some((_, submit)) = self.submits.first_key_value() {
-            tick_at = tick_at.min(submit.timeout_at - self.now)
+            tick_after = tick_after.min(submit.timeout_at - self.now)
         }
-        tick_at
+        tick_after
     }
 }
 
@@ -80,7 +80,7 @@ impl<A: AppState> State for Client<A> {
             Some(output) => Proceed::Output(output),
             None => match self.send_buffer.pop() {
                 Some(req) => Proceed::Send(req),
-                None => Proceed::Pending(Some(self.tick_at())),
+                None => Proceed::Pending(Some(self.tick_after())),
             },
         }
     }

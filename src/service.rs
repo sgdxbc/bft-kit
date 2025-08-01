@@ -61,7 +61,7 @@ where
             return Proceed::Send(ServiceSend::Reply(client_id, reply));
         }
         match self.replication.proceed() {
-            Proceed::Pending(tick_at) => Proceed::Pending(tick_at),
+            Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
             Proceed::Send(send) => Proceed::Send(ServiceSend::Replication(send)),
             Proceed::Output(output) => {
                 for request in output.requests {
