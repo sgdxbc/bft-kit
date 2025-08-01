@@ -3,12 +3,12 @@ use std::{collections::HashMap, future::pending, net::SocketAddr, sync::Mutex, t
 use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint, Incoming};
 use tokio::{
-    select, spawn,
+    select,
     sync::mpsc,
     time::{Instant, sleep},
     try_join,
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     crypto::cert::quinn::{client_config, server_config},
@@ -72,6 +72,8 @@ where
     let replica_connections = connections.into_inner().unwrap();
     anyhow::ensure!(replica_connections.len() == addrs.len() - 1);
 
+    let tracker = TaskTracker::new();
+
     enum Event {
         Accept(Box<Incoming>),
         Message(Vec<u8>),
@@ -82,7 +84,7 @@ where
     }
     let (event_sender, mut event_receiver) = mpsc::channel(1000);
     for connection in replica_connections.values() {
-        spawn(trace_error(
+        tracker.spawn(trace_error(
             "replica connection read",
             run_read_loop(
                 connection.clone(),
@@ -92,11 +94,17 @@ where
             ),
         ));
     }
+
     let mut client_connections = HashMap::new();
 
     service.tick(Duration::ZERO);
     let mut last_tick = Instant::now();
-    let mut tick_after = service_proceed(&mut service, &client_connections, &replica_connections)?;
+    let mut tick_after = service_proceed(
+        &mut service,
+        &client_connections,
+        &replica_connections,
+        &tracker,
+    )?;
     loop {
         let tick = async {
             if let Some(tick_after) = tick_after {
@@ -121,7 +129,7 @@ where
                     .await?;
                 let client_id = ClientId::from_le_bytes(client_id);
 
-                spawn(trace_error(
+                tracker.spawn(trace_error(
                     "connection read",
                     run_read_loop(
                         connection.clone(),
@@ -136,8 +144,12 @@ where
                 let (request, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                 anyhow::ensure!(len == bytes.len());
                 service.receive(ServiceMessage::Request(request));
-                tick_after =
-                    service_proceed(&mut service, &client_connections, &replica_connections)?
+                tick_after = service_proceed(
+                    &mut service,
+                    &client_connections,
+                    &replica_connections,
+                    &tracker,
+                )?
             }
             Event::Closed(client_id) => {
                 client_connections.remove(&client_id);
@@ -146,18 +158,37 @@ where
                 let (message, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                 anyhow::ensure!(len == bytes.len());
                 service.receive(ServiceMessage::Replication(message));
-                tick_after =
-                    service_proceed(&mut service, &client_connections, &replica_connections)?
+                tick_after = service_proceed(
+                    &mut service,
+                    &client_connections,
+                    &replica_connections,
+                    &tracker,
+                )?
             }
             Event::Tick => {
                 service.tick(last_tick.elapsed());
                 last_tick = Instant::now();
-                tick_after =
-                    service_proceed(&mut service, &client_connections, &replica_connections)?
+                tick_after = service_proceed(
+                    &mut service,
+                    &client_connections,
+                    &replica_connections,
+                    &tracker,
+                )?
             }
             Event::Cancel => break,
         }
     }
+    tracker.close();
+    if !client_connections.is_empty() {
+        tracing::warn!("shut down with open client connections")
+    }
+    for connection in client_connections.values() {
+        connection.close(0u32.into(), b"service shutting down")
+    }
+    for connection in replica_connections.values() {
+        connection.close(0u32.into(), b"service shutting down")
+    }
+    tracker.wait().await;
     Ok(())
 }
 
@@ -169,6 +200,7 @@ fn service_proceed<
     service: &mut S,
     client_connections: &HashMap<ClientId, Connection>,
     replica_connections: &HashMap<u16, Connection>,
+    tracker: &TaskTracker,
 ) -> anyhow::Result<Option<Duration>>
 where
     Reply<A::Res, R::Metadata>: Encode,
@@ -181,7 +213,7 @@ where
                     tracing::warn!(%client_id, "client connection not found");
                     continue;
                 };
-                spawn(trace_error(
+                tracker.spawn(trace_error(
                     "connection write",
                     run_write(
                         connection.clone(),
