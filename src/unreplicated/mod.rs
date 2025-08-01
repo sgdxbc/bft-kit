@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    service::{ClientId, ClientSeq, Reply, Request},
-    state::{AppState, Proceed, State},
+    service::{ClientId, ClientSeq, ReplicationOutput, ReplicationState, Reply, Request},
+    state::{AppState, Never, Proceed, State},
     workload::ClientState,
 };
 
@@ -76,4 +76,37 @@ impl<A: AppState> State for Client<A> {
             self.submits.pop_first();
         }
     }
+}
+
+pub struct Replica<A: AppState> {
+    output_buffer: Vec<ReplicationOutput<A::Op, ()>>,
+}
+
+impl<A: AppState> ReplicationState<A::Op> for Replica<A> {
+    type Metadata = ();
+
+    fn submit(&mut self, request: Request<A::Op>) {
+        self.output_buffer.push(ReplicationOutput {
+            requests: vec![request],
+            metadata: (),
+        })
+    }
+}
+
+impl<A: AppState> State for Replica<A> {
+    type Send = Never;
+    type Output = ReplicationOutput<A::Op, ()>;
+    fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
+        match self.output_buffer.pop() {
+            Some(output) => Proceed::Output(output),
+            None => Proceed::Pending,
+        }
+    }
+
+    type Message = Never;
+    fn receive(&mut self, _message: Self::Message) {
+        unreachable!()
+    }
+
+    fn tick(&mut self, _elapsed: Duration) {}
 }

@@ -20,8 +20,8 @@ pub struct Reply<Res, M> {
 }
 
 pub struct ReplicationOutput<Op, M> {
-    requests: Vec<Request<Op>>,
-    metadata: M,
+    pub requests: Vec<Request<Op>>,
+    pub metadata: M,
 }
 
 pub trait ReplicationState<Op>: State<Output = ReplicationOutput<Op, Self::Metadata>> {
