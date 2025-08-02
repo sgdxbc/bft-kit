@@ -25,11 +25,13 @@ pub trait Workload {
     fn validate(&self, op: Self::Op, res: Self::Res) -> anyhow::Result<()>;
 }
 
+type Latencies = Histogram<u64>;
+
 pub struct CloseLoopWorker<W: Workload, C> {
     workload: W,
     client: C,
     submitted: Option<(Instant, W::Op)>,
-    latencies: Histogram<u64>,
+    latencies: Latencies,
 }
 
 impl<W: Workload, C> CloseLoopWorker<W, C> {
@@ -43,18 +45,24 @@ impl<W: Workload, C> CloseLoopWorker<W, C> {
     }
 }
 
+impl<W: Workload, C> Into<Latencies> for CloseLoopWorker<W, C> {
+    fn into(self) -> Latencies {
+        self.latencies
+    }
+}
+
 impl<C: ClientState<W::Op, Output = (ClientSeq, W::Res)>, W: Workload> State
     for CloseLoopWorker<W, C>
 where
     W::Op: Clone,
 {
     type Send = C::Send;
-    type Output = Histogram<u64>;
+    type Output = anyhow::Result<()>;
 
     fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
         if self.submitted.is_none() {
             let Some(op) = self.workload.next_op() else {
-                return Proceed::Output(self.latencies.clone());
+                return Proceed::Output(Ok(()));
             };
             self.client.submit(op.clone());
             self.submitted = Some((Instant::now(), op))
@@ -67,8 +75,7 @@ where
                     unimplemented!("multiple outputs to close loop worker")
                 };
                 if let Err(err) = self.workload.validate(op, res) {
-                    tracing::error!(%err, "validation failure");
-                    return Proceed::Output(self.latencies.clone());
+                    return Proceed::Output(Err(err));
                 }
                 self.latencies += start.elapsed().as_micros() as u64;
                 self.proceed()
@@ -90,8 +97,8 @@ pub struct OpenLoopWorker<W: Workload, C> {
     workload: W,
     client: C,
     submitted: HashMap<ClientSeq, (Instant, W::Op)>,
-    latencies: Histogram<u64>,
-    next_submit: Instant,
+    latencies: Latencies,
+    next_submit: Option<Instant>,
     target_tput: f32,
 }
 
@@ -100,11 +107,17 @@ impl<W: Workload, C> OpenLoopWorker<W, C> {
         Self {
             workload,
             client,
-            submitted: HashMap::new(),
+            submitted: Default::default(),
             latencies: Histogram::new(3).unwrap(),
-            next_submit: Instant::now(),
+            next_submit: Some(Instant::now()),
             target_tput,
         }
+    }
+}
+
+impl<W: Workload, C> Into<Latencies> for OpenLoopWorker<W, C> {
+    fn into(self) -> Latencies {
+        self.latencies
     }
 }
 
@@ -114,23 +127,45 @@ where
     W::Op: Clone,
 {
     type Send = C::Send;
-    type Output = Histogram<u64>;
+    type Output = anyhow::Result<()>;
 
     fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
-        let until_next_submit = self.next_submit.saturating_duration_since(Instant::now());
-        match self.client.proceed() {
-            Proceed::Pending(None) => Proceed::Pending(Some(until_next_submit)),
-            Proceed::Pending(Some(tick_after)) => {
-                Proceed::Pending(Some(tick_after.min(until_next_submit)))
+        if let Some(next_submit) = &mut self.next_submit {
+            let now = Instant::now();
+            while *next_submit <= now {
+                let Some(op) = self.workload.next_op() else {
+                    self.next_submit = None;
+                    break;
+                };
+                let seq = self.client.submit(op.clone());
+                self.submitted.insert(seq, (now, op));
+                // randomize interval?
+                *next_submit += Duration::from_secs_f32(1. / self.target_tput)
             }
+        }
+        match self.client.proceed() {
+            // probably could be written as some combinator over `Option`s but that would be
+            // too hard to understand
+            Proceed::Pending(tick_after) => match (
+                tick_after,
+                self.next_submit
+                    .map(|at| at.saturating_duration_since(Instant::now())),
+            ) {
+                (None, None) => Proceed::Output(Ok(())),
+                (Some(tick_after), None) | (None, Some(tick_after)) => {
+                    Proceed::Pending(Some(tick_after))
+                }
+                (Some(tick_after), Some(submit_at)) => {
+                    Proceed::Pending(Some(tick_after.min(submit_at)))
+                }
+            },
             Proceed::Send(send) => Proceed::Send(send),
             Proceed::Output((seq, res)) => {
                 let Some((start, op)) = self.submitted.remove(&seq) else {
                     unimplemented!("output for unknown seq {seq}")
                 };
                 if let Err(err) = self.workload.validate(op, res) {
-                    tracing::error!(%err, "validation failure");
-                    return Proceed::Output(self.latencies.clone());
+                    return Proceed::Output(Err(err));
                 }
                 self.latencies += start.elapsed().as_micros() as u64;
                 self.proceed()
@@ -143,14 +178,6 @@ where
         self.client.receive(msg)
     }
 
-    fn tick(&mut self, _elapsed: Duration) {
-        let now = Instant::now();
-        while self.next_submit <= now {
-            if let Some(op) = self.workload.next_op() {
-                let seq = self.client.submit(op.clone());
-                self.submitted.insert(seq, (now, op));
-            }
-            self.next_submit += Duration::from_secs_f32(1. / self.target_tput)
-        }
-    }
+    // the following `proceed` call will do the work
+    fn tick(&mut self, _elapsed: Duration) {}
 }
