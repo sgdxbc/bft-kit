@@ -16,7 +16,7 @@ pub trait ClientState<Op>: State {
     fn submit(&mut self, op: Op, at: Duration) -> ClientSeq;
 }
 
-pub trait Workload {
+pub trait WorkloadState {
     type Op;
     type Res;
 
@@ -27,14 +27,14 @@ pub trait Workload {
 
 type Latencies = Histogram<u64>;
 
-pub struct CloseLoopWorker<W: Workload, C> {
+pub struct CloseLoopWorker<W: WorkloadState, C> {
     workload: W,
     client: C,
     submitted: Option<(Instant, W::Op)>,
     latencies: Latencies,
 }
 
-impl<W: Workload, C> CloseLoopWorker<W, C> {
+impl<W: WorkloadState, C> CloseLoopWorker<W, C> {
     pub fn new(workload: W, client: C) -> Self {
         Self {
             workload,
@@ -45,13 +45,13 @@ impl<W: Workload, C> CloseLoopWorker<W, C> {
     }
 }
 
-impl<W: Workload, C> From<CloseLoopWorker<W, C>> for Latencies {
+impl<W: WorkloadState, C> From<CloseLoopWorker<W, C>> for Latencies {
     fn from(val: CloseLoopWorker<W, C>) -> Self {
         val.latencies
     }
 }
 
-impl<C: ClientState<W::Op, Output = (ClientSeq, W::Res)>, W: Workload> State
+impl<C: ClientState<W::Op, Output = (ClientSeq, W::Res)>, W: WorkloadState> State
     for CloseLoopWorker<W, C>
 where
     W::Op: Clone,
@@ -89,7 +89,7 @@ where
     }
 }
 
-pub struct OpenLoopWorker<W: Workload, C> {
+pub struct OpenLoopWorker<W: WorkloadState, C> {
     workload: W,
     client: C,
     submitted: HashMap<ClientSeq, (Instant, W::Op)>,
@@ -98,7 +98,7 @@ pub struct OpenLoopWorker<W: Workload, C> {
     target_tput: f32,
 }
 
-impl<W: Workload, C> OpenLoopWorker<W, C> {
+impl<W: WorkloadState, C> OpenLoopWorker<W, C> {
     pub fn new(workload: W, client: C, target_tput: f32) -> Self {
         Self {
             workload,
@@ -111,13 +111,13 @@ impl<W: Workload, C> OpenLoopWorker<W, C> {
     }
 }
 
-impl<W: Workload, C> From<OpenLoopWorker<W, C>> for Latencies {
+impl<W: WorkloadState, C> From<OpenLoopWorker<W, C>> for Latencies {
     fn from(val: OpenLoopWorker<W, C>) -> Self {
         val.latencies
     }
 }
 
-impl<W: Workload, C: ClientState<W::Op, Output = (ClientSeq, W::Res)>> State
+impl<W: WorkloadState, C: ClientState<W::Op, Output = (ClientSeq, W::Res)>> State
     for OpenLoopWorker<W, C>
 where
     W::Op: Clone,

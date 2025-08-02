@@ -1,3 +1,4 @@
+pub mod app;
 pub mod crypto;
 pub mod service;
 pub mod state;
