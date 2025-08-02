@@ -44,7 +44,7 @@ pub async fn run_write(connection: Connection, message: Vec<u8>) -> anyhow::Resu
     Ok(())
 }
 
-pub async fn trace_error<T>(label: &str, task: impl Future<Output = anyhow::Result<T>>) {
+pub async fn trace_error(label: &str, task: impl Future<Output = anyhow::Result<()>>) {
     if let Err(err) = task.await {
         tracing::error!(%label, %err)
     }
