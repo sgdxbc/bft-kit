@@ -13,7 +13,7 @@ use crate::{
 // pub mod transport;
 
 pub trait ClientState<Op>: State {
-    fn submit(&mut self, op: Op) -> ClientSeq;
+    fn submit(&mut self, op: Op, at: Duration) -> ClientSeq;
 }
 
 pub trait Workload {
@@ -45,9 +45,9 @@ impl<W: Workload, C> CloseLoopWorker<W, C> {
     }
 }
 
-impl<W: Workload, C> Into<Latencies> for CloseLoopWorker<W, C> {
-    fn into(self) -> Latencies {
-        self.latencies
+impl<W: Workload, C> From<CloseLoopWorker<W, C>> for Latencies {
+    fn from(val: CloseLoopWorker<W, C>) -> Self {
+        val.latencies
     }
 }
 
@@ -59,15 +59,15 @@ where
     type Send = C::Send;
     type Output = anyhow::Result<()>;
 
-    fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if self.submitted.is_none() {
             let Some(op) = self.workload.next_op() else {
                 return Proceed::Output(Ok(()));
             };
-            self.client.submit(op.clone());
+            self.client.submit(op.clone(), since_start);
             self.submitted = Some((Instant::now(), op))
         }
-        match self.client.proceed() {
+        match self.client.proceed(since_start) {
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
             Proceed::Send(send) => Proceed::Send(send),
             Proceed::Output((_, res)) => {
@@ -78,7 +78,7 @@ where
                     return Proceed::Output(Err(err));
                 }
                 self.latencies += start.elapsed().as_micros() as u64;
-                self.proceed()
+                self.proceed(since_start)
             }
         }
     }
@@ -86,10 +86,6 @@ where
     type Message = C::Message;
     fn receive(&mut self, msg: Self::Message) {
         self.client.receive(msg)
-    }
-
-    fn tick(&mut self, elapsed: Duration) {
-        self.client.tick(elapsed)
     }
 }
 
@@ -115,9 +111,9 @@ impl<W: Workload, C> OpenLoopWorker<W, C> {
     }
 }
 
-impl<W: Workload, C> Into<Latencies> for OpenLoopWorker<W, C> {
-    fn into(self) -> Latencies {
-        self.latencies
+impl<W: Workload, C> From<OpenLoopWorker<W, C>> for Latencies {
+    fn from(val: OpenLoopWorker<W, C>) -> Self {
+        val.latencies
     }
 }
 
@@ -129,7 +125,7 @@ where
     type Send = C::Send;
     type Output = anyhow::Result<()>;
 
-    fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(next_submit) = &mut self.next_submit {
             let now = Instant::now();
             while *next_submit <= now {
@@ -137,13 +133,20 @@ where
                     self.next_submit = None;
                     break;
                 };
-                let seq = self.client.submit(op.clone());
+                let seq = self.client.submit(op.clone(), since_start);
                 self.submitted.insert(seq, (now, op));
                 // randomize interval?
                 *next_submit += Duration::from_secs_f32(1. / self.target_tput)
             }
         }
-        match self.client.proceed() {
+        // this `proceed` is only called if either `self` or `self.client` may make
+        // progress at this point (i.e. `since_start`). if it's `self.client` would
+        // proceed, we should call recursively `proceed` it. otherwise, `self` should
+        // have proceeded above, which probably have `submit` to `self.client`, after
+        // what we should `proceed` it as well
+        // the only exception is when `self.workload` is running out of operations. we
+        // just let `self.client` receives a false positive `proceed` call in this case
+        match self.client.proceed(since_start) {
             // probably could be written as some combinator over `Option`s but that would be
             // too hard to understand
             Proceed::Pending(tick_after) => match (
@@ -168,7 +171,7 @@ where
                     return Proceed::Output(Err(err));
                 }
                 self.latencies += start.elapsed().as_micros() as u64;
-                self.proceed()
+                self.proceed(since_start)
             }
         }
     }
@@ -177,7 +180,4 @@ where
     fn receive(&mut self, msg: Self::Message) {
         self.client.receive(msg)
     }
-
-    // the following `proceed` call will do the work
-    fn tick(&mut self, _elapsed: Duration) {}
 }

@@ -99,9 +99,10 @@ where
 
     let mut client_connections = HashMap::new();
 
-    let mut last_tick = Instant::now();
+    let start = Instant::now();
     let mut tick_after = service_proceed(
         &mut service,
+        start.elapsed(),
         &client_connections,
         &replica_connections,
         &tracker,
@@ -140,44 +141,32 @@ where
                     ),
                 ));
                 client_connections.insert(client_id, connection);
+                continue;
+            }
+            Event::Closed(client_id) => {
+                client_connections.remove(&client_id);
+                continue;
             }
             Event::Message(bytes) => {
                 let (request, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                 anyhow::ensure!(len == bytes.len());
-                service.receive(ServiceMessage::Request(request));
-                tick_after = service_proceed(
-                    &mut service,
-                    &client_connections,
-                    &replica_connections,
-                    &tracker,
-                )?
-            }
-            Event::Closed(client_id) => {
-                client_connections.remove(&client_id);
+                service.receive(ServiceMessage::Request(request))
             }
             Event::ReplicationMessage(bytes) => {
                 let (message, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                 anyhow::ensure!(len == bytes.len());
-                service.receive(ServiceMessage::Replication(message));
-                tick_after = service_proceed(
-                    &mut service,
-                    &client_connections,
-                    &replica_connections,
-                    &tracker,
-                )?
+                service.receive(ServiceMessage::Replication(message))
             }
-            Event::Tick => {
-                service.tick(last_tick.elapsed());
-                last_tick = Instant::now();
-                tick_after = service_proceed(
-                    &mut service,
-                    &client_connections,
-                    &replica_connections,
-                    &tracker,
-                )?
-            }
+            Event::Tick => {}
             Event::Cancel => break,
         }
+        tick_after = service_proceed(
+            &mut service,
+            start.elapsed(),
+            &client_connections,
+            &replica_connections,
+            &tracker,
+        )?
     }
     tracker.close();
     if !client_connections.is_empty() {
@@ -199,6 +188,7 @@ fn service_proceed<
     A: AppState,
 >(
     service: &mut S,
+    since_start: Duration,
     client_connections: &HashMap<ClientId, Connection>,
     replica_connections: &HashMap<ReplicaIndex, Connection>,
     tracker: &TaskTracker,
@@ -208,7 +198,7 @@ where
     R::Send: ReplicationSend,
 {
     loop {
-        match service.proceed() {
+        match service.proceed(since_start) {
             Proceed::Pending(tick_after) => break Ok(tick_after),
             Proceed::Send(ServiceSend::Reply(client_id, reply)) => {
                 let Some(connection) = client_connections.get(&client_id) else {

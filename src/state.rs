@@ -3,12 +3,10 @@ use std::{collections::VecDeque, time::Duration};
 pub trait State {
     type Send;
     type Output;
-    fn proceed(&mut self) -> Proceed<Self::Send, Self::Output>;
+    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output>;
 
     type Message;
     fn receive(&mut self, msg: Self::Message);
-
-    fn tick(&mut self, elapsed: Duration);
 }
 
 pub enum Never {}
@@ -42,7 +40,7 @@ impl<A: AppState> From<A> for AdaptedApp<A> {
 impl<A: AppState> State for AdaptedApp<A> {
     type Send = Never;
     type Output = A::Res;
-    fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         match self.results.pop_front() {
             Some(res) => Proceed::Output(res),
             None => Proceed::Pending(None),
@@ -54,6 +52,4 @@ impl<A: AppState> State for AdaptedApp<A> {
         let res = self.app.update(msg);
         self.results.push_back(res);
     }
-
-    fn tick(&mut self, _elapsed: Duration) {}
 }

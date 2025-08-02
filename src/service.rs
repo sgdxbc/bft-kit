@@ -5,7 +5,7 @@ use crate::state::{AppState, Never, Proceed, State};
 pub mod transport;
 
 // id is randomly assigned while index is continuously assigned
-// index is statically assigned while sequence is monotonically increasing
+// index is statically assigned while sequence monotonically increases
 
 pub type ClientId = u32;
 pub type ClientSeq = u64;
@@ -67,11 +67,11 @@ where
 {
     type Send = ServiceSend<R, A>;
     type Output = Never;
-    fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some((client_id, reply)) = self.send_buffer.pop() {
             return Proceed::Send(ServiceSend::Reply(client_id, reply));
         }
-        match self.replication.proceed() {
+        match self.replication.proceed(since_start) {
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
             Proceed::Send(send) => Proceed::Send(ServiceSend::Replication(send)),
             Proceed::Output(output) => {
@@ -84,7 +84,7 @@ where
                     self.replies.insert(request.client_id, reply.clone());
                     self.send_buffer.push((request.client_id, reply))
                 }
-                self.proceed()
+                self.proceed(since_start)
             }
         }
     }
@@ -105,9 +105,5 @@ where
             }
             _ => self.replication.submit(request),
         }
-    }
-
-    fn tick(&mut self, elapsed: Duration) {
-        self.replication.tick(elapsed)
     }
 }
