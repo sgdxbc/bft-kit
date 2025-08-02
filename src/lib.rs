@@ -1,5 +1,6 @@
 pub mod app;
 pub mod crypto;
+pub mod parse;
 pub mod service;
 pub mod state;
 pub mod transport;
