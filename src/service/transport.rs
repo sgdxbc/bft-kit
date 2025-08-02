@@ -82,7 +82,6 @@ where
         Closed(ClientId),
         ReplicationMessage(Vec<u8>),
         Tick,
-        Cancel,
     }
     let (event_sender, mut event_receiver) = mpsc::channel(1000);
     for connection in replica_connections.values() {
@@ -119,7 +118,7 @@ where
             Some(incoming) = endpoint.accept() => Event::Accept(incoming.into()),
             Some(event) = event_receiver.recv() => event,
             () = tick => Event::Tick,
-            () = cancel.cancelled() => Event::Cancel,
+            () = cancel.cancelled() => break,
         } {
             Event::Accept(incoming) => {
                 let connection = (*incoming).await?;
@@ -158,7 +157,6 @@ where
                 service.receive(ServiceMessage::Replication(message))
             }
             Event::Tick => {}
-            Event::Cancel => break,
         }
         tick_after = service_proceed(
             &mut service,
@@ -213,7 +211,9 @@ where
                     ),
                 ));
             }
-            Proceed::Send(ServiceSend::Replication(send)) => send.apply(replica_connections),
+            Proceed::Send(ServiceSend::Replication(send)) => {
+                send.apply(replica_connections, tracker)
+            }
         }
     }
 }

@@ -10,7 +10,7 @@ use crate::{
     state::{Proceed, State},
 };
 
-// pub mod transport;
+pub mod transport;
 
 pub trait ClientState<Op>: State {
     fn submit(&mut self, op: Op, at: Duration) -> ClientSeq;

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use quinn::{Connection, ConnectionError};
 use tokio::sync::mpsc;
+use tokio_util::task::TaskTracker;
 
 use crate::{service::ReplicaIndex, state::Never};
 
@@ -47,12 +48,32 @@ pub async fn trace_error<T>(label: &str, task: impl Future<Output = anyhow::Resu
     }
 }
 
+pub trait ReplicaConnections {
+    fn get(&self, index: ReplicaIndex) -> Option<&Connection>;
+}
+
+impl ReplicaConnections for HashMap<ReplicaIndex, Connection> {
+    fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
+        self.get(&index)
+    }
+}
+
+impl ReplicaConnections for [Connection] {
+    fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
+        self.get(index as usize)
+    }
+}
+
 pub trait ReplicationSend {
-    fn apply(self, replica_connections: &HashMap<ReplicaIndex, Connection>);
+    fn apply(self, replica_connections: &(impl ReplicaConnections + ?Sized), tracker: &TaskTracker);
 }
 
 impl ReplicationSend for Never {
-    fn apply(self, _replica_connections: &HashMap<ReplicaIndex, Connection>) {
+    fn apply(
+        self,
+        _replica_connections: &(impl ReplicaConnections + ?Sized),
+        _tracker: &TaskTracker,
+    ) {
         unreachable!()
     }
 }

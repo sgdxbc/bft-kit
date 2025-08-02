@@ -1,27 +1,32 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use bincode::Decode;
-use hdrhistogram::Histogram;
-use quinn::Endpoint;
-use tokio::select;
-use tokio_util::task::TaskTracker;
+use quinn::{Connection, Endpoint};
+use tokio::{
+    select,
+    time::{Instant, sleep},
+};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     crypto::cert::quinn::client_config,
     service::ClientId,
-    state::{AppState, State},
-    transport::{BINCODE_CONFIG, read_loop, trace_error},
+    state::{AppState, Proceed, State},
+    transport::{BINCODE_CONFIG, ReplicationSend, read_loop, trace_error},
+    workload::Latencies,
 };
 
-pub async fn run_worker<S: State<Output = Histogram<u64>>, A: AppState>(
+pub async fn run_worker<S: State<Output = anyhow::Result<()>> + Into<Latencies>, A: AppState>(
     mut worker: S,
     client_id: ClientId,
     addrs: Vec<SocketAddr>,
-) -> anyhow::Result<Histogram<u64>>
+    cancel: CancellationToken,
+) -> anyhow::Result<Latencies>
 where
     S::Message: Decode<()>,
+    S::Send: ReplicationSend,
 {
-    let endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
+    let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(client_config());
 
     let mut connections = Vec::new();
@@ -52,18 +57,47 @@ where
         connections.push(connection)
     }
 
-    loop {
+    let start = Instant::now();
+    let mut option_tick_at = worker_proceed(&mut worker, start.elapsed(), &connections, &tracker)?;
+    while let Some(tick_at) = option_tick_at {
         match select! {
             Some(event) = event_receiver.recv() => event,
+            () = sleep(tick_at) => Event::Tick,
+            () = cancel.cancelled() => break,
         } {
             Event::Message(bytes) => {
                 let (message, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                 anyhow::ensure!(len == bytes.len());
-                worker.receive(message);
+                worker.receive(message)
             }
             Event::Tick => {}
         }
+        option_tick_at = worker_proceed(&mut worker, start.elapsed(), &connections, &tracker)?
     }
 
-    Ok(())
+    Ok(worker.into())
+}
+
+fn worker_proceed<S: State<Output = anyhow::Result<()>>>(
+    worker: &mut S,
+    since_start: Duration,
+    connections: &[Connection],
+    tracker: &TaskTracker,
+) -> anyhow::Result<Option<Duration>>
+where
+    S::Send: ReplicationSend,
+{
+    loop {
+        match worker.proceed(since_start) {
+            Proceed::Pending(tick_after) => {
+                anyhow::ensure!(tick_after.is_some(), "workload halted without output");
+                return Ok(tick_after);
+            }
+            Proceed::Send(send) => send.apply(connections, tracker),
+            Proceed::Output(output) => {
+                output?;
+                return Ok(None);
+            }
+        }
+    }
 }
