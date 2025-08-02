@@ -24,6 +24,8 @@ pub fn init_logging() {
     tracing_subscriber::fmt()
         .with_max_level(LevelFilter::TRACE)
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+        .with_file(true)
+        .with_line_number(true)
         .finish()
         // https://docs.rs/tracing-subscriber/latest/src/tracing_subscriber/fmt/mod.rs.html#1200
         .with(match env::var("RUST_LOG") {

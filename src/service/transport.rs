@@ -18,7 +18,7 @@ use crate::{
     },
     state::{AppState, Never, Proceed, State},
     transport::{
-        BINCODE_CONFIG, ReplicaConnections, ReplicationSend, read_loop, run_write, trace_error,
+        BINCODE_CONFIG, ReplicaTable, ReplicationSend, read_loop, run_write, trace_error,
     },
 };
 
@@ -227,8 +227,12 @@ where
     }
 }
 
-impl ReplicaConnections for HashMap<ReplicaIndex, (Connection, JoinHandle<()>)> {
+impl ReplicaTable for HashMap<ReplicaIndex, (Connection, JoinHandle<()>)> {
     fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
         self.get(&index).map(|(connection, _)| connection)
+    }
+
+    fn get_all(&self) -> impl Iterator<Item = &Connection> {
+        self.values().map(|(connection, _)| connection)
     }
 }

@@ -3,7 +3,10 @@ use quinn::{Connection, ConnectionError};
 use tokio::sync::mpsc;
 use tokio_util::task::TaskTracker;
 
-use crate::{service::ReplicaIndex, state::Never};
+use crate::{
+    service::{ReplicaIndex, ReplicationRecipient},
+    state::Never,
+};
 
 pub const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
@@ -47,20 +50,26 @@ pub async fn trace_error<T>(label: &str, task: impl Future<Output = anyhow::Resu
     }
 }
 
-pub trait ReplicaConnections {
+pub trait ReplicaTable {
     fn get(&self, index: ReplicaIndex) -> Option<&Connection>;
+
+    fn get_all(&self) -> impl Iterator<Item = &Connection>;
 }
 
-impl ReplicaConnections for [Connection] {
+impl ReplicaTable for [Connection] {
     fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
         self.get(index as usize)
+    }
+
+    fn get_all(&self) -> impl Iterator<Item = &Connection> {
+        self.iter()
     }
 }
 
 pub trait ReplicationSend {
     fn apply(
         self,
-        replica_connections: &(impl ReplicaConnections + ?Sized),
+        replica_connections: &(impl ReplicaTable + ?Sized),
         tracker: &TaskTracker,
     ) -> anyhow::Result<()>;
 }
@@ -68,7 +77,7 @@ pub trait ReplicationSend {
 impl ReplicationSend for Never {
     fn apply(
         self,
-        _replica_connections: &(impl ReplicaConnections + ?Sized),
+        _replica_connections: &(impl ReplicaTable + ?Sized),
         _tracker: &TaskTracker,
     ) -> anyhow::Result<()> {
         unreachable!()
@@ -78,7 +87,7 @@ impl ReplicationSend for Never {
 impl<M: Encode> ReplicationSend for (ReplicaIndex, M) {
     fn apply(
         self,
-        replica_connections: &(impl ReplicaConnections + ?Sized),
+        replica_connections: &(impl ReplicaTable + ?Sized),
         tracker: &TaskTracker,
     ) -> anyhow::Result<()> {
         let (index, message) = self;
@@ -92,6 +101,31 @@ impl<M: Encode> ReplicationSend for (ReplicaIndex, M) {
                 bincode::encode_to_vec(message, BINCODE_CONFIG)?,
             ),
         ));
+        Ok(())
+    }
+}
+
+impl<M: Encode> ReplicationSend for (ReplicationRecipient, M) {
+    fn apply(
+        self,
+        replica_connections: &(impl ReplicaTable + ?Sized),
+        tracker: &TaskTracker,
+    ) -> anyhow::Result<()> {
+        let (recipient, message) = self;
+        match recipient {
+            ReplicationRecipient::Index(index) => {
+                (index, message).apply(replica_connections, tracker)?
+            }
+            ReplicationRecipient::All => {
+                let bytes = bincode::encode_to_vec(message, BINCODE_CONFIG)?;
+                for connection in replica_connections.get_all() {
+                    tracker.spawn(trace_error(
+                        "replica connection write",
+                        run_write(connection.clone(), bytes.clone()),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }
