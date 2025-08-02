@@ -5,7 +5,7 @@ use crate::{
         ClientId, ClientSeq, ReplicaIndex, ReplicationOutput, ReplicationState, Reply, Request,
     },
     state::{AppState, Never, Proceed, State},
-    worker::ClientState,
+    workload::ClientState,
 };
 
 pub struct Client<A: AppState> {

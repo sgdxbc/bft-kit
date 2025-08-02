@@ -5,7 +5,7 @@ pub mod service;
 pub mod state;
 pub mod transport;
 pub mod unreplicated;
-pub mod worker;
+pub mod workload;
 
 // similar to tracing_subscriber::fmt::init() but reports spans
 // why init() defaults to not report spans? i don't understand

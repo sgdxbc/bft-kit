@@ -182,34 +182,30 @@ where
     }
 }
 
-pub mod workload {
-    use super::*;
+pub struct Take<W> {
+    workload: W,
+    count: usize,
+}
 
-    pub struct Take<W> {
-        workload: W,
-        count: usize,
+impl<W> Take<W> {
+    pub fn new(workload: W, count: usize) -> Self {
+        Self { workload, count }
+    }
+}
+
+impl<W: WorkloadState> WorkloadState for Take<W> {
+    type Op = W::Op;
+    type Res = W::Res;
+
+    fn next_op(&mut self) -> Option<Self::Op> {
+        if self.count == 0 {
+            return None;
+        }
+        self.count -= 1;
+        self.workload.next_op()
     }
 
-    impl<W: WorkloadState> Take<W> {
-        pub fn new(workload: W, count: usize) -> Self {
-            Self { workload, count }
-        }
-    }
-
-    impl<W: WorkloadState> WorkloadState for Take<W> {
-        type Op = W::Op;
-        type Res = W::Res;
-
-        fn next_op(&mut self) -> Option<Self::Op> {
-            if self.count == 0 {
-                return None;
-            }
-            self.count -= 1;
-            self.workload.next_op()
-        }
-
-        fn validate(&self, op: Self::Op, res: Self::Res) -> anyhow::Result<()> {
-            self.workload.validate(op, res)
-        }
+    fn validate(&self, op: Self::Op, res: Self::Res) -> anyhow::Result<()> {
+        self.workload.validate(op, res)
     }
 }

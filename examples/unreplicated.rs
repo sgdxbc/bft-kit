@@ -6,7 +6,7 @@ use bft_kit::{
     parse::Settings,
     service::{Service, transport::run_replicated_service},
     unreplicated::{Client, Replica},
-    worker::{CloseLoopWorker, transport::run_worker, workload},
+    workload::{self, CloseLoopWorker, transport::run_worker},
 };
 use tokio::spawn;
 use tokio_util::sync::CancellationToken;

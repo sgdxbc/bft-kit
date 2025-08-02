@@ -13,7 +13,7 @@ use crate::{
     service::ClientId,
     state::{Proceed, State},
     transport::{BINCODE_CONFIG, ReplicationSend, read_loop, trace_error},
-    worker::Latencies,
+    workload::Latencies,
 };
 
 pub async fn run_worker<S: State<Output = anyhow::Result<()>> + Into<Latencies>>(
