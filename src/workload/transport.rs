@@ -3,7 +3,7 @@ use std::{net::SocketAddr, time::Duration};
 use bincode::Decode;
 use quinn::{Connection, Endpoint};
 use tokio::{
-    select,
+    select, spawn,
     time::{Instant, sleep},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -29,15 +29,14 @@ where
     let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(client_config());
 
-    let mut connections = Vec::new();
-    let tracker = TaskTracker::new();
-
     enum Event {
         Message(Vec<u8>),
         Tick,
     }
     let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(100);
 
+    let mut connections = Vec::new();
+    let mut read_tasks = Vec::new();
     for addr in addrs {
         let connection = endpoint.connect(addr, "server.example")?.await?;
         connection
@@ -45,7 +44,7 @@ where
             .await?
             .write_all(&client_id.to_le_bytes())
             .await?;
-        tracker.spawn(trace_error(
+        let task = spawn(trace_error(
             "connection read",
             read_loop(
                 connection.clone(),
@@ -54,11 +53,14 @@ where
                 None,
             ),
         ));
-        connections.push(connection)
+        connections.push(connection);
+        read_tasks.push(task)
     }
 
+    let write_tracker = TaskTracker::new();
     let start = Instant::now();
-    let mut option_tick_at = worker_proceed(&mut worker, start.elapsed(), &connections, &tracker)?;
+    let mut option_tick_at =
+        worker_proceed(&mut worker, start.elapsed(), &connections, &write_tracker)?;
     while let Some(tick_at) = option_tick_at {
         match select! {
             Some(event) = event_receiver.recv() => event,
@@ -72,9 +74,13 @@ where
             }
             Event::Tick => {}
         }
-        option_tick_at = worker_proceed(&mut worker, start.elapsed(), &connections, &tracker)?
+        option_tick_at = worker_proceed(&mut worker, start.elapsed(), &connections, &write_tracker)?
     }
 
+    for (connection, task) in connections.into_iter().zip(read_tasks) {
+        connection.close(0u32.into(), b"worker stopped");
+        task.await.unwrap() // not cancelled anywhere and propagate panics
+    }
     Ok(worker.into())
 }
 
@@ -82,7 +88,7 @@ fn worker_proceed<S: State<Output = anyhow::Result<()>>>(
     worker: &mut S,
     since_start: Duration,
     connections: &[Connection],
-    tracker: &TaskTracker,
+    write_tracker: &TaskTracker,
 ) -> anyhow::Result<Option<Duration>>
 where
     S::Send: ReplicationSend,
@@ -93,7 +99,7 @@ where
                 anyhow::ensure!(tick_after.is_some(), "workload halted without output");
                 return Ok(tick_after);
             }
-            Proceed::Send(send) => send.apply(connections, tracker),
+            Proceed::Send(send) => send.apply(connections, write_tracker)?,
             Proceed::Output(output) => {
                 output?;
                 return Ok(None);

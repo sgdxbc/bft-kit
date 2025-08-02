@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use bincode::Encode;
 use quinn::{Connection, ConnectionError};
 use tokio::sync::mpsc;
 use tokio_util::task::TaskTracker;
@@ -52,12 +51,6 @@ pub trait ReplicaConnections {
     fn get(&self, index: ReplicaIndex) -> Option<&Connection>;
 }
 
-impl ReplicaConnections for HashMap<ReplicaIndex, Connection> {
-    fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
-        self.get(&index)
-    }
-}
-
 impl ReplicaConnections for [Connection] {
     fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
         self.get(index as usize)
@@ -65,7 +58,11 @@ impl ReplicaConnections for [Connection] {
 }
 
 pub trait ReplicationSend {
-    fn apply(self, replica_connections: &(impl ReplicaConnections + ?Sized), tracker: &TaskTracker);
+    fn apply(
+        self,
+        replica_connections: &(impl ReplicaConnections + ?Sized),
+        tracker: &TaskTracker,
+    ) -> anyhow::Result<()>;
 }
 
 impl ReplicationSend for Never {
@@ -73,7 +70,28 @@ impl ReplicationSend for Never {
         self,
         _replica_connections: &(impl ReplicaConnections + ?Sized),
         _tracker: &TaskTracker,
-    ) {
+    ) -> anyhow::Result<()> {
         unreachable!()
+    }
+}
+
+impl<M: Encode> ReplicationSend for (ReplicaIndex, M) {
+    fn apply(
+        self,
+        replica_connections: &(impl ReplicaConnections + ?Sized),
+        tracker: &TaskTracker,
+    ) -> anyhow::Result<()> {
+        let (index, message) = self;
+        let Some(connection) = replica_connections.get(index) else {
+            anyhow::bail!("unknown replica index {index}");
+        };
+        tracker.spawn(trace_error(
+            "replica connection write",
+            run_write(
+                connection.clone(),
+                bincode::encode_to_vec(message, BINCODE_CONFIG)?,
+            ),
+        ));
+        Ok(())
     }
 }

@@ -3,8 +3,9 @@ use std::{collections::HashMap, future::pending, net::SocketAddr, sync::Mutex, t
 use bincode::{Decode, Encode};
 use quinn::{Connection, Endpoint, Incoming};
 use tokio::{
-    select,
+    select, spawn,
     sync::mpsc,
+    task::JoinHandle,
     time::{Instant, sleep},
     try_join,
 };
@@ -16,7 +17,9 @@ use crate::{
         ClientId, ReplicaIndex, ReplicationState, Reply, Request, ServiceMessage, ServiceSend,
     },
     state::{AppState, Never, Proceed, State},
-    transport::{BINCODE_CONFIG, ReplicationSend, read_loop, run_write, trace_error},
+    transport::{
+        BINCODE_CONFIG, ReplicaConnections, ReplicationSend, read_loop, run_write, trace_error,
+    },
 };
 
 pub async fn run_replicated_service<
@@ -37,6 +40,7 @@ where
 {
     let mut endpoint = Endpoint::server(server_config(), addrs[replica_index as usize])?;
     endpoint.set_default_client_config(client_config());
+
     let connections = Mutex::new(HashMap::new());
     let active = async {
         for (index, &addr) in addrs.iter().enumerate().skip(replica_index as usize + 1) {
@@ -71,10 +75,8 @@ where
         anyhow::Ok(())
     };
     try_join!(active, passive)?;
-    let replica_connections = connections.into_inner().unwrap();
-    anyhow::ensure!(replica_connections.len() == addrs.len() - 1);
-
-    let tracker = TaskTracker::new();
+    let connections = connections.into_inner().unwrap();
+    anyhow::ensure!(connections.len() == addrs.len() - 1);
 
     enum Event {
         Accept(Box<Incoming>),
@@ -84,8 +86,10 @@ where
         Tick,
     }
     let (event_sender, mut event_receiver) = mpsc::channel(1000);
-    for connection in replica_connections.values() {
-        tracker.spawn(trace_error(
+
+    let mut replica_table = HashMap::new();
+    for (index, connection) in connections {
+        let task = spawn(trace_error(
             "replica connection read",
             read_loop(
                 connection.clone(),
@@ -94,17 +98,19 @@ where
                 None,
             ),
         ));
+        replica_table.insert(index, (connection, task));
     }
 
-    let mut client_connections = HashMap::new();
+    let mut client_table = HashMap::new();
+    let write_tracker = TaskTracker::new();
 
     let start = Instant::now();
     let mut tick_after = service_proceed(
         &mut service,
         start.elapsed(),
-        &client_connections,
-        &replica_connections,
-        &tracker,
+        &client_table,
+        &replica_table,
+        &write_tracker,
     )?;
     loop {
         let tick = async {
@@ -130,7 +136,7 @@ where
                     .await?;
                 let client_id = ClientId::from_le_bytes(client_id);
 
-                tracker.spawn(trace_error(
+                let task = spawn(trace_error(
                     "connection read",
                     read_loop(
                         connection.clone(),
@@ -139,11 +145,11 @@ where
                         Event::Closed(client_id),
                     ),
                 ));
-                client_connections.insert(client_id, connection);
+                client_table.insert(client_id, (connection, task));
                 continue;
             }
             Event::Closed(client_id) => {
-                client_connections.remove(&client_id);
+                client_table.remove(&client_id);
                 continue;
             }
             Event::Message(bytes) => {
@@ -161,22 +167,25 @@ where
         tick_after = service_proceed(
             &mut service,
             start.elapsed(),
-            &client_connections,
-            &replica_connections,
-            &tracker,
+            &client_table,
+            &replica_table,
+            &write_tracker,
         )?
     }
-    tracker.close();
-    if !client_connections.is_empty() {
+
+    write_tracker.close();
+    write_tracker.wait().await;
+    if !client_table.is_empty() {
         tracing::warn!("shut down with open client connections")
     }
-    for connection in client_connections.values() {
-        connection.close(0u32.into(), b"service shutting down")
+    for (connection, task) in client_table.into_values() {
+        connection.close(0u32.into(), b"service shutting down");
+        task.await.unwrap() // not cancelled anywhere and propagate panics
     }
-    for connection in replica_connections.values() {
-        connection.close(0u32.into(), b"service shutting down")
+    for (connection, task) in replica_table.into_values() {
+        connection.close(0u32.into(), b"service shutting down");
+        task.await.unwrap() // not cancelled anywhere and propagate panics
     }
-    tracker.wait().await;
     Ok(())
 }
 
@@ -187,9 +196,9 @@ fn service_proceed<
 >(
     service: &mut S,
     since_start: Duration,
-    client_connections: &HashMap<ClientId, Connection>,
-    replica_connections: &HashMap<ReplicaIndex, Connection>,
-    tracker: &TaskTracker,
+    client_table: &HashMap<ClientId, (Connection, JoinHandle<()>)>,
+    replica_table: &HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
+    write_tracker: &TaskTracker,
 ) -> anyhow::Result<Option<Duration>>
 where
     Reply<A::Res, R::Metadata>: Encode,
@@ -199,11 +208,11 @@ where
         match service.proceed(since_start) {
             Proceed::Pending(tick_after) => break Ok(tick_after),
             Proceed::Send(ServiceSend::Reply(client_id, reply)) => {
-                let Some(connection) = client_connections.get(&client_id) else {
+                let Some((connection, _)) = client_table.get(&client_id) else {
                     tracing::warn!(%client_id, "client connection not found");
                     continue;
                 };
-                tracker.spawn(trace_error(
+                write_tracker.spawn(trace_error(
                     "connection write",
                     run_write(
                         connection.clone(),
@@ -212,8 +221,14 @@ where
                 ));
             }
             Proceed::Send(ServiceSend::Replication(send)) => {
-                send.apply(replica_connections, tracker)
+                send.apply(replica_table, write_tracker)?
             }
         }
+    }
+}
+
+impl ReplicaConnections for HashMap<ReplicaIndex, (Connection, JoinHandle<()>)> {
+    fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
+        self.get(&index).map(|(connection, _)| connection)
     }
 }

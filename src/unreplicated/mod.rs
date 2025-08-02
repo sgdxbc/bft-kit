@@ -1,7 +1,9 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    service::{ClientId, ClientSeq, ReplicationOutput, ReplicationState, Reply, Request},
+    service::{
+        ClientId, ClientSeq, ReplicaIndex, ReplicationOutput, ReplicationState, Reply, Request,
+    },
     state::{AppState, Never, Proceed, State},
     workload::ClientState,
 };
@@ -62,14 +64,14 @@ where
 }
 
 impl<A: AppState> State for Client<A> {
-    type Send = Request<A::Op>;
+    type Send = (ReplicaIndex, Request<A::Op>);
     type Output = (ClientSeq, A::Res);
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(output) = self.output_buffer.pop() {
             return Proceed::Output(output);
         }
         if let Some(req) = self.send_buffer.pop() {
-            return Proceed::Send(req);
+            return Proceed::Send((0, req));
         }
         loop {
             let Some((&seq, submit)) = self.submits.first_key_value() else {
