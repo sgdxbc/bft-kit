@@ -10,6 +10,8 @@ use crate::{
     state::{Proceed, State},
 };
 
+// pub mod transport;
+
 pub trait ClientState<Op>: State {
     fn submit(&mut self, op: Op) -> ClientSeq;
 }
@@ -19,7 +21,6 @@ pub trait Workload {
     type Res;
 
     fn next_op(&mut self) -> Option<Self::Op>;
-    fn completed(&self) -> bool;
 
     fn validate(&self, op: Self::Op, res: Self::Res) -> anyhow::Result<()>;
 }
@@ -116,9 +117,6 @@ where
     type Output = Histogram<u64>;
 
     fn proceed(&mut self) -> Proceed<Self::Send, Self::Output> {
-        if self.submitted.is_empty() && self.workload.completed() {
-            return Proceed::Output(self.latencies.clone());
-        }
         let until_next_submit = self.next_submit.saturating_duration_since(Instant::now());
         match self.client.proceed() {
             Proceed::Pending(None) => Proceed::Pending(Some(until_next_submit)),
@@ -154,32 +152,5 @@ where
             }
             self.next_submit += Duration::from_secs_f32(1. / self.target_tput)
         }
-    }
-}
-
-pub struct TimeLimited<W> {
-    workload: W,
-    start: Instant,
-    duration: Duration,
-}
-
-impl<W: Workload> Workload for TimeLimited<W> {
-    type Op = W::Op;
-    type Res = W::Res;
-
-    fn next_op(&mut self) -> Option<Self::Op> {
-        if self.start.elapsed() < self.duration {
-            self.workload.next_op()
-        } else {
-            None
-        }
-    }
-
-    fn completed(&self) -> bool {
-        self.start.elapsed() >= self.duration
-    }
-
-    fn validate(&self, op: Self::Op, res: Self::Res) -> anyhow::Result<()> {
-        self.workload.validate(op, res)
     }
 }

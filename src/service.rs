@@ -39,7 +39,7 @@ pub trait ReplicationState<Op>: State<Output = ReplicationOutput<Op, Self::Metad
 
 pub enum ReplicationRecipient {
     All,
-    Replica(ReplicaIndex),
+    Index(ReplicaIndex),
 }
 
 pub struct Service<R: ReplicationState<A::Op>, A: AppState> {

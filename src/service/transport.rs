@@ -1,7 +1,7 @@
 use std::{collections::HashMap, future::pending, net::SocketAddr, sync::Mutex, time::Duration};
 
 use bincode::{Decode, Encode};
-use quinn::{Connection, ConnectionError, Endpoint, Incoming};
+use quinn::{Connection, Endpoint, Incoming};
 use tokio::{
     select,
     sync::mpsc,
@@ -16,18 +16,13 @@ use crate::{
         ClientId, ReplicaIndex, ReplicationState, Reply, Request, ServiceMessage, ServiceSend,
     },
     state::{AppState, Never, Proceed, State},
+    transport::{BINCODE_CONFIG, ReplicationSend, read_loop, run_write, trace_error},
 };
 
-const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
-
-pub trait ReplicationSend {
-    fn apply(self, replica_connections: &HashMap<ReplicaIndex, Connection>);
-}
-
 pub async fn run_replicated_service<
+    S: State<Send = ServiceSend<R, A>, Output = Never, Message = ServiceMessage<R, A>>,
     R: ReplicationState<A::Op>,
     A: AppState,
-    S: State<Send = ServiceSend<R, A>, Output = Never, Message = ServiceMessage<R, A>>,
 >(
     mut service: S,
     replica_index: ReplicaIndex,
@@ -104,7 +99,6 @@ where
 
     let mut client_connections = HashMap::new();
 
-    service.tick(Duration::ZERO);
     let mut last_tick = Instant::now();
     let mut tick_after = service_proceed(
         &mut service,
@@ -200,9 +194,9 @@ where
 }
 
 fn service_proceed<
+    S: State<Send = ServiceSend<R, A>, Output = Never, Message = ServiceMessage<R, A>>,
     R: ReplicationState<A::Op>,
     A: AppState,
-    S: State<Send = ServiceSend<R, A>, Output = Never, Message = ServiceMessage<R, A>>,
 >(
     service: &mut S,
     client_connections: &HashMap<ClientId, Connection>,
@@ -231,51 +225,5 @@ where
             }
             Proceed::Send(ServiceSend::Replication(send)) => send.apply(replica_connections),
         }
-    }
-}
-
-async fn read_loop<E: Send + Sync + 'static>(
-    connection: Connection,
-    event_sender: mpsc::Sender<E>,
-    into_event: impl Fn(Vec<u8>) -> E,
-    close_event: impl Into<Option<E>>,
-) -> anyhow::Result<()> {
-    loop {
-        let mut stream = match connection.accept_uni().await {
-            Ok(stream) => stream,
-            Err(ConnectionError::LocallyClosed | ConnectionError::ApplicationClosed(_)) => break,
-            Err(err) => Err(err)?,
-        };
-        let message = stream.read_to_end(1 << 16).await?;
-        if event_sender.capacity() == 0 {
-            tracing::warn!("message channel congested")
-        }
-        event_sender
-            .send(into_event(message))
-            .await
-            .map_err(|_| anyhow::format_err!("message channel closed, stopping"))?
-    }
-    if let Some(close_event) = close_event.into() {
-        event_sender.send(close_event).await?
-    } else {
-        tracing::debug!("connection closed without close event")
-    }
-    Ok(())
-}
-
-async fn run_write(connection: Connection, message: Vec<u8>) -> anyhow::Result<()> {
-    connection.open_uni().await?.write_all(&message).await?;
-    Ok(())
-}
-
-async fn trace_error<T>(label: &str, task: impl Future<Output = anyhow::Result<T>>) {
-    if let Err(err) = task.await {
-        tracing::error!(%label, %err)
-    }
-}
-
-impl ReplicationSend for Never {
-    fn apply(self, _replica_connections: &HashMap<ReplicaIndex, Connection>) {
-        unreachable!()
     }
 }
