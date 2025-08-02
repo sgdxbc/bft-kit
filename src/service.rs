@@ -1,5 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
+use bincode::{Decode, Encode};
+
 use crate::state::{AppState, Never, Proceed, State};
 
 pub mod transport;
@@ -12,14 +14,14 @@ pub type ClientSeq = u64;
 
 pub type ReplicaIndex = u16;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct Request<Op> {
     pub client_id: ClientId,
     pub seq: ClientSeq,
     pub op: Op,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct Reply<Res, M> {
     pub seq: ClientSeq,
     pub res: Res,
@@ -48,6 +50,17 @@ pub struct Service<R: ReplicationState<A::Op>, A: AppState> {
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     #[allow(clippy::type_complexity)]
     send_buffer: Vec<(ClientId, Reply<A::Res, R::Metadata>)>,
+}
+
+impl<R: ReplicationState<A::Op>, A: AppState> Service<R, A> {
+    pub fn new(replication: R, app: A) -> Self {
+        Self {
+            replication,
+            app,
+            replies: Default::default(),
+            send_buffer: Default::default(),
+        }
+    }
 }
 
 pub enum ServiceSend<R: ReplicationState<A::Op>, A: AppState> {

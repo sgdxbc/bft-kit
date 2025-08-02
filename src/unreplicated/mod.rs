@@ -5,7 +5,7 @@ use crate::{
         ClientId, ClientSeq, ReplicaIndex, ReplicationOutput, ReplicationState, Reply, Request,
     },
     state::{AppState, Never, Proceed, State},
-    workload::ClientState,
+    worker::ClientState,
 };
 
 pub struct Client<A: AppState> {
@@ -98,6 +98,20 @@ pub struct Replica<A: AppState> {
     output_buffer: Vec<ReplicationOutput<A::Op, ()>>,
 }
 
+impl<A: AppState> Default for Replica<A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<A: AppState> Replica<A> {
+    pub fn new() -> Self {
+        Self {
+            output_buffer: Default::default(),
+        }
+    }
+}
+
 impl<A: AppState> ReplicationState<A::Op> for Replica<A> {
     type Metadata = ();
 
@@ -122,5 +136,19 @@ impl<A: AppState> State for Replica<A> {
     type Message = Never;
     fn receive(&mut self, _message: Self::Message) {
         unreachable!()
+    }
+}
+
+mod parse {
+    use std::time::Duration;
+
+    use crate::parse::{Extract, Settings};
+
+    impl Extract for super::ClientConfig {
+        fn extract(settings: &Settings) -> anyhow::Result<Self> {
+            Ok(Self {
+                timeout: Duration::from_secs_f32(settings.get("client.timeout")?),
+            })
+        }
     }
 }

@@ -1,5 +1,7 @@
 use std::{collections::VecDeque, time::Duration};
 
+use bincode::{Decode, Encode};
+
 pub trait State {
     type Send;
     type Output;
@@ -9,6 +11,7 @@ pub trait State {
     fn receive(&mut self, msg: Self::Message);
 }
 
+#[derive(Debug, Encode, Decode)]
 pub enum Never {}
 
 pub enum Proceed<S, O = Never> {

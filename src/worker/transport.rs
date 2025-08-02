@@ -11,12 +11,12 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::{
     crypto::cert::quinn::client_config,
     service::ClientId,
-    state::{AppState, Proceed, State},
+    state::{Proceed, State},
     transport::{BINCODE_CONFIG, ReplicationSend, read_loop, trace_error},
-    workload::Latencies,
+    worker::Latencies,
 };
 
-pub async fn run_worker<S: State<Output = anyhow::Result<()>> + Into<Latencies>, A: AppState>(
+pub async fn run_worker<S: State<Output = anyhow::Result<()>> + Into<Latencies>>(
     mut worker: S,
     client_id: ClientId,
     addrs: Vec<SocketAddr>,
