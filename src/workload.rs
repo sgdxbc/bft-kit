@@ -68,7 +68,12 @@ where
             self.submitted = Some((Instant::now(), op))
         }
         match self.client.proceed(since_start) {
-            Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
+            Proceed::Pending(tick_after) => {
+                if tick_after.is_none() {
+                    tracing::warn!("liveness issue detected in close loop worker")
+                }
+                Proceed::Pending(tick_after)
+            }
             Proceed::Send(send) => Proceed::Send(send),
             Proceed::Output((_, res)) => {
                 let Some((start, op)) = self.submitted.take() else {
