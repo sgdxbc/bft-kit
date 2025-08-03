@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
     match args().nth(1).as_deref() {
         Some("workload") => worker().await,
         Some("service") => service().await,
-        _ => anyhow::bail!("Usage: bk [workload|service]"),
+        _ => anyhow::bail!("Usage: bftk [workload|service]"),
     }
 }
 
