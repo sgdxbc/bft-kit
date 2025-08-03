@@ -18,6 +18,7 @@
         "hotstuff",
         "keccak",
         "libhotstuff",
+        "nanos",
         "newtype",
         "newtypes",
         "Niko",

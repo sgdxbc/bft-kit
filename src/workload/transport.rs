@@ -10,9 +10,9 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     crypto::cert::quinn::client_config,
-    service::ClientId,
+    service::{ClientId, ReplicaIndex},
     state::{Proceed, State},
-    transport::{BINCODE_CONFIG, ReplicationSend, read_loop, trace_error},
+    transport::{BINCODE_CONFIG, ReplicaTable, ReplicationSend, read_loop, trace_error},
     workload::Latencies,
 };
 
@@ -105,5 +105,15 @@ where
                 return Ok(None);
             }
         }
+    }
+}
+
+impl ReplicaTable for [Connection] {
+    fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
+        self.get(index as usize)
+    }
+
+    fn get_all(&self) -> impl Iterator<Item = &Connection> {
+        self.iter()
     }
 }

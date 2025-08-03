@@ -1,6 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use bincode::{Decode, Encode};
+use derive_where::derive_where;
 
 use crate::state::{AppState, Never, Proceed, State};
 
@@ -68,6 +69,7 @@ pub enum ServiceSend<R: ReplicationState<A::Op>, A: AppState> {
     Replication(R::Send),
 }
 
+#[derive_where(Debug; A::Op, R::Message)]
 pub enum ServiceMessage<R: ReplicationState<A::Op>, A: AppState> {
     Request(Request<A::Op>),
     Replication(R::Message),
@@ -77,6 +79,7 @@ impl<R: ReplicationState<A::Op>, A: AppState> State for Service<R, A>
 where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
+    // ServiceMessage<R, A>: std::fmt::Debug,
 {
     type Send = ServiceSend<R, A>;
     type Output = Never;
@@ -104,15 +107,13 @@ where
 
     type Message = ServiceMessage<R, A>;
     fn receive(&mut self, message: Self::Message) {
+        // dbg!(&message);
         let request = match message {
             ServiceMessage::Request(request) => request,
-            ServiceMessage::Replication(metadata) => {
-                self.replication.receive(metadata);
-                return;
-            }
+            ServiceMessage::Replication(metadata) => return self.replication.receive(metadata),
         };
         match self.replies.get(&request.client_id) {
-            Some(reply) if reply.seq < request.seq => {}
+            Some(reply) if reply.seq > request.seq => {}
             Some(reply) if reply.seq == request.seq => {
                 self.send_buffer.push((request.client_id, reply.clone()))
             }

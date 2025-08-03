@@ -56,16 +56,6 @@ pub trait ReplicaTable {
     fn get_all(&self) -> impl Iterator<Item = &Connection>;
 }
 
-impl ReplicaTable for [Connection] {
-    fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
-        self.get(index as usize)
-    }
-
-    fn get_all(&self) -> impl Iterator<Item = &Connection> {
-        self.iter()
-    }
-}
-
 pub trait ReplicationSend {
     fn apply(
         self,

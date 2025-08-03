@@ -82,7 +82,7 @@ where
                 if let Err(err) = self.workload.validate(op, res) {
                     return Proceed::Output(Err(err));
                 }
-                self.latencies += start.elapsed().as_micros() as u64;
+                self.latencies += start.elapsed().as_nanos() as u64;
                 self.proceed(since_start)
             }
         }
@@ -175,7 +175,7 @@ where
                 if let Err(err) = self.workload.validate(op, res) {
                     return Proceed::Output(Err(err));
                 }
-                self.latencies += start.elapsed().as_micros() as u64;
+                self.latencies += start.elapsed().as_nanos() as u64;
                 self.proceed(since_start)
             }
         }

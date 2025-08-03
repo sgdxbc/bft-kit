@@ -1,8 +1,12 @@
 use std::{env::args, time::Duration};
 
 use bft_kit::{
-    app::null::Null, init_logging, parse::Settings, service::Service, unreplicated,
-    workload::CloseLoopWorker,
+    app::null::Null,
+    init_logging,
+    parse::Settings,
+    service::{Service, transport::run_replicated_service},
+    unreplicated,
+    workload::{CloseLoopWorker, transport::run_worker},
 };
 use rand::random;
 use tokio::{signal::ctrl_c, time::sleep, try_join};
@@ -12,13 +16,13 @@ use tokio_util::sync::CancellationToken;
 async fn main() -> anyhow::Result<()> {
     init_logging();
     match args().nth(1).as_deref() {
-        Some("workload") => run_worker().await,
-        Some("service") => run_service().await,
+        Some("workload") => worker().await,
+        Some("service") => service().await,
         _ => anyhow::bail!("Usage: bk [workload|service]"),
     }
 }
 
-async fn run_worker() -> anyhow::Result<()> {
+async fn worker() -> anyhow::Result<()> {
     let mut settings = Settings::new();
     settings.parse("addr 10.0.0.7:5000");
     settings.parse("client.timeout 1");
@@ -29,7 +33,7 @@ async fn run_worker() -> anyhow::Result<()> {
     let worker = CloseLoopWorker::new(Null, client);
     let cancel = CancellationToken::new();
 
-    let worker_task = bft_kit::workload::transport::run_worker(
+    let worker_task = run_worker(
         worker,
         client_id,
         settings.get_values("addr")?,
@@ -45,12 +49,12 @@ async fn run_worker() -> anyhow::Result<()> {
     println!(
         "{} ops/sec, 50th {:?}",
         latencies.len(),
-        latencies.value_at_quantile(0.5)
+        Duration::from_nanos(latencies.value_at_quantile(0.5))
     );
     Ok(())
 }
 
-async fn run_service() -> anyhow::Result<()> {
+async fn service() -> anyhow::Result<()> {
     let mut settings = Settings::new();
     settings.parse("addr 10.0.0.7:5000");
     settings.parse("replica.id 0");
@@ -59,7 +63,7 @@ async fn run_service() -> anyhow::Result<()> {
     let service = Service::new(replica, Null);
     let cancel = CancellationToken::new();
 
-    let service_task = bft_kit::service::transport::run_replicated_service(
+    let service_task = run_replicated_service(
         service,
         settings.get("replica.id")?,
         settings.get_values("addr")?,

@@ -29,12 +29,12 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let mut settings = Settings::new();
-    settings.parse("client.timeout 1");
+    settings.parse("client.timeout 1.");
     let client = Client::<Null>::new(0, settings.extract()?);
-    let workload = workload::Take::new(Null, 1);
+    let workload = workload::Take::new(Null, 100);
     let worker = CloseLoopWorker::new(workload, client);
     let latencies = run_worker(worker, 0, addrs, CancellationToken::new()).await?;
-    println!("latency: {:?}", Duration::from_micros(latencies.min()));
+    println!("latency: {:?}", Duration::from_nanos(latencies.min()));
 
     cancel.cancel();
     service_task.await?
