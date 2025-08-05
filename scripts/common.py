@@ -4,6 +4,7 @@ from subprocess import Popen, PIPE
 service_port = 5000
 build_dir = "/tmp/bftk"
 deploy_dir = "/app"
+nfs = False
 
 
 def local(cmd):

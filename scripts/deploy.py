@@ -7,7 +7,7 @@ import clusters
 def task(build_host, sync_hosts):
     remote_build.task(build_host)
     ssh(build_host, f"cp {build_dir}/target/release/bftk {deploy_dir}/")
-    ssh(build_host, f"cp -rT {build_dir}/configs {deploy_dir}/bftk-configs")
+    ssh(build_host, f"mkdir -p {deploy_dir}/bftk-configs")
 
     addr_conf = "\n".join(
         f"addr {item['ip']}:{service_port}" for item in clusters.service
@@ -17,7 +17,9 @@ def task(build_host, sync_hosts):
         f"{deploy_dir}/bftk-configs/addr.conf",
         addr_conf,
     )
-    # TODO sync to other hosts
+    if not nfs:
+        # TODO sync to other hosts
+        pass
 
 
 if __name__ == "__main__":

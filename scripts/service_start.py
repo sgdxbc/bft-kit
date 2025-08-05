@@ -3,6 +3,8 @@ from common import *
 
 def task(hosts):
     for index, host in enumerate(hosts):
+        if not nfs or index == 0:
+            local(f"rsync -a configs/*.conf {host}:{deploy_dir}/bftk-configs/")
         ssh(host, f"cd {deploy_dir} && ./bftk service {index}", detach=True)
 
 
