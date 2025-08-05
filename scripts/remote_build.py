@@ -1,21 +1,14 @@
-from fabric import *
-from invoke import *
+from common import *
 
 
-BUILD_DIR = "/tmp/bftk"
-DEPLOY_DIR = "/homes/cowsay"
-
-
-def run_task(c):
-    run("cargo build -r --bin bftk", echo=True)  # sanity check
-    run("tar -czf target/archive.tar.gz src/ benches/ Cargo.toml Cargo.lock", echo=True)
-    c.run(f"mkdir -p {BUILD_DIR}", echo=True)
-    c.put("target/archive.tar.gz", f"{BUILD_DIR}/archive.tar.gz")
-    c.run(f"tar -xzf {BUILD_DIR}/archive.tar.gz -C {BUILD_DIR}", echo=True)
-    c.run(f"cd {BUILD_DIR} && /bin/bash -l -c 'cargo build -r --bin bftk'", echo=True)
-    c.run(f"cp {BUILD_DIR}/target/release/bftk {DEPLOY_DIR}/", echo=True)
+def task(host):
+    local("cargo build -r --bin bftk")  # sanity check
+    ssh(host, f"mkdir -p {build_dir}")
+    local(f"rsync -aR src/ benches/ configs/ Cargo.toml Cargo.lock {host}:{build_dir}/")
+    ssh(host, f"cd {build_dir} && /bin/bash -l -c 'cargo build -r --bin bftk'")
 
 
 if __name__ == "__main__":
-    with Connection("nsl-node7") as c:
-        run_task(c)
+    import clusters
+
+    task(clusters.service[0]["host"])

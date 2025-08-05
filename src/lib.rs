@@ -45,6 +45,43 @@ pub fn init_logging() {
         .init();
 }
 
+pub fn init_logging_file(log_file: std::fs::File) {
+    use std::{env, str::FromStr as _};
+
+    use tracing::level_filters::LevelFilter;
+    use tracing_subscriber::{
+        filter::Targets,
+        fmt::{Subscriber, format::FmtSpan},
+        layer::SubscriberExt,
+        util::SubscriberInitExt as _,
+    };
+
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(log_file)
+        .with_max_level(LevelFilter::TRACE)
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+        .with_file(true)
+        .with_line_number(true)
+        .finish()
+        // https://docs.rs/tracing-subscriber/latest/src/tracing_subscriber/fmt/mod.rs.html#1200
+        .with(match env::var("RUST_LOG") {
+            Ok(var) => Targets::from_str(&var)
+                .map_err(|e| {
+                    eprintln!("Ignoring `RUST_LOG={var:?}`: {e}");
+                })
+                .unwrap_or_default(),
+            Err(env::VarError::NotPresent) => {
+                Targets::new().with_default(Subscriber::DEFAULT_MAX_LEVEL)
+            }
+            Err(e) => {
+                eprintln!("Ignoring `RUST_LOG`: {e}");
+                Targets::new().with_default(Subscriber::DEFAULT_MAX_LEVEL)
+            }
+        })
+        .init();
+}
+
 pub fn fmt_bytes(bytes: &[u8], f: &mut impl std::fmt::Write) -> std::fmt::Result {
     use std::fmt::Write as _;
     let prefix_hex = bytes.iter().take(4).fold(String::new(), |mut s, b| {

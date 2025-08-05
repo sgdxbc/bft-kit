@@ -17,9 +17,7 @@ use crate::{
         ClientId, ReplicaIndex, ReplicationState, Reply, Request, ServiceMessage, ServiceSend,
     },
     state::{AppState, Never, Proceed, State},
-    transport::{
-        BINCODE_CONFIG, ReplicaTable, ReplicationSend, read_loop, run_write, trace_error,
-    },
+    transport::{BINCODE_CONFIG, ReplicaTable, ReplicationSend, read_loop, run_write, trace_error},
 };
 
 pub async fn run_replicated_service<
@@ -77,6 +75,7 @@ where
     try_join!(active, passive)?;
     let connections = connections.into_inner().unwrap();
     anyhow::ensure!(connections.len() == addrs.len() - 1);
+    tracing::info!("replica interconnections established");
 
     enum Event {
         Accept(Box<Incoming>),
