@@ -1,35 +1,36 @@
-use std::{env::args, fs::File, time::Duration};
+use std::{env::args, fs::File, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use bft_kit::{
     app::null::Null,
-    init_logging_file,
+    block_on, init_logging_file,
     parse::Settings,
     service::{ReplicaIndex, Service, transport::run_replicated_service},
     unreplicated,
-    workload::{CloseLoopWorker, OpenLoopWorker, transport::run_worker},
+    workload::{CloseLoopWorker, Latencies, OpenLoopWorker, transport::run_worker},
 };
 use rand::random;
-use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep, try_join};
+use tokio::{fs::read_to_string, signal::ctrl_c, task::JoinSet, time::sleep, try_join};
 use tokio_util::sync::CancellationToken;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    init_logging_file(File::create("bftk.log")?);
-    match args().nth(1).as_deref() {
-        Some("workload") => worker().await,
-        Some("service") => {
-            let index = args()
-                .nth(2)
-                .ok_or(anyhow::format_err!("missing index"))?
-                .parse()?;
-            service(index).await
+fn main() -> anyhow::Result<()> {
+    init_logging_file(File::create("/tmp/bftk-log")?);
+    block_on(async {
+        match args().nth(1).as_deref() {
+            Some("workload") => workload().await,
+            Some("service") => {
+                let index = args()
+                    .nth(2)
+                    .ok_or(anyhow::format_err!("missing index"))?
+                    .parse()?;
+                service(index).await
+            }
+            _ => anyhow::bail!("unknown command"),
         }
-        _ => anyhow::bail!("unknown command"),
-    }
+    })
 }
 
-async fn worker() -> anyhow::Result<()> {
+async fn workload() -> anyhow::Result<()> {
     let mut settings = Settings::new();
     for name in ["addr", "client", "protocol", "workload"] {
         settings.parse(&read_to_string(format!("bftk-configs/{name}.conf")).await?);
@@ -37,23 +38,23 @@ async fn worker() -> anyhow::Result<()> {
             settings.parse(&s)
         }
     }
+    let settings = Arc::new(settings);
 
-    let client_id = random();
-    let client = unreplicated::Client::<Null>::new(client_id, settings.extract()?);
     let cancel = CancellationToken::new();
 
-    let worker_task = {
-        let cancel = cancel.clone();
-        async {
-            if settings.get("workload.close-loop")? {
-                let worker = CloseLoopWorker::new(Null, client);
-                run_worker(worker, client_id, settings.get_values("addr")?, cancel).await
-            } else {
-                let target_tput = settings.get("workload.open-loop.target-tput")?;
-                let worker = OpenLoopWorker::new(Null, client, target_tput);
-                run_worker(worker, client_id, settings.get_values("addr")?, cancel).await
-            }
+    let mut worker_set = JoinSet::new();
+    for _ in 0..settings.get("workload.concurrency")? {
+        let client_id = random();
+        let client = unreplicated::Client::<Null>::new(client_id, settings.extract()?);
+        worker_set.spawn(worker(settings.clone(), client_id, client, cancel.clone()));
+    }
+
+    let worker_task = async {
+        let mut latencies = Latencies::new(3).unwrap();
+        while let Some(result) = worker_set.join_next().await {
+            latencies += result??
         }
+        anyhow::Ok(latencies)
     };
     let duration = Duration::from_secs_f32(settings.get("workload.duration")?);
     let cancel_task = async move {
@@ -68,6 +69,23 @@ async fn worker() -> anyhow::Result<()> {
         Duration::from_nanos(latencies.value_at_quantile(0.5))
     );
     Ok(())
+}
+
+async fn worker(
+    settings: impl AsRef<Settings>,
+    client_id: u32,
+    client: unreplicated::Client<Null>,
+    cancel: CancellationToken,
+) -> anyhow::Result<Latencies> {
+    let settings = settings.as_ref();
+    if settings.get("workload.close-loop")? {
+        let worker = CloseLoopWorker::new(Null, client);
+        run_worker(worker, client_id, settings.get_values("addr")?, cancel).await
+    } else {
+        let target_tput = settings.get("workload.open-loop.target-tput")?;
+        let worker = OpenLoopWorker::new(Null, client, target_tput);
+        run_worker(worker, client_id, settings.get_values("addr")?, cancel).await
+    }
 }
 
 async fn service(index: ReplicaIndex) -> anyhow::Result<()> {

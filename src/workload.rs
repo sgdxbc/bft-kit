@@ -25,7 +25,7 @@ pub trait WorkloadState {
     fn validate(&self, op: Self::Op, res: Self::Res) -> anyhow::Result<()>;
 }
 
-type Latencies = Histogram<u64>;
+pub type Latencies = Histogram<u64>;
 
 pub struct CloseLoopWorker<W: WorkloadState, C> {
     workload: W,

@@ -82,6 +82,30 @@ pub fn init_logging_file(log_file: std::fs::File) {
         .init();
 }
 
+pub fn block_on<F: Future<Output = anyhow::Result<T>>, T>(f: F) -> anyhow::Result<T> {
+    let core_ids = std::sync::Mutex::new(
+        core_affinity::get_core_ids()
+            .unwrap_or_else(|| {
+                tracing::warn!("cannot retrieve core ids");
+                Vec::new()
+            })
+            .into_iter(),
+    );
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(move || {
+            let Some(core_id) = core_ids.lock().unwrap().next() else {
+                tracing::warn!("worker thread without affinity");
+                return;
+            };
+            if !core_affinity::set_for_current(core_id) {
+                tracing::warn!(?core_id, "set affinity failed")
+            }
+        })
+        .build()?
+        .block_on(f)
+}
+
 pub fn fmt_bytes(bytes: &[u8], f: &mut impl std::fmt::Write) -> std::fmt::Result {
     use std::fmt::Write as _;
     let prefix_hex = bytes.iter().take(4).fold(String::new(), |mut s, b| {
