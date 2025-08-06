@@ -7,7 +7,7 @@ use bft_kit::{
     parse::Settings,
     service::{ReplicaIndex, Service, transport::run_replicated_service},
     unreplicated,
-    workload::{CloseLoopWorker, transport::run_worker},
+    workload::{CloseLoopWorker, OpenLoopWorker, transport::run_worker},
 };
 use rand::random;
 use tokio::{fs::read_to_string, signal::ctrl_c, time::sleep, try_join};
@@ -40,15 +40,21 @@ async fn worker() -> anyhow::Result<()> {
 
     let client_id = random();
     let client = unreplicated::Client::<Null>::new(client_id, settings.extract()?);
-    let worker = CloseLoopWorker::new(Null, client);
     let cancel = CancellationToken::new();
 
-    let worker_task = run_worker(
-        worker,
-        client_id,
-        settings.get_values("addr")?,
-        cancel.clone(),
-    );
+    let worker_task = {
+        let cancel = cancel.clone();
+        async {
+            if settings.get("workload.close-loop")? {
+                let worker = CloseLoopWorker::new(Null, client);
+                run_worker(worker, client_id, settings.get_values("addr")?, cancel).await
+            } else {
+                let target_tput = settings.get("workload.open-loop.target-tput")?;
+                let worker = OpenLoopWorker::new(Null, client, target_tput);
+                run_worker(worker, client_id, settings.get_values("addr")?, cancel).await
+            }
+        }
+    };
     let duration = Duration::from_secs_f32(settings.get("workload.duration")?);
     let cancel_task = async move {
         sleep(duration).await;
@@ -58,7 +64,7 @@ async fn worker() -> anyhow::Result<()> {
     let (latencies, _) = try_join!(worker_task, cancel_task)?;
     println!(
         "{} ops/sec, 50th {:?}",
-        latencies.len(),
+        latencies.len() as f32 / duration.as_secs_f32(),
         Duration::from_nanos(latencies.value_at_quantile(0.5))
     );
     Ok(())

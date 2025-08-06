@@ -97,6 +97,9 @@ where
         match worker.proceed(since_start) {
             Proceed::Pending(tick_after) => {
                 anyhow::ensure!(tick_after.is_some(), "workload halted without output");
+                if tick_after == Some(Duration::ZERO) {
+                    tracing::warn!("zero interval tick detected, worker overloaded")
+                }
                 return Ok(tick_after);
             }
             Proceed::Send(send) => send.apply(connections, write_tracker)?,

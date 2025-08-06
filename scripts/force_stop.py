@@ -5,7 +5,7 @@ from time import sleep
 def task(hosts):
     for host in hosts:
         try:
-            ssh(host, f"pkill -INT bftk")
+            ssh(host, f"pgrep bftk && pkill bftk")
         except RuntimeError:
             pass
 
@@ -13,4 +13,4 @@ def task(hosts):
 if __name__ == "__main__":
     import clusters
 
-    task([item["host"] for item in clusters.service])
+    task([item["host"] for item in clusters.workload + clusters.service])

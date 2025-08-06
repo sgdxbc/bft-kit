@@ -28,6 +28,7 @@ words:
   - pbft
   - permissioned
   - permissionless
+  - pgrep
   - Pkcs8
   - pkill
   - PODC
