@@ -3,21 +3,17 @@ use std::{
     hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
 };
 
-use crate::app::{ShardIndex, ShardedAppState, ShardedAppUpdate};
+use crate::app::{ShardIndex, ShardedAppState};
+
+use super::ShardedAppUpdate;
 
 pub struct Kv {
-    shards: HashMap<ShardIndex, HashMap<String, String>>,
     num_shard: ShardIndex,
 }
 
-pub struct KvConfig {}
-
 impl Kv {
     pub fn new(num_shard: ShardIndex) -> Self {
-        Self {
-            num_shard,
-            shards: Default::default(),
-        }
+        Self { num_shard }
     }
 
     fn shard_of_key(&self, key: &str) -> ShardIndex {
@@ -41,26 +37,51 @@ pub enum KvRes {
 }
 
 impl Kv {
-    fn shard_of(&self, op: &KvOp) -> HashSet<ShardIndex> {
+    fn shards_of(&self, op: &KvOp) -> HashSet<ShardIndex> {
         match op {
             KvOp::Insert(key, _) | KvOp::Update(key, _) | KvOp::Get(key) => {
                 HashSet::from([self.shard_of_key(key)])
             }
-            KvOp::Compound(ops) => ops.iter().flat_map(|op| self.shard_of(op)).collect(),
+            KvOp::Compound(ops) => ops.iter().flat_map(|op| self.shards_of(op)).collect(),
         }
     }
+}
 
-    fn execute(&mut self, op: &KvOp) -> KvRes {
+// impl ShardedAppState for Kv {
+//     type Shard = HashMap<String, String>;
+//     type Op = KvOp;
+//     type Res = KvRes;
+
+//     fn update(
+//         &mut self,
+//         op: &Self::Op,
+//         mut shards: HashMap<ShardIndex, &mut Self::Shard>,
+//     ) -> ShardedAppUpdate<Self::Res> {
+//         let missing_indices = &self.shards_of(op) - &shards.keys().cloned().collect::<HashSet<_>>();
+//         if !missing_indices.is_empty() {
+//             ShardedAppUpdate::RequireShards(missing_indices)
+//         } else {
+//             ShardedAppUpdate::Res(self.execute(op, &mut shards))
+//         }
+//     }
+// }
+
+impl Kv {
+    fn execute(
+        &mut self,
+        op: &KvOp,
+        shards: &mut HashMap<ShardIndex, &mut HashMap<String, String>>,
+    ) -> KvRes {
         match op {
             KvOp::Insert(key, value) => {
-                self.shards
+                shards
                     .get_mut(&self.shard_of_key(key))
                     .unwrap()
                     .insert(key.clone(), value.clone());
                 KvRes::InsertOk
             }
             KvOp::Update(key, value) => {
-                let shard = self.shards.get_mut(&self.shard_of_key(key)).unwrap();
+                let shard = shards.get_mut(&self.shard_of_key(key)).unwrap();
                 match shard.get_mut(key) {
                     Some(existing_value) => {
                         *existing_value = value.clone();
@@ -69,34 +90,13 @@ impl Kv {
                     None => KvRes::NotFound,
                 }
             }
-            KvOp::Get(key) => match self.shards.get(&self.shard_of_key(key)).unwrap().get(key) {
+            KvOp::Get(key) => match shards.get(&self.shard_of_key(key)).unwrap().get(key) {
                 Some(value) => KvRes::Get(value.clone()),
                 None => KvRes::NotFound,
             },
-            KvOp::Compound(ops) => KvRes::Compound(ops.iter().map(|op| self.execute(op)).collect()),
-        }
-    }
-}
-
-impl ShardedAppState for Kv {
-    type Shard = HashMap<String, String>;
-
-    fn insert_shard(&mut self, index: ShardIndex, shard: Self::Shard) {
-        self.shards.insert(index, shard);
-    }
-
-    fn remove_shard(&mut self, index: ShardIndex) -> Option<Self::Shard> {
-        self.shards.remove(&index)
-    }
-
-    type Op = KvOp;
-    type Res = KvRes;
-    fn update(&mut self, op: &Self::Op) -> ShardedAppUpdate<Self::Res> {
-        let shard_indices = self.shard_of(op);
-        if !shard_indices.is_empty() {
-            ShardedAppUpdate::NeedShards(shard_indices)
-        } else {
-            ShardedAppUpdate::Res(self.execute(op))
+            KvOp::Compound(ops) => {
+                KvRes::Compound(ops.iter().map(|op| self.execute(op, shards)).collect())
+            }
         }
     }
 }
