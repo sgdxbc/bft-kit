@@ -3,7 +3,7 @@ use std::{env::args, fs::File, sync::Arc, time::Duration};
 use anyhow::Context;
 use bft_kit::{
     app::null::Null,
-    block_on, init_logging_file,
+    set_affinity_block_on, init_logging_file,
     parse::Settings,
     replication::ReplicaIndex,
     replication::unreplicated,
@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 fn main() -> anyhow::Result<()> {
     init_logging_file(File::create("/tmp/bftk-log")?);
-    block_on(async {
+    set_affinity_block_on(async {
         match args().nth(1).as_deref() {
             Some("workload") => workload().await,
             Some("service") => {
