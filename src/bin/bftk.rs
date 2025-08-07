@@ -3,11 +3,12 @@ use std::{env::args, fs::File, sync::Arc, time::Duration};
 use anyhow::Context;
 use bft_kit::{
     app::null::Null,
-    set_affinity_block_on, init_logging_file,
+    init_logging_file,
     parse::Settings,
     replication::ReplicaIndex,
     replication::unreplicated,
     service::{Service, transport::run_replicated_service},
+    set_affinity_block_on,
     workload::{CloseLoopWorker, Latencies, OpenLoopWorker, transport::run_worker},
 };
 use rand::random;
@@ -102,7 +103,7 @@ async fn service(index: ReplicaIndex) -> anyhow::Result<()> {
         }
     }
 
-    let replica = unreplicated::Replica::<Null>::new();
+    let replica = unreplicated::Replica::<Null, _>::new();
     let service = Service::new(replica, Null);
     let cancel = CancellationToken::new();
 

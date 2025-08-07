@@ -4,7 +4,7 @@ use bincode::{Decode, Encode};
 use derive_where::derive_where;
 
 use crate::{
-    replication::ReplicationState,
+    replication::{Replicated, ReplicationState},
     state::{AppState, Never, Proceed, State},
 };
 
@@ -75,12 +75,19 @@ where
         match self.replication.proceed(since_start) {
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
             Proceed::Send(send) => Proceed::Send(ServiceSend::Replication(send)),
-            Proceed::Output(output) => {
-                for request in output.requests {
+            Proceed::Output(Replicated::Block(requests, metadata)) => {
+                for request in requests {
+                    if self
+                        .replies
+                        .get(&request.client_id)
+                        .is_some_and(|reply| reply.seq >= request.seq)
+                    {
+                        continue;
+                    }
                     let reply = Reply {
                         seq: request.seq,
                         res: self.app.update(request.op),
-                        replication_metadata: output.metadata.clone(),
+                        replication_metadata: metadata.clone(),
                     };
                     self.replies.insert(request.client_id, reply.clone());
                     self.send_buffer.push((request.client_id, reply))

@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cancel = CancellationToken::new();
 
-    let replica = Replica::<Null>::new();
+    let replica = Replica::<Null, _>::new();
     let service = Service::new(replica, Null);
     let service_task = spawn(run_replicated_service(
         service,

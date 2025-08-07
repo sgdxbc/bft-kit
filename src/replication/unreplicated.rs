@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    replication::{ReplicaIndex, ReplicationOutput, ReplicationState},
+    replication::{ReplicaIndex, Replicated, ReplicationState},
     service::{ClientId, ClientSeq, Reply, Request},
     state::{AppState, Never, Proceed, State},
     workload::ClientState,
@@ -93,17 +93,17 @@ impl<A: AppState> State for Client<A> {
     }
 }
 
-pub struct Replica<A: AppState> {
-    output_buffer: Vec<ReplicationOutput<A::Op, ()>>,
+pub struct Replica<A: AppState, E> {
+    output_buffer: Vec<Replicated<A::Op, (), E>>,
 }
 
-impl<A: AppState> Default for Replica<A> {
+impl<A: AppState, E> Default for Replica<A, E> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<A: AppState> Replica<A> {
+impl<A: AppState, E> Replica<A, E> {
     pub fn new() -> Self {
         Self {
             output_buffer: Default::default(),
@@ -111,20 +111,22 @@ impl<A: AppState> Replica<A> {
     }
 }
 
-impl<A: AppState> ReplicationState<A::Op> for Replica<A> {
+impl<A: AppState, E> ReplicationState<A::Op, E> for Replica<A, E> {
     type Metadata = ();
 
     fn submit(&mut self, request: Request<A::Op>) {
-        self.output_buffer.push(ReplicationOutput {
-            requests: vec![request],
-            metadata: (),
-        })
+        self.output_buffer
+            .push(Replicated::Block(vec![request], ()))
+    }
+
+    fn trigger(&mut self, event: E) {
+        self.output_buffer.push(Replicated::Event(event))
     }
 }
 
-impl<A: AppState> State for Replica<A> {
+impl<A: AppState, E> State for Replica<A, E> {
     type Send = Never;
-    type Output = ReplicationOutput<A::Op, ()>;
+    type Output = Replicated<A::Op, (), E>;
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         match self.output_buffer.pop() {
             Some(output) => Proceed::Output(output),
