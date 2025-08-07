@@ -3,9 +3,7 @@ use std::{
     hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
 };
 
-use crate::app::{ShardIndex, ShardedAppState};
-
-use super::ShardedAppUpdate;
+use crate::app::ShardIndex;
 
 pub struct Kv {
     num_shard: ShardIndex,

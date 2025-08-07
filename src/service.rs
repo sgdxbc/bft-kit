@@ -1,12 +1,11 @@
 use std::{collections::HashMap, time::Duration};
 
 use bincode::{Decode, Encode};
-use derive_where::derive_where;
 
 use crate::{
     Never,
     app::AppState,
-    replication::{Replicated, ReplicationState},
+    replication::ReplicationState,
     state::{Proceed, State},
 };
 
@@ -33,7 +32,7 @@ pub struct Reply<Res, M> {
     pub replication_metadata: M,
 }
 
-pub struct Service<R: ReplicationState<A::Op>, A: AppState> {
+pub struct Service<R: ReplicationState<Request<A::Op>>, A: AppState> {
     replication: R,
     app: A,
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
@@ -41,7 +40,7 @@ pub struct Service<R: ReplicationState<A::Op>, A: AppState> {
     send_buffer: Vec<(ClientId, Reply<A::Res, R::Metadata>)>,
 }
 
-impl<R: ReplicationState<A::Op>, A: AppState> Service<R, A> {
+impl<R: ReplicationState<Request<A::Op>>, A: AppState> Service<R, A> {
     pub fn new(replication: R, app: A) -> Self {
         Self {
             replication,
@@ -52,24 +51,23 @@ impl<R: ReplicationState<A::Op>, A: AppState> Service<R, A> {
     }
 }
 
-pub enum ServiceSend<R: ReplicationState<A::Op>, A: AppState> {
-    Reply(ClientId, Reply<A::Res, R::Metadata>),
-    Replication(R::Send),
+pub enum ServiceSend<Res, M, S> {
+    Reply(ClientId, Reply<Res, M>),
+    Replication(S),
 }
 
-#[derive_where(Debug; A::Op, R::Message)]
-pub enum ServiceMessage<R: ReplicationState<A::Op>, A: AppState> {
-    Request(Request<A::Op>),
-    Replication(R::Message),
+pub enum ServiceMessage<Op, M> {
+    Request(Request<Op>),
+    Replication(M),
 }
 
-impl<R: ReplicationState<A::Op>, A: AppState> State for Service<R, A>
+impl<R: ReplicationState<Request<A::Op>>, A: AppState> State for Service<R, A>
 where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
     // ServiceMessage<R, A>: std::fmt::Debug,
 {
-    type Send = ServiceSend<R, A>;
+    type Send = ServiceSend<A::Res, R::Metadata, R::Send>;
     type Output = Never;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some((client_id, reply)) = self.send_buffer.pop() {
@@ -78,8 +76,8 @@ where
         match self.replication.proceed(since_start) {
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
             Proceed::Send(send) => Proceed::Send(ServiceSend::Replication(send)),
-            Proceed::Output(Replicated::Block(requests, metadata)) => {
-                for request in requests {
+            Proceed::Output(replicated) => {
+                for request in replicated.block {
                     if self
                         .replies
                         .get(&request.client_id)
@@ -90,7 +88,7 @@ where
                     let reply = Reply {
                         seq: request.seq,
                         res: self.app.update(&request.op),
-                        replication_metadata: metadata.clone(),
+                        replication_metadata: replicated.metadata.clone(),
                     };
                     self.replies.insert(request.client_id, reply.clone());
                     self.send_buffer.push((request.client_id, reply))
@@ -100,7 +98,7 @@ where
         }
     }
 
-    type Message = ServiceMessage<R, A>;
+    type Message = ServiceMessage<A::Op, R::Message>;
     fn receive(&mut self, message: Self::Message) {
         // dbg!(&message);
         let request = match message {

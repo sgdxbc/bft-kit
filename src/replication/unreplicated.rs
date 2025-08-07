@@ -95,17 +95,17 @@ impl<A: AppState> State for Client<A> {
     }
 }
 
-pub struct Replica<A: AppState, E> {
-    output_buffer: Vec<Replicated<A::Op, (), E>>,
+pub struct Replica<T> {
+    output_buffer: Vec<Replicated<T, ()>>,
 }
 
-impl<A: AppState, E> Default for Replica<A, E> {
+impl<T> Default for Replica<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<A: AppState, E> Replica<A, E> {
+impl<T> Replica<T> {
     pub fn new() -> Self {
         Self {
             output_buffer: Default::default(),
@@ -113,22 +113,20 @@ impl<A: AppState, E> Replica<A, E> {
     }
 }
 
-impl<A: AppState, E> ReplicationState<A::Op, E> for Replica<A, E> {
+impl<T> ReplicationState<T> for Replica<T> {
     type Metadata = ();
 
-    fn submit(&mut self, request: Request<A::Op>) {
-        self.output_buffer
-            .push(Replicated::Block(vec![request], ()))
-    }
-
-    fn trigger(&mut self, event: E) {
-        self.output_buffer.push(Replicated::Event(event))
+    fn submit(&mut self, entry: T) {
+        self.output_buffer.push(Replicated {
+            block: vec![entry],
+            metadata: (),
+        })
     }
 }
 
-impl<A: AppState, E> State for Replica<A, E> {
+impl<T> State for Replica<T> {
     type Send = Never;
-    type Output = Replicated<A::Op, (), E>;
+    type Output = Replicated<T, ()>;
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         match self.output_buffer.pop() {
             Some(output) => Proceed::Output(output),

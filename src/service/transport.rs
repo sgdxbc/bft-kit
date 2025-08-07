@@ -25,8 +25,13 @@ use crate::{
 };
 
 pub async fn run_replicated_service<
-    S: State<Send = ServiceSend<R, A>, Output = Never, Message = ServiceMessage<R, A>>,
-    R: ReplicationState<A::Op>,
+    S: State<
+            Send = ServiceSend<A::Res, R::Metadata, R::Send>,
+            Output = Never,
+            Message = ServiceMessage<A::Op, R::Message>,
+        >,
+    R: ReplicationState<T>,
+    T,
     A: AppState,
 >(
     mut service: S,
@@ -108,7 +113,7 @@ where
     let write_tracker = TaskTracker::new();
 
     let start = Instant::now();
-    let mut tick_after = service_proceed(
+    let mut tick_after = service_proceed::<S, R, T, A>(
         &mut service,
         start.elapsed(),
         &client_table,
@@ -167,7 +172,7 @@ where
             }
             Event::Tick => {}
         }
-        tick_after = service_proceed(
+        tick_after = service_proceed::<S, R, T, A>(
             &mut service,
             start.elapsed(),
             &client_table,
@@ -193,8 +198,13 @@ where
 }
 
 fn service_proceed<
-    S: State<Send = ServiceSend<R, A>, Output = Never, Message = ServiceMessage<R, A>>,
-    R: ReplicationState<A::Op>,
+    S: State<
+            Send = ServiceSend<A::Res, R::Metadata, R::Send>,
+            Output = Never,
+            Message = ServiceMessage<A::Op, R::Message>,
+        >,
+    R: ReplicationState<T>,
+    T,
     A: AppState,
 >(
     service: &mut S,

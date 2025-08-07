@@ -5,9 +5,8 @@ use bft_kit::{
     app::null::Null,
     init_logging_file,
     parse::Settings,
-    replication::ReplicaIndex,
-    replication::unreplicated,
-    service::{Service, transport::run_replicated_service},
+    replication::{ReplicaIndex, unreplicated},
+    service::{Request, Service, transport::run_replicated_service},
     set_affinity_block_on,
     workload::{CloseLoopWorker, Latencies, OpenLoopWorker, transport::run_worker},
 };
@@ -103,12 +102,16 @@ async fn service(index: ReplicaIndex) -> anyhow::Result<()> {
         }
     }
 
-    let replica = unreplicated::Replica::<Null, _>::new();
+    let replica = unreplicated::Replica::new();
     let service = Service::new(replica, Null);
     let cancel = CancellationToken::new();
 
-    let service_task =
-        run_replicated_service(service, index, settings.get_values("addr")?, cancel.clone());
+    let service_task = run_replicated_service::<_, unreplicated::Replica<Request<()>>, _, Null>(
+        service,
+        index,
+        settings.get_values("addr")?,
+        cancel.clone(),
+    );
     let cancel_task = async move {
         ctrl_c().await?;
         cancel.cancel();

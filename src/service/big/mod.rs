@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     Never,
-    app::{ShardIndex, ShardedAppState, ShardedAppUpdate},
+    app::{ShardIndex, ShardedAppState},
     replication::ReplicationState,
     service::{ClientId, Reply},
     state::{Proceed, State},
@@ -16,7 +16,7 @@ use super::Request;
 pub type ServiceIndex = u16;
 type StateVersion = u64;
 
-pub struct Service<R: ReplicationState<A::Op>, A: ShardedAppState> {
+pub struct Service<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> {
     replication: R,
     app: A,
 
@@ -28,7 +28,7 @@ pub struct Service<R: ReplicationState<A::Op>, A: ShardedAppState> {
     reordered_pushes: HashMap<StateVersion, Vec<message::PushShard<A::Shard>>>,
 }
 
-impl<R: ReplicationState<A::Op>, A: ShardedAppState> Service<R, A> {
+impl<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> Service<R, A> {
     pub fn new(replication: R, app: A, index: ServiceIndex) -> Self {
         Self {
             replication,
@@ -46,7 +46,7 @@ impl<R: ReplicationState<A::Op>, A: ShardedAppState> Service<R, A> {
     }
 }
 
-pub enum ServiceSend<R: ReplicationState<A::Op>, A: ShardedAppState> {
+pub enum ServiceSend<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> {
     Service(ServiceRecipient, Message<A>),
     Reply(ClientId, Reply<A::Res, R::Metadata>),
     Replication(R::Send),
@@ -59,7 +59,7 @@ pub enum ServiceRecipient {
     Service(ServiceIndex),
 }
 
-pub enum ServiceMessage<R: ReplicationState<A::Op>, A: ShardedAppState> {
+pub enum ServiceMessage<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> {
     Request(Request<A::Op>),
     Service(Message<A>),
     Replication(R::Message),
@@ -69,7 +69,7 @@ pub enum Message<A: ShardedAppState> {
     PushShard(message::PushShard<A::Shard>),
 }
 
-impl<R: ReplicationState<A::Op>, A: ShardedAppState> State for Service<R, A>
+impl<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> State for Service<R, A>
 where
     Reply<A::Res, R::Metadata>: Clone,
 {
@@ -83,7 +83,7 @@ where
     type Message = ServiceMessage<R, A>;
     fn receive(&mut self, message: Self::Message) {
         match message {
-            ServiceMessage::Replication(metadata) => return self.replication.receive(metadata),
+            ServiceMessage::Replication(metadata) => self.replication.receive(metadata),
             ServiceMessage::Request(request) => match self.replies.get(&request.client_id) {
                 Some(reply) if reply.seq > request.seq => {}
                 Some(reply) if reply.seq == request.seq => self
@@ -111,7 +111,7 @@ where
     }
 }
 
-impl<R: ReplicationState<A::Op>, A: ShardedAppState> Service<R, A>
+impl<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> Service<R, A>
 where
     Reply<A::Res, R::Metadata>: Clone,
 {
