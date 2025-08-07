@@ -1,10 +1,10 @@
 pub mod app;
 pub mod crypto;
 pub mod parse;
+pub mod replication;
 pub mod service;
 pub mod state;
 pub mod transport;
-pub mod unreplicated;
 pub mod workload;
 
 // similar to tracing_subscriber::fmt::init() but reports spans

@@ -3,7 +3,10 @@ use std::{collections::HashMap, time::Duration};
 use bincode::{Decode, Encode};
 use derive_where::derive_where;
 
-use crate::state::{AppState, Never, Proceed, State};
+use crate::{
+    replication::ReplicationState,
+    state::{AppState, Never, Proceed, State},
+};
 
 pub mod transport;
 
@@ -12,8 +15,6 @@ pub mod transport;
 
 pub type ClientId = u32;
 pub type ClientSeq = u64;
-
-pub type ReplicaIndex = u16;
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Request<Op> {
@@ -27,22 +28,6 @@ pub struct Reply<Res, M> {
     pub seq: ClientSeq,
     pub res: Res,
     pub replication_metadata: M,
-}
-
-pub struct ReplicationOutput<Op, M> {
-    pub requests: Vec<Request<Op>>,
-    pub metadata: M,
-}
-
-pub trait ReplicationState<Op>: State<Output = ReplicationOutput<Op, Self::Metadata>> {
-    type Metadata;
-
-    fn submit(&mut self, request: Request<Op>);
-}
-
-pub enum ReplicationRecipient {
-    All,
-    Index(ReplicaIndex),
 }
 
 pub struct Service<R: ReplicationState<A::Op>, A: AppState> {

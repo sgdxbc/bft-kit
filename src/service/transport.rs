@@ -13,11 +13,13 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     crypto::cert::quinn::{client_config, server_config},
-    service::{
-        ClientId, ReplicaIndex, ReplicationState, Reply, Request, ServiceMessage, ServiceSend,
+    replication::{
+        ReplicaIndex,
+        transport::{ReplicaTable, ReplicationSend},
     },
+    service::{ClientId, ReplicationState, Reply, Request, ServiceMessage, ServiceSend},
     state::{AppState, Never, Proceed, State},
-    transport::{BINCODE_CONFIG, ReplicaTable, ReplicationSend, read_loop, run_write, trace_error},
+    transport::{BINCODE_CONFIG, read_loop, run_write, trace_error},
 };
 
 pub async fn run_replicated_service<

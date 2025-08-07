@@ -10,9 +10,13 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     crypto::cert::quinn::client_config,
-    service::{ClientId, ReplicaIndex},
+    replication::{
+        ReplicaIndex,
+        transport::{ReplicaTable, ReplicationSend},
+    },
+    service::ClientId,
     state::{Proceed, State},
-    transport::{BINCODE_CONFIG, ReplicaTable, ReplicationSend, read_loop, trace_error},
+    transport::{BINCODE_CONFIG, read_loop, trace_error},
     workload::Latencies,
 };
 

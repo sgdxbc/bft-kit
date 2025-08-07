@@ -1,9 +1,8 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
-    service::{
-        ClientId, ClientSeq, ReplicaIndex, ReplicationOutput, ReplicationState, Reply, Request,
-    },
+    replication::{ReplicaIndex, ReplicationOutput, ReplicationState},
+    service::{ClientId, ClientSeq, Reply, Request},
     state::{AppState, Never, Proceed, State},
     workload::ClientState,
 };

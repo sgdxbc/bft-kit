@@ -5,8 +5,9 @@ use bft_kit::{
     app::null::Null,
     block_on, init_logging_file,
     parse::Settings,
-    service::{ReplicaIndex, Service, transport::run_replicated_service},
-    unreplicated,
+    replication::ReplicaIndex,
+    replication::unreplicated,
+    service::{Service, transport::run_replicated_service},
     workload::{CloseLoopWorker, Latencies, OpenLoopWorker, transport::run_worker},
 };
 use rand::random;
