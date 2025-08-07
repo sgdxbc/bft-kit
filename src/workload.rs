@@ -89,8 +89,8 @@ where
     }
 
     type Message = C::Message;
-    fn receive(&mut self, msg: Self::Message) {
-        self.client.receive(msg)
+    fn receive(&mut self, message: Self::Message) {
+        self.client.receive(message)
     }
 }
 
@@ -182,8 +182,8 @@ where
     }
 
     type Message = C::Message;
-    fn receive(&mut self, msg: Self::Message) {
-        self.client.receive(msg)
+    fn receive(&mut self, message: Self::Message) {
+        self.client.receive(message)
     }
 }
 

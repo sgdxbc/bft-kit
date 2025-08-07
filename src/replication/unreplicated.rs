@@ -1,9 +1,10 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use crate::{
+    app::AppState,
     replication::{ReplicaIndex, Replicated, ReplicationState},
     service::{ClientId, ClientSeq, Reply, Request},
-    state::{AppState, Never, Proceed, State},
+    state::{Never, Proceed, State},
     workload::ClientState,
 };
 

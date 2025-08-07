@@ -12,13 +12,14 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
+    app::AppState,
     crypto::cert::quinn::{client_config, server_config},
     replication::{
         ReplicaIndex,
         transport::{ReplicaTable, ReplicationSend},
     },
     service::{ClientId, ReplicationState, Reply, Request, ServiceMessage, ServiceSend},
-    state::{AppState, Never, Proceed, State},
+    state::{Never, Proceed, State},
     transport::{BINCODE_CONFIG, read_loop, run_write, trace_error},
 };
 

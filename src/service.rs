@@ -4,10 +4,12 @@ use bincode::{Decode, Encode};
 use derive_where::derive_where;
 
 use crate::{
+    app::AppState,
     replication::{Replicated, ReplicationState},
-    state::{AppState, Never, Proceed, State},
+    state::{Never, Proceed, State},
 };
 
+pub mod big;
 pub mod transport;
 
 // id is randomly assigned while index is continuously assigned
@@ -86,7 +88,7 @@ where
                     }
                     let reply = Reply {
                         seq: request.seq,
-                        res: self.app.update(request.op),
+                        res: self.app.update(&request.op),
                         replication_metadata: metadata.clone(),
                     };
                     self.replies.insert(request.client_id, reply.clone());

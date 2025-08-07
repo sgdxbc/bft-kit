@@ -1,11 +1,11 @@
-use crate::{state::AppState, workload::WorkloadState};
+use crate::{app::AppState, workload::WorkloadState};
 
 pub struct Null;
 
 impl AppState for Null {
     type Op = ();
     type Res = ();
-    fn update(&mut self, (): Self::Op) -> Self::Res {}
+    fn update(&mut self, &(): &Self::Op) -> Self::Res {}
 }
 
 impl WorkloadState for Null {
