@@ -3,7 +3,10 @@ use std::{
     time::Duration,
 };
 
-use crate::state::{Never, Proceed, State};
+use crate::{
+    Never,
+    state::{Proceed, State},
+};
 
 pub mod kv;
 pub mod null;

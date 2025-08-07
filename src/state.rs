@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use bincode::{Decode, Encode};
+use crate::Never;
 
 pub trait State {
     type Send;
@@ -10,9 +10,6 @@ pub trait State {
     type Message;
     fn receive(&mut self, message: Self::Message);
 }
-
-#[derive(Debug, Encode, Decode)]
-pub enum Never {}
 
 pub enum Proceed<S, O = Never> {
     Pending(Option<Duration>),

@@ -1,7 +1,4 @@
-use crate::{
-    service::Request,
-    state::{Never, State},
-};
+use crate::{Never, service::Request, state::State};
 
 pub mod in_memory;
 pub mod transport;

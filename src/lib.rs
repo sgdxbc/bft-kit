@@ -7,6 +7,9 @@ pub mod state;
 pub mod transport;
 pub mod workload;
 
+#[derive(Debug, bincode::Encode, bincode::Decode)]
+pub enum Never {}
+
 // similar to tracing_subscriber::fmt::init() but reports spans
 // why init() defaults to not report spans? i don't understand
 // if this further grows move it into dedicated module

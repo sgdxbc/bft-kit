@@ -4,9 +4,10 @@ use bincode::{Decode, Encode};
 use derive_where::derive_where;
 
 use crate::{
+    Never,
     app::AppState,
     replication::{Replicated, ReplicationState},
-    state::{Never, Proceed, State},
+    state::{Proceed, State},
 };
 
 pub mod big;

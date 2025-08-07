@@ -3,8 +3,8 @@ use quinn::Connection;
 use tokio_util::task::TaskTracker;
 
 use crate::{
+    Never,
     replication::{ReplicaIndex, ReplicationRecipient},
-    state::Never,
     transport::{BINCODE_CONFIG, run_write, trace_error},
 };
 

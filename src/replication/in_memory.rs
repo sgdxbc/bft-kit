@@ -1,10 +1,11 @@
 use std::{marker::PhantomData, time::Duration};
 
 use crate::{
+    Never,
     app::AppState,
     replication::{Replicated, ReplicationState},
     service::{ClientSeq, Request},
-    state::{Never, Proceed, State},
+    state::{Proceed, State},
     workload::WorkloadState,
 };
 
