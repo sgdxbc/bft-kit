@@ -1,6 +1,6 @@
-use crate::{app::AppState, replication::ReplicationState};
+use crate::{app::ShardedAppState, replication::ReplicationState};
 
-pub struct Service<R: ReplicationState<A::Op>, A: AppState> {
+pub struct Service<R: ReplicationState<A::Op>, A: ShardedAppState> {
     replication: R,
     app: A,
 }

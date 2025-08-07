@@ -1,7 +1,11 @@
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::{HashSet, VecDeque},
+    time::Duration,
+};
 
 use crate::state::{Never, Proceed, State};
 
+pub mod kv;
 pub mod null;
 
 pub trait AppState {
@@ -14,8 +18,8 @@ pub type ShardIndex = u32;
 
 pub trait ShardedAppState {
     type Shard;
-    fn put_shard(&mut self, index: ShardIndex, shard: Self::Shard);
-    fn get_shard(&self, index: ShardIndex) -> Option<&Self::Shard>;
+    fn insert_shard(&mut self, index: ShardIndex, shard: Self::Shard);
+    fn remove_shard(&mut self, index: ShardIndex) -> Option<Self::Shard>;
 
     type Op;
     type Res;
@@ -23,25 +27,23 @@ pub trait ShardedAppState {
 }
 
 pub enum ShardedAppUpdate<R> {
-    NeedShards(Vec<ShardIndex>),
-    Result(R),
+    NeedShards(HashSet<ShardIndex>),
+    Res(R),
 }
 
-impl<A: AppState> ShardedAppState for A {
-    type Shard = Never;
-
-    fn put_shard(&mut self, _index: ShardIndex, _shard: Self::Shard) {
-        unreachable!()
-    }
-
-    fn get_shard(&self, _index: ShardIndex) -> Option<&Self::Shard> {
-        None
-    }
-
+// this is safe: ShardedAppState should ensure that, as long as remove_shard is
+// not called, NeedShards is never returned (hence insert_shard is never
+// necessary)
+// (well there is a remark: App::update can be called from a ShardedAppState. a
+// newtype can prevent it, but come on)
+impl<A: ShardedAppState> AppState for A {
     type Op = A::Op;
     type Res = A::Res;
-    fn update(&mut self, op: &Self::Op) -> ShardedAppUpdate<Self::Res> {
-        ShardedAppUpdate::Result(self.update(op))
+    fn update(&mut self, op: &Self::Op) -> Self::Res {
+        match ShardedAppState::update(self, op) {
+            ShardedAppUpdate::Res(res) => res,
+            ShardedAppUpdate::NeedShards(_) => unimplemented!(),
+        }
     }
 }
 
