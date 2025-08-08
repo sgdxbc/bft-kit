@@ -21,13 +21,13 @@ pub type ClientSeq = u64;
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Request<Op> {
     pub client_id: ClientId,
-    pub seq: ClientSeq,
+    pub client_seq: ClientSeq,
     pub op: Op,
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Reply<Res, M> {
-    pub seq: ClientSeq,
+    pub client_seq: ClientSeq,
     pub res: Res,
     pub replication_metadata: M,
 }
@@ -81,12 +81,12 @@ where
                     if self
                         .replies
                         .get(&request.client_id)
-                        .is_some_and(|reply| reply.seq >= request.seq)
+                        .is_some_and(|reply| reply.client_seq >= request.client_seq)
                     {
                         continue;
                     }
                     let reply = Reply {
-                        seq: request.seq,
+                        client_seq: request.client_seq,
                         res: self.app.update(&request.op),
                         replication_metadata: replicated.metadata.clone(),
                     };
@@ -106,8 +106,8 @@ where
             ServiceMessage::Replication(metadata) => return self.replication.receive(metadata),
         };
         match self.replies.get(&request.client_id) {
-            Some(reply) if reply.seq > request.seq => {}
-            Some(reply) if reply.seq == request.seq => {
+            Some(reply) if reply.client_seq > request.client_seq => {}
+            Some(reply) if reply.client_seq == request.client_seq => {
                 self.send_buffer.push((request.client_id, reply.clone()))
             }
             _ => self.replication.submit(request),

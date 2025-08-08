@@ -85,8 +85,8 @@ where
         match message {
             ServiceMessage::Replication(metadata) => self.replication.receive(metadata),
             ServiceMessage::Request(request) => match self.replies.get(&request.client_id) {
-                Some(reply) if reply.seq > request.seq => {}
-                Some(reply) if reply.seq == request.seq => self
+                Some(reply) if reply.client_seq > request.client_seq => {}
+                Some(reply) if reply.client_seq == request.client_seq => self
                     .send_buffer
                     .push(ServiceSend::Reply(request.client_id, reply.clone())),
                 _ => self.replication.submit(request),

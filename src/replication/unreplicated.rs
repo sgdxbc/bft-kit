@@ -14,18 +14,20 @@ pub struct Client<A: AppState> {
     config: ClientConfig,
 
     seq: ClientSeq,
-    submits: BTreeMap<ClientSeq, ClientSubmit<A::Op>>,
-    send_buffer: Vec<Request<A::Op>>,
-    output_buffer: Vec<(ClientSeq, A::Res)>,
+    submits: BTreeMap<ClientSeq, SubmitData<A>>,
+
+    submit_buffer: Vec<(ClientSeq, A::Op)>,
+    receive_buffer: Vec<Reply<A::Res, ()>>,
 }
 
 pub struct ClientConfig {
     timeout: Duration,
+    // resend interval
 }
 
-struct ClientSubmit<Op> {
+struct SubmitData<A: AppState> {
     #[allow(unused)]
-    op: Op,
+    op: A::Op,
     timeout_at: Duration,
 }
 
@@ -36,44 +38,53 @@ impl<A: AppState> Client<A> {
             config,
             seq: 0,
             submits: Default::default(),
-            send_buffer: Default::default(),
-            output_buffer: Default::default(),
+            submit_buffer: Default::default(),
+            receive_buffer: Default::default(),
         }
     }
 }
 
-impl<A: AppState> ClientState<A::Op> for Client<A>
+impl<A: AppState> ClientState<A::Op, A::Res> for Client<A>
 where
     A::Op: Clone,
 {
-    fn submit(&mut self, op: A::Op, at: Duration) -> ClientSeq {
+    fn submit(&mut self, op: A::Op) -> ClientSeq {
         self.seq += 1;
-        self.submits.insert(
-            self.seq,
-            ClientSubmit {
-                op: op.clone(),
-                timeout_at: at + self.config.timeout,
-            },
-        );
-        self.send_buffer.push(Request {
-            client_id: self.id,
-            seq: self.seq,
-            op,
-        });
+        self.submit_buffer.push((self.seq, op));
         self.seq
     }
 }
 
-impl<A: AppState> State for Client<A> {
+impl<A: AppState> State for Client<A>
+where
+    A::Op: Clone,
+{
     type Send = (ReplicaIndex, Request<A::Op>);
     type Output = (ClientSeq, A::Res);
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some(output) = self.output_buffer.pop() {
-            return Proceed::Output(output);
+        if let Some(reply) = self.receive_buffer.pop() {
+            match self.submits.remove(&reply.client_seq) {
+                Some(_) => return Proceed::Output((reply.client_seq, reply.res)),
+                None => return self.proceed(since_start),
+            }
         }
-        if let Some(req) = self.send_buffer.pop() {
-            return Proceed::Send((0, req));
+
+        if let Some((seq, op)) = self.submit_buffer.pop() {
+            self.submits.insert(
+                seq,
+                SubmitData {
+                    op: op.clone(),
+                    timeout_at: since_start + self.config.timeout,
+                },
+            );
+            let request = Request {
+                client_id: self.id,
+                client_seq: seq,
+                op,
+            };
+            return Proceed::Send((0, request));
         }
+
         loop {
             let Some((&seq, submit)) = self.submits.first_key_value() else {
                 break Proceed::Pending(None);
@@ -88,10 +99,7 @@ impl<A: AppState> State for Client<A> {
 
     type Message = Reply<A::Res, ()>;
     fn receive(&mut self, message: Self::Message) {
-        if self.submits.remove(&message.seq).is_none() {
-            return;
-        };
-        self.output_buffer.push((message.seq, message.res))
+        self.receive_buffer.push(message)
     }
 }
 

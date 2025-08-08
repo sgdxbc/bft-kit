@@ -12,8 +12,8 @@ use crate::{
 
 pub mod transport;
 
-pub trait ClientState<Op>: State {
-    fn submit(&mut self, op: Op, at: Duration) -> ClientSeq;
+pub trait ClientState<Op, Res>: State<Output = (ClientSeq, Res)> {
+    fn submit(&mut self, op: Op) -> ClientSeq;
 }
 
 pub trait WorkloadState {
@@ -51,8 +51,7 @@ impl<W: WorkloadState, C> From<CloseLoopWorker<W, C>> for Latencies {
     }
 }
 
-impl<C: ClientState<W::Op, Output = (ClientSeq, W::Res)>, W: WorkloadState> State
-    for CloseLoopWorker<W, C>
+impl<C: ClientState<W::Op, W::Res>, W: WorkloadState> State for CloseLoopWorker<W, C>
 where
     W::Op: Clone,
 {
@@ -64,7 +63,7 @@ where
             let Some(op) = self.workload.next_op() else {
                 return Proceed::Output(Ok(()));
             };
-            self.client.submit(op.clone(), since_start);
+            self.client.submit(op.clone());
             self.submitted = Some((Instant::now(), op))
         }
         match self.client.proceed(since_start) {
@@ -122,8 +121,7 @@ impl<W: WorkloadState, C> From<OpenLoopWorker<W, C>> for Latencies {
     }
 }
 
-impl<W: WorkloadState, C: ClientState<W::Op, Output = (ClientSeq, W::Res)>> State
-    for OpenLoopWorker<W, C>
+impl<W: WorkloadState, C: ClientState<W::Op, W::Res>> State for OpenLoopWorker<W, C>
 where
     W::Op: Clone,
 {
@@ -138,7 +136,7 @@ where
                     self.next_submit = None;
                     break;
                 };
-                let seq = self.client.submit(op.clone(), since_start);
+                let seq = self.client.submit(op.clone());
                 self.submitted.insert(seq, (now, op));
                 // randomize interval?
                 *next_submit += Duration::from_secs_f32(1. / self.target_tput)

@@ -44,7 +44,7 @@ impl<A: AppState, W: WorkloadState<Op = A::Op>> State for Replica<A, W> {
                 let request = Request {
                     op,
                     client_id: 0,
-                    seq: self.seq,
+                    client_seq: self.seq,
                 };
                 Proceed::Output(Replicated {
                     block: vec![request],
