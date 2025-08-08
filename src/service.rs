@@ -56,14 +56,34 @@ impl<R: ReplicationState<Request<A::Op>>, A: AppState> Service<R, A> {
     }
 }
 
-pub enum ServiceSend<Res, M, S> {
+pub enum ServiceSend<Res, M, RS> {
     Reply(ClientId, Reply<Res, M>),
-    Replication(S),
+    // cross service send
+    Replication(RS),
 }
 
-pub enum ServiceMessage<Op, M> {
+pub enum ServiceMessage<Op, RM> {
     Request(Request<Op>),
-    Replication(M),
+    // cross service message
+    Replication(RM),
+}
+
+pub trait ServiceState<A: AppState, R: ReplicationState<Self::Log>>:
+    State<
+        Send = ServiceSend<A::Res, R::Metadata, R::Send>,
+        Output = Never,
+        Message = ServiceMessage<A::Op, R::Message>,
+    >
+{
+    type Log;
+}
+
+impl<R: ReplicationState<Request<A::Op>>, A: AppState> ServiceState<A, R> for Service<R, A>
+where
+    R::Metadata: Clone,
+    Reply<A::Res, R::Metadata>: Clone,
+{
+    type Log = Request<A::Op>;
 }
 
 impl<R: ReplicationState<Request<A::Op>>, A: AppState> State for Service<R, A>

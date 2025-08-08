@@ -12,22 +12,23 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
-    Never,
     app::AppState,
     crypto::cert::quinn::{client_config, server_config},
     replication::{
         ReplicaIndex,
         transport::{ReplicaTable, ReplicationSend},
     },
-    service::{ClientId, Reply, Request, ServiceMessage, ServiceSend},
-    state::{Proceed, State},
+    service::{ClientId, ReplicationState, Reply, Request, ServiceMessage, ServiceSend},
+    state::Proceed,
     transport::{BINCODE_CONFIG, read_loop, run_write, trace_error},
 };
 
+use super::ServiceState;
+
 pub async fn run_replicated_service<
-    S: State<Output = Never, Message = ServiceMessage<A::Op, RM>>,
+    S: ServiceState<A, R>,
     A: AppState,
-    RM,
+    R: ReplicationState<S::Log>,
 >(
     mut service: S,
     replica_index: ReplicaIndex,
@@ -36,8 +37,9 @@ pub async fn run_replicated_service<
 ) -> anyhow::Result<()>
 where
     Request<A::Op>: Decode<()>,
-    RM: Decode<()>,
-    S::Send: for<'a> SendWith<Context<'a>>,
+    Reply<A::Res, R::Metadata>: Encode,
+    R::Message: Decode<()>,
+    R::Send: ReplicationSend,
 {
     let mut endpoint = Endpoint::server(server_config(), addrs[replica_index as usize])?;
     endpoint.set_default_client_config(client_config());
@@ -191,7 +193,7 @@ where
     Ok(())
 }
 
-fn service_proceed<S: State<Output = Never>>(
+fn service_proceed<S: ServiceState<A, R>, A: AppState, R: ReplicationState<S::Log>>(
     service: &mut S,
     since_start: Duration,
     client_table: &HashMap<ClientId, (Connection, JoinHandle<()>)>,
@@ -199,43 +201,18 @@ fn service_proceed<S: State<Output = Never>>(
     write_tracker: &TaskTracker,
 ) -> anyhow::Result<Option<Duration>>
 where
-    S::Send: for<'a> SendWith<Context<'a>>,
+    Reply<A::Res, R::Metadata>: Encode,
+    R::Send: ReplicationSend,
 {
     loop {
         match service.proceed(since_start) {
             Proceed::Pending(tick_after) => break Ok(tick_after),
-            Proceed::Send(send) => send.apply(Context {
-                client_table,
-                replica_table,
-                write_tracker,
-            })?,
-        }
-    }
-}
-
-pub trait SendWith<C> {
-    fn apply(self, context: C) -> anyhow::Result<()>;
-}
-
-pub struct Context<'a> {
-    client_table: &'a HashMap<ClientId, (Connection, JoinHandle<()>)>,
-    replica_table: &'a HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
-    write_tracker: &'a TaskTracker,
-}
-
-impl<Res, M, RS> SendWith<Context<'_>> for ServiceSend<Res, M, RS>
-where
-    Reply<Res, M>: Encode,
-    RS: ReplicationSend,
-{
-    fn apply(self, context: Context<'_>) -> anyhow::Result<()> {
-        match self {
-            ServiceSend::Reply(client_id, reply) => {
-                let Some((connection, _)) = context.client_table.get(&client_id) else {
+            Proceed::Send(ServiceSend::Reply(client_id, reply)) => {
+                let Some((connection, _)) = client_table.get(&client_id) else {
                     tracing::warn!(%client_id, "client connection not found");
-                    return Ok(());
+                    continue;
                 };
-                context.write_tracker.spawn(trace_error(
+                write_tracker.spawn(trace_error(
                     "connection write",
                     run_write(
                         connection.clone(),
@@ -243,11 +220,10 @@ where
                     ),
                 ));
             }
-            ServiceSend::Replication(send) => {
-                send.apply(context.replica_table, context.write_tracker)?
+            Proceed::Send(ServiceSend::Replication(send)) => {
+                send.apply(replica_table, write_tracker)?
             }
         }
-        Ok(())
     }
 }
 

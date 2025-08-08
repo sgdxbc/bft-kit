@@ -106,12 +106,8 @@ async fn service(index: ReplicaIndex) -> anyhow::Result<()> {
     let service = Service::new(replica, Null);
     let cancel = CancellationToken::new();
 
-    let service_task = run_replicated_service::<_, Null, _>(
-        service,
-        index,
-        settings.get_values("addr")?,
-        cancel.clone(),
-    );
+    let service_task =
+        run_replicated_service(service, index, settings.get_values("addr")?, cancel.clone());
     let cancel_task = async move {
         ctrl_c().await?;
         cancel.cancel();

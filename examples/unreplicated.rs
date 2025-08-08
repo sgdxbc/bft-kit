@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
 
     let replica = Replica::new();
     let service = Service::new(replica, Null);
-    let service_task = spawn(run_replicated_service::<_, Null, _>(
+    let service_task = spawn(run_replicated_service(
         service,
         0,
         addrs.clone(),
