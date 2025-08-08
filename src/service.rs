@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Duration,
+};
 
 use bincode::{Decode, Encode};
 
@@ -36,8 +39,9 @@ pub struct Service<R: ReplicationState<Request<A::Op>>, A: AppState> {
     replication: R,
     app: A,
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
-    #[allow(clippy::type_complexity)]
-    send_buffer: Vec<(ClientId, Reply<A::Res, R::Metadata>)>,
+    replicated: Option<(VecDeque<Request<A::Op>>, R::Metadata)>,
+
+    receive_buffer: Vec<Request<A::Op>>,
 }
 
 impl<R: ReplicationState<Request<A::Op>>, A: AppState> Service<R, A> {
@@ -46,7 +50,8 @@ impl<R: ReplicationState<Request<A::Op>>, A: AppState> Service<R, A> {
             replication,
             app,
             replies: Default::default(),
-            send_buffer: Default::default(),
+            replicated: None,
+            receive_buffer: Default::default(),
         }
     }
 }
@@ -70,29 +75,46 @@ where
     type Send = ServiceSend<A::Res, R::Metadata, R::Send>;
     type Output = Never;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some((client_id, reply)) = self.send_buffer.pop() {
-            return Proceed::Send(ServiceSend::Reply(client_id, reply));
+        if let Some((requests, metadata)) = &mut self.replicated {
+            let Some(request) = requests.pop_front() else {
+                self.replicated = None;
+                return self.proceed(since_start);
+            };
+            if let Some(reply) = self.replies.get(&request.client_id)
+                && reply.client_seq >= request.client_seq
+            {
+                return self.proceed(since_start);
+            }
+            let reply = Reply {
+                client_seq: request.client_seq,
+                res: self.app.update(&request.op),
+                replication_metadata: metadata.clone(),
+            };
+            self.replies.insert(request.client_id, reply.clone());
+            return Proceed::Send(ServiceSend::Reply(request.client_id, reply));
         }
+
+        if let Some(request) = self.receive_buffer.pop() {
+            return match self.replies.get(&request.client_id) {
+                Some(reply) if reply.client_seq > request.client_seq => self.proceed(since_start),
+                Some(reply) if reply.client_seq == request.client_seq => {
+                    Proceed::Send(ServiceSend::Reply(request.client_id, reply.clone()))
+                }
+                _ => {
+                    self.replication.submit(request);
+                    self.proceed(since_start)
+                }
+            };
+        }
+
         match self.replication.proceed(since_start) {
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
             Proceed::Send(send) => Proceed::Send(ServiceSend::Replication(send)),
             Proceed::Output(replicated) => {
-                for request in replicated.block {
-                    if self
-                        .replies
-                        .get(&request.client_id)
-                        .is_some_and(|reply| reply.client_seq >= request.client_seq)
-                    {
-                        continue;
-                    }
-                    let reply = Reply {
-                        client_seq: request.client_seq,
-                        res: self.app.update(&request.op),
-                        replication_metadata: replicated.metadata.clone(),
-                    };
-                    self.replies.insert(request.client_id, reply.clone());
-                    self.send_buffer.push((request.client_id, reply))
-                }
+                let replaced = self
+                    .replicated
+                    .replace((replicated.block.into(), replicated.metadata));
+                assert!(replaced.is_none());
                 self.proceed(since_start)
             }
         }
@@ -101,16 +123,9 @@ where
     type Message = ServiceMessage<A::Op, R::Message>;
     fn receive(&mut self, message: Self::Message) {
         // dbg!(&message);
-        let request = match message {
-            ServiceMessage::Request(request) => request,
-            ServiceMessage::Replication(metadata) => return self.replication.receive(metadata),
-        };
-        match self.replies.get(&request.client_id) {
-            Some(reply) if reply.client_seq > request.client_seq => {}
-            Some(reply) if reply.client_seq == request.client_seq => {
-                self.send_buffer.push((request.client_id, reply.clone()))
-            }
-            _ => self.replication.submit(request),
+        match message {
+            ServiceMessage::Request(request) => self.receive_buffer.push(request),
+            ServiceMessage::Replication(message) => self.replication.receive(message),
         }
     }
 }
