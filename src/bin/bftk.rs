@@ -6,7 +6,7 @@ use bft_kit::{
     init_logging_file,
     parse::Settings,
     replication::{ReplicaIndex, unreplicated},
-    service::{Request, Service, transport::run_replicated_service},
+    service::{Service, transport::run_replicated_service},
     set_affinity_block_on,
     workload::{CloseLoopWorker, Latencies, OpenLoopWorker, transport::run_worker},
 };
@@ -106,7 +106,7 @@ async fn service(index: ReplicaIndex) -> anyhow::Result<()> {
     let service = Service::new(replica, Null);
     let cancel = CancellationToken::new();
 
-    let service_task = run_replicated_service::<_, unreplicated::Replica<Request<()>>, _, Null>(
+    let service_task = run_replicated_service::<_, Null, _>(
         service,
         index,
         settings.get_values("addr")?,

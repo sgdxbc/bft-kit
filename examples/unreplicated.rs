@@ -4,8 +4,8 @@ use bft_kit::{
     app::null::Null,
     init_logging,
     parse::Settings,
-    replication::unreplicated::{self, Client, Replica},
-    service::{Request, Service, transport::run_replicated_service},
+    replication::unreplicated::{Client, Replica},
+    service::{Service, transport::run_replicated_service},
     workload::{self, CloseLoopWorker, transport::run_worker},
 };
 use tokio::spawn;
@@ -21,12 +21,12 @@ async fn main() -> anyhow::Result<()> {
 
     let replica = Replica::new();
     let service = Service::new(replica, Null);
-    let service_task = spawn(run_replicated_service::<
-        _,
-        unreplicated::Replica<Request<()>>,
-        _,
-        Null,
-    >(service, 0, addrs.clone(), cancel.clone()));
+    let service_task = spawn(run_replicated_service::<_, Null, _>(
+        service,
+        0,
+        addrs.clone(),
+        cancel.clone(),
+    ));
 
     let mut settings = Settings::new();
     settings.parse("client.timeout 1.");
