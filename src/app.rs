@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashSet, VecDeque},
-    time::Duration,
-};
+use std::{collections::VecDeque, time::Duration};
 
 use crate::{
     Never,
@@ -14,54 +11,35 @@ pub mod null;
 pub trait AppState {
     type Op;
     type Res;
-    fn update(&mut self, op: &Self::Op) -> Self::Res;
+    fn execute(&mut self, op: &Self::Op) -> Self::Res;
 }
 
-pub type ShardIndex = u32;
-
-pub trait ShardedAppState {
-    type Shard;
-    fn set_shard(&mut self, index: ShardIndex, shard: Self::Shard);
-    fn get_shard(&self, index: ShardIndex) -> Option<&Self::Shard>;
-    fn retain_shards(&self, indices: &HashSet<ShardIndex>);
-
-    type Op;
-    type Res;
-    fn update(&mut self, op: &Self::Op) -> ShardedAppUpdate<Self::Res>;
-}
-
-pub enum ShardedAppUpdate<R> {
-    RequireShards(HashSet<ShardIndex>),
-    Res(R),
-}
-
-pub struct AdaptedApp<A: AppState> {
+pub struct Buffered<A: AppState> {
     app: A,
-    results: VecDeque<A::Res>,
+    ops: VecDeque<A::Op>,
 }
 
-impl<A: AppState> From<A> for AdaptedApp<A> {
+impl<A: AppState> From<A> for Buffered<A> {
     fn from(app: A) -> Self {
         Self {
             app,
-            results: Default::default(),
+            ops: Default::default(),
         }
     }
 }
 
-impl<A: AppState> State for AdaptedApp<A> {
+impl<A: AppState> State for Buffered<A> {
     type Send = Never;
     type Output = A::Res;
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        match self.results.pop_front() {
-            Some(res) => Proceed::Output(res),
+        match self.ops.pop_front() {
+            Some(op) => Proceed::Output(self.app.execute(&op)),
             None => Proceed::Pending(None),
         }
     }
 
     type Message = A::Op;
-    fn receive(&mut self, message: Self::Message) {
-        let res = self.app.update(&message);
-        self.results.push_back(res);
+    fn receive(&mut self, op: Self::Message) {
+        self.ops.push_back(op);
     }
 }

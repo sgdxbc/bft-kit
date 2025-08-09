@@ -1,11 +1,10 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
 use crate::{
     Never,
-    app::{ShardIndex, ShardedAppState},
     replication::ReplicationState,
     service::{ClientId, Reply},
     state::{Proceed, State},
@@ -13,22 +12,44 @@ use crate::{
 
 use super::Request;
 
+pub mod app;
+
+pub type ShardIndex = u32;
+
+pub trait ShardedStateApp {
+    type Op;
+    type Res;
+    type Shard;
+    type Execute: PartialStateExecute<Self::Shard, Self::Res>;
+    fn new_shard(&self, index: ShardIndex) -> Self::Shard;
+    fn new_execute(&self, op: Self::Op) -> Self::Execute;
+}
+
+pub trait PartialStateExecute<S, Res> {
+    fn proceed(&mut self, shards: &mut HashMap<ShardIndex, S>) -> PartialStateExecuteOutput<Res>;
+}
+
+pub enum PartialStateExecuteOutput<R> {
+    RequireAccess(HashSet<ShardIndex>),
+    Complete(R),
+}
+
 pub type ServiceIndex = u16;
 type StateVersion = u64;
 
-pub struct Service<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> {
+pub struct Service<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp> {
     replication: R,
     app: A,
 
-    state: StateManager<A::Shard>,
+    state: StateManager<A>,
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     request_buffer: VecDeque<(Request<A::Op>, R::Metadata)>,
 
     send_buffer: Vec<ServiceSend<R, A>>,
-    reordered_pushes: HashMap<StateVersion, Vec<message::PushShard<A::Shard>>>,
+    reordered_pushes: HashMap<StateVersion, Vec<message::PushShard<A>>>,
 }
 
-impl<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> Service<R, A> {
+impl<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp> Service<R, A> {
     pub fn new(replication: R, app: A, index: ServiceIndex) -> Self {
         Self {
             replication,
@@ -46,7 +67,7 @@ impl<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> Service<R, A> {
     }
 }
 
-pub enum ServiceSend<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> {
+pub enum ServiceSend<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp> {
     Service(ServiceRecipient, Message<A>),
     Reply(ClientId, Reply<A::Res, R::Metadata>),
     Replication(R::Send),
@@ -59,17 +80,17 @@ pub enum ServiceRecipient {
     Service(ServiceIndex),
 }
 
-pub enum ServiceMessage<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> {
+pub enum ServiceMessage<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp> {
     Request(Request<A::Op>),
     Service(Message<A>),
     Replication(R::Message),
 }
 
-pub enum Message<A: ShardedAppState> {
-    PushShard(message::PushShard<A::Shard>),
+pub enum Message<A: ShardedStateApp> {
+    PushShard(message::PushShard<A>),
 }
 
-impl<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> State for Service<R, A>
+impl<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp> State for Service<R, A>
 where
     Reply<A::Res, R::Metadata>: Clone,
 {
@@ -111,7 +132,7 @@ where
     }
 }
 
-impl<R: ReplicationState<Request<A::Op>>, A: ShardedAppState> Service<R, A>
+impl<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp> Service<R, A>
 where
     Reply<A::Res, R::Metadata>: Clone,
 {
@@ -129,9 +150,7 @@ struct StateManager<S> {
 }
 
 mod message {
-    use crate::app::ShardIndex;
-
-    use super::StateVersion;
+    use super::{ShardIndex, StateVersion};
 
     pub struct PushShard<S> {
         pub state_version: StateVersion,
