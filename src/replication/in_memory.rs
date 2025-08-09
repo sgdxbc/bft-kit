@@ -45,7 +45,7 @@ impl<W: WorkloadState> State for Replica<W> {
                     client_seq: self.seq,
                 };
                 Proceed::Output(Replicated {
-                    block: vec![request],
+                    logs: vec![request],
                     metadata: (),
                 })
             }

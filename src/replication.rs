@@ -6,15 +6,15 @@ pub mod unreplicated;
 
 pub type ReplicaIndex = u16;
 
-pub struct Replicated<T, M> {
-    pub block: Vec<T>,
-    pub metadata: M,
+pub struct Replicated<L, D> {
+    pub logs: Vec<L>,
+    pub metadata: D, // D for data
 }
 
-pub trait ReplicationState<T>: State<Output = Replicated<T, Self::Metadata>> {
+pub trait ReplicationState<L>: State<Output = Replicated<L, Self::Metadata>> {
     type Metadata;
 
-    fn submit(&mut self, entry: T);
+    fn submit(&mut self, log: L);
 }
 
 pub enum ReplicationSend<M> {

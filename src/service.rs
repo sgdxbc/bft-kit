@@ -29,10 +29,10 @@ pub struct Request<Op> {
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
-pub struct Reply<Res, M> {
+pub struct Reply<Res, RD> {
     pub client_seq: ClientSeq,
     pub res: Res,
-    pub replication_metadata: M,
+    pub replication_metadata: RD,
 }
 
 pub struct Service<R: ReplicationState<Request<A::Op>>, A: AppState> {
@@ -58,8 +58,8 @@ impl<R: ReplicationState<Request<A::Op>>, A: AppState> Service<R, A> {
     }
 }
 
-pub enum ServiceSend<Res, M, RS> {
-    Reply(ClientId, Reply<Res, M>),
+pub enum ServiceSend<Res, RD, RS> {
+    Reply(ClientId, Reply<Res, RD>),
     // cross service send
     Replication(RS),
 }
@@ -135,7 +135,7 @@ where
             Proceed::Output(replicated) => {
                 let replaced = self
                     .replicated
-                    .replace((replicated.block.into(), replicated.metadata));
+                    .replace((replicated.logs.into(), replicated.metadata));
                 assert!(replaced.is_none());
                 self.proceed(since_start)
             }

@@ -128,7 +128,7 @@ impl<T> ReplicationState<T> for Replica<T> {
 
     fn submit(&mut self, entry: T) {
         self.output_buffer.push(Replicated {
-            block: vec![entry],
+            logs: vec![entry],
             metadata: (),
         })
     }
