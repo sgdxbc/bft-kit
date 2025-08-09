@@ -14,6 +14,17 @@ pub trait AppState {
     fn execute(&mut self, op: &Self::Op) -> Self::Res;
 }
 
+pub struct Batched<A>(A);
+
+impl<A: AppState> AppState for Batched<A> {
+    type Op = Vec<A::Op>;
+    type Res = Vec<A::Res>;
+
+    fn execute(&mut self, ops: &Self::Op) -> Self::Res {
+        ops.iter().map(|op| self.0.execute(op)).collect()
+    }
+}
+
 pub struct Buffered<A: AppState> {
     app: A,
     ops: VecDeque<A::Op>,

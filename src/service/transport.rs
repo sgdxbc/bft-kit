@@ -22,11 +22,7 @@ use crate::{
 
 use super::ServiceState;
 
-pub async fn run_replicated_service<
-    S: ServiceState<A, R>,
-    A: AppState,
-    R: ReplicationState<S::Log>,
->(
+pub async fn run_service<S: ServiceState<A, R>, A: AppState, R: ReplicationState<S::Log>>(
     mut service: S,
     replica_index: ReplicaIndex,
     addrs: Vec<SocketAddr>,
