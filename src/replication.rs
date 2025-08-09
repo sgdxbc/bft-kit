@@ -17,7 +17,7 @@ pub trait ReplicationState<L>: State<Output = Replicated<L, Self::Metadata>> {
     fn submit(&mut self, log: L);
 }
 
-pub enum ReplicationSend<M> {
-    All(M),
-    Index(ReplicaIndex, M),
+pub enum ReplicationRecipient {
+    All,
+    Index(ReplicaIndex),
 }

@@ -33,8 +33,12 @@ pub async fn read_loop<E: Send + Sync + 'static>(
     Ok(())
 }
 
-pub async fn run_write(connection: Connection, message: Vec<u8>) -> anyhow::Result<()> {
-    connection.open_uni().await?.write_all(&message).await?;
+pub async fn run_write(connection: Connection, message: impl AsRef<[u8]>) -> anyhow::Result<()> {
+    connection
+        .open_uni()
+        .await?
+        .write_all(message.as_ref())
+        .await?;
     Ok(())
 }
 

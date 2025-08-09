@@ -1,12 +1,14 @@
 use bincode::Encode;
 use quinn::Connection;
-use tokio_util::task::TaskTracker;
+use tokio_util::{bytes::Bytes, task::TaskTracker};
 
 use crate::{
     Never,
-    replication::{ReplicaIndex, ReplicationSend},
+    replication::ReplicaIndex,
     transport::{BINCODE_CONFIG, PerformSend, run_write, trace_error},
 };
+
+use super::ReplicationRecipient;
 
 pub trait ReplicaTable {
     fn get(&self, index: ReplicaIndex) -> Option<&Connection>;
@@ -20,10 +22,10 @@ impl<T: ReplicaTable + ?Sized> PerformSend<Never> for T {
     }
 }
 
-// disabled for conflicting
+// disabled due to conflict
 // impl<T: ReplicaTable, M: Encode> PerformSend<M> for T {
 //     fn perform(&self, message: M, send_tracker: &TaskTracker) -> anyhow::Result<()> {
-//         self.perform(ReplicationSend::All(message), send_tracker)
+//         self.perform((ReplicationRecipient::All, message), send_tracker)
 //     }
 // }
 
@@ -31,23 +33,24 @@ impl<T: ReplicaTable + ?Sized> PerformSend<Never> for T {
 // conflict hopefully), but cannot think of any protocol that only unicast
 // without broadcast
 
-impl<T: ReplicaTable + ?Sized, M: Encode> PerformSend<ReplicationSend<M>> for T {
-    fn perform(&self, send: ReplicationSend<M>, send_tracker: &TaskTracker) -> anyhow::Result<()> {
-        match send {
-            ReplicationSend::Index(index, message) => {
+impl<T: ReplicaTable + ?Sized, M: Encode> PerformSend<(ReplicationRecipient, M)> for T {
+    fn perform(
+        &self,
+        (recipient, message): (ReplicationRecipient, M),
+        send_tracker: &TaskTracker,
+    ) -> anyhow::Result<()> {
+        let bytes = Bytes::from(bincode::encode_to_vec(message, BINCODE_CONFIG)?);
+        match recipient {
+            ReplicationRecipient::Index(index) => {
                 let Some(connection) = self.get(index) else {
                     anyhow::bail!("unknown replica index {index}");
                 };
                 send_tracker.spawn(trace_error(
                     "replica connection write",
-                    run_write(
-                        connection.clone(),
-                        bincode::encode_to_vec(message, BINCODE_CONFIG)?,
-                    ),
+                    run_write(connection.clone(), bytes),
                 ));
             }
-            ReplicationSend::All(message) => {
-                let bytes = bincode::encode_to_vec(message, BINCODE_CONFIG)?;
+            ReplicationRecipient::All => {
                 for connection in self.get_all() {
                     send_tracker.spawn(trace_error(
                         "replica connection write",
