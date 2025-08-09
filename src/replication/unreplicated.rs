@@ -46,7 +46,7 @@ impl<A: AppState> Client<A> {
     }
 }
 
-impl<A: AppState> ClientState<A::Op, A::Res> for Client<A>
+impl<A: AppState> ClientState<A> for Client<A>
 where
     A::Op: Clone,
 {

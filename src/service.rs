@@ -39,10 +39,12 @@ pub struct Service<R: ReplicationState<Request<A::Op>>, A: AppState> {
     replication: R,
     app: A,
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
-    replicated: Option<(VecDeque<Request<A::Op>>, R::Metadata)>,
+    replicated: Option<(ReplicatedRequests<A::Op>, R::Metadata)>,
 
     receive_buffer: Vec<Request<A::Op>>,
 }
+
+type ReplicatedRequests<Op> = VecDeque<Request<Op>>;
 
 impl<R: ReplicationState<Request<A::Op>>, A: AppState> Service<R, A> {
     pub fn new(replication: R, app: A) -> Self {

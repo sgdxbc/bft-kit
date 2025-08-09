@@ -9,14 +9,17 @@ impl AppState for Null {
 }
 
 impl WorkloadState for Null {
-    type Op = ();
-    type Res = ();
+    type App = Self;
 
-    fn next_op(&mut self) -> Option<Self::Op> {
+    fn next_op(&mut self) -> Option<<Self::App as AppState>::Op> {
         Some(())
     }
 
-    fn validate(&self, (): Self::Op, (): Self::Res) -> anyhow::Result<()> {
+    fn validate(
+        &self,
+        (): <Self::App as AppState>::Op,
+        (): <Self::App as AppState>::Res,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 }
