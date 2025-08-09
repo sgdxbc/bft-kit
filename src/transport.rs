@@ -1,5 +1,6 @@
 use quinn::{Connection, ConnectionError};
 use tokio::sync::mpsc;
+use tokio_util::task::TaskTracker;
 
 pub const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
@@ -35,6 +36,10 @@ pub async fn read_loop<E: Send + Sync + 'static>(
 pub async fn run_write(connection: Connection, message: Vec<u8>) -> anyhow::Result<()> {
     connection.open_uni().await?.write_all(&message).await?;
     Ok(())
+}
+
+pub trait PerformSend<S> {
+    fn perform(&self, send: S, send_tracker: &TaskTracker) -> anyhow::Result<()>;
 }
 
 pub async fn trace_error(label: &str, task: impl Future<Output = anyhow::Result<()>>) {

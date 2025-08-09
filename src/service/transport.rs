@@ -14,13 +14,10 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::{
     app::AppState,
     crypto::cert::quinn::{client_config, server_config},
-    replication::{
-        ReplicaIndex,
-        transport::{ReplicaTable, ReplicationSend},
-    },
+    replication::{ReplicaIndex, transport::ReplicaTable},
     service::{ClientId, ReplicationState, Reply, Request, ServiceMessage, ServiceSend},
     state::Proceed,
-    transport::{BINCODE_CONFIG, read_loop, run_write, trace_error},
+    transport::{BINCODE_CONFIG, PerformSend, read_loop, run_write, trace_error},
 };
 
 use super::ServiceState;
@@ -39,7 +36,7 @@ where
     Request<A::Op>: Decode<()>,
     Reply<A::Res, R::Metadata>: Encode,
     R::Message: Decode<()>,
-    R::Send: ReplicationSend,
+    HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
 {
     let mut endpoint = Endpoint::server(server_config(), addrs[replica_index as usize])?;
     endpoint.set_default_client_config(client_config());
@@ -202,7 +199,7 @@ fn service_proceed<S: ServiceState<A, R>, A: AppState, R: ReplicationState<S::Lo
 ) -> anyhow::Result<Option<Duration>>
 where
     Reply<A::Res, R::Metadata>: Encode,
-    R::Send: ReplicationSend,
+    HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
 {
     loop {
         match service.proceed(since_start) {
@@ -221,7 +218,7 @@ where
                 ));
             }
             Proceed::Send(ServiceSend::Replication(send)) => {
-                send.apply(replica_table, write_tracker)?
+                replica_table.perform(send, write_tracker)?
             }
         }
     }

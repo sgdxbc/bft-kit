@@ -10,13 +10,10 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     crypto::cert::quinn::client_config,
-    replication::{
-        ReplicaIndex,
-        transport::{ReplicaTable, ReplicationSend},
-    },
+    replication::{ReplicaIndex, transport::ReplicaTable},
     service::ClientId,
     state::{Proceed, State},
-    transport::{BINCODE_CONFIG, read_loop, trace_error},
+    transport::{BINCODE_CONFIG, PerformSend, read_loop, trace_error},
     workload::Latencies,
 };
 
@@ -28,7 +25,7 @@ pub async fn run_worker<S: State<Output = anyhow::Result<()>> + Into<Latencies>>
 ) -> anyhow::Result<Latencies>
 where
     S::Message: Decode<()>,
-    S::Send: ReplicationSend,
+    [Connection]: PerformSend<S::Send>,
 {
     let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(client_config());
@@ -95,7 +92,7 @@ fn worker_proceed<S: State<Output = anyhow::Result<()>>>(
     write_tracker: &TaskTracker,
 ) -> anyhow::Result<Option<Duration>>
 where
-    S::Send: ReplicationSend,
+    [Connection]: PerformSend<S::Send>,
 {
     loop {
         match worker.proceed(since_start) {
@@ -106,7 +103,7 @@ where
                 }
                 return Ok(tick_after);
             }
-            Proceed::Send(send) => send.apply(connections, write_tracker)?,
+            Proceed::Send(send) => connections.perform(send, write_tracker)?,
             Proceed::Output(output) => {
                 output?;
                 return Ok(None);

@@ -3,11 +3,13 @@ use std::{collections::BTreeMap, time::Duration};
 use crate::{
     Never,
     app::AppState,
-    replication::{ReplicaIndex, Replicated, ReplicationState},
+    replication::{Replicated, ReplicationState},
     service::{ClientId, ClientSeq, Reply, Request},
     state::{Proceed, State},
     workload::ClientState,
 };
+
+use super::ReplicationSend;
 
 pub struct Client<A: AppState> {
     id: ClientId,
@@ -59,7 +61,7 @@ impl<A: AppState> State for Client<A>
 where
     A::Op: Clone,
 {
-    type Send = (ReplicaIndex, Request<A::Op>);
+    type Send = ReplicationSend<Request<A::Op>>;
     type Output = (ClientSeq, A::Res);
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(reply) = self.receive_buffer.pop() {
@@ -82,7 +84,7 @@ where
                 client_seq: seq,
                 op,
             };
-            return Proceed::Send((0, request));
+            return Proceed::Send(ReplicationSend::Index(0, request));
         }
 
         loop {

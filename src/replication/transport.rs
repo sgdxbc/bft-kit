@@ -4,8 +4,8 @@ use tokio_util::task::TaskTracker;
 
 use crate::{
     Never,
-    replication::{ReplicaIndex, ReplicationRecipient},
-    transport::{BINCODE_CONFIG, run_write, trace_error},
+    replication::{ReplicaIndex, ReplicationSend},
+    transport::{BINCODE_CONFIG, PerformSend, run_write, trace_error},
 };
 
 pub trait ReplicaTable {
@@ -14,60 +14,42 @@ pub trait ReplicaTable {
     fn get_all(&self) -> impl Iterator<Item = &Connection>;
 }
 
-pub trait ReplicationSend {
-    fn apply(
-        self,
-        replica_connections: &(impl ReplicaTable + ?Sized),
-        tracker: &TaskTracker,
-    ) -> anyhow::Result<()>;
-}
-
-impl ReplicationSend for Never {
-    fn apply(
-        self,
-        _replica_connections: &(impl ReplicaTable + ?Sized),
-        _tracker: &TaskTracker,
-    ) -> anyhow::Result<()> {
+impl<T: ReplicaTable + ?Sized> PerformSend<Never> for T {
+    fn perform(&self, _send: Never, _send_tracker: &TaskTracker) -> anyhow::Result<()> {
         unreachable!()
     }
 }
 
-impl<M: Encode> ReplicationSend for (ReplicaIndex, M) {
-    fn apply(
-        self,
-        replica_connections: &(impl ReplicaTable + ?Sized),
-        tracker: &TaskTracker,
-    ) -> anyhow::Result<()> {
-        let (index, message) = self;
-        let Some(connection) = replica_connections.get(index) else {
-            anyhow::bail!("unknown replica index {index}");
-        };
-        tracker.spawn(trace_error(
-            "replica connection write",
-            run_write(
-                connection.clone(),
-                bincode::encode_to_vec(message, BINCODE_CONFIG)?,
-            ),
-        ));
-        Ok(())
-    }
-}
+// disabled for conflicting
+// impl<T: ReplicaTable, M: Encode> PerformSend<M> for T {
+//     fn perform(&self, message: M, send_tracker: &TaskTracker) -> anyhow::Result<()> {
+//         self.perform(ReplicationSend::All(message), send_tracker)
+//     }
+// }
 
-impl<M: Encode> ReplicationSend for (ReplicationRecipient, M) {
-    fn apply(
-        self,
-        replica_connections: &(impl ReplicaTable + ?Sized),
-        tracker: &TaskTracker,
-    ) -> anyhow::Result<()> {
-        let (recipient, message) = self;
-        match recipient {
-            ReplicationRecipient::Index(index) => {
-                (index, message).apply(replica_connections, tracker)?
+// we can also have a similar impl for `(index, message)` (which does not
+// conflict hopefully), but cannot think of any protocol that only unicast
+// without broadcast
+
+impl<T: ReplicaTable + ?Sized, M: Encode> PerformSend<ReplicationSend<M>> for T {
+    fn perform(&self, send: ReplicationSend<M>, send_tracker: &TaskTracker) -> anyhow::Result<()> {
+        match send {
+            ReplicationSend::Index(index, message) => {
+                let Some(connection) = self.get(index) else {
+                    anyhow::bail!("unknown replica index {index}");
+                };
+                send_tracker.spawn(trace_error(
+                    "replica connection write",
+                    run_write(
+                        connection.clone(),
+                        bincode::encode_to_vec(message, BINCODE_CONFIG)?,
+                    ),
+                ));
             }
-            ReplicationRecipient::All => {
+            ReplicationSend::All(message) => {
                 let bytes = bincode::encode_to_vec(message, BINCODE_CONFIG)?;
-                for connection in replica_connections.get_all() {
-                    tracker.spawn(trace_error(
+                for connection in self.get_all() {
+                    send_tracker.spawn(trace_error(
                         "replica connection write",
                         run_write(connection.clone(), bytes.clone()),
                     ));
