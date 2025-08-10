@@ -5,8 +5,9 @@ use crate::{
     state::{Proceed, State},
 };
 
-pub mod kv;
 pub mod null;
+pub mod utxo;
+pub mod ycsb;
 
 pub trait AppState {
     type Op;

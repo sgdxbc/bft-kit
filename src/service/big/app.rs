@@ -1,15 +1,10 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     hash::{BuildHasher as _, BuildHasherDefault, DefaultHasher, Hash},
     marker::PhantomData,
 };
 
 use derive_where::derive_where;
-
-use crate::app::{
-    AppState, Batched,
-    kv::{Kv, KvOp, KvRes},
-};
 
 use super::{PartialStateExecute, PartialStateExecuteOutput, ShardIndex, ShardedStateApp};
 
@@ -32,16 +27,28 @@ impl<A> App<A> {
     }
 }
 
-pub struct StaticDispatch<A: AppState> {
+pub struct StaticDispatch<A: ShardedStateApp> {
     op: A::Op,
-    app: App<A>,
+    app: A,
 }
 
-impl ShardedStateApp for App<Batched<Kv>> {
+pub struct Kv;
+
+pub enum KvOp {
+    Put(String, String),
+    Get(String),
+}
+
+pub enum KvRes {
+    Put,
+    Get(Option<String>),
+}
+
+impl ShardedStateApp for App<Kv> {
     type Op = Vec<KvOp>;
     type Res = Vec<KvRes>;
-    type Shard = BTreeMap<String, String>;
-    type Execute = StaticDispatch<Batched<Kv>>;
+    type Shard = HashMap<String, String>;
+    type Execute = StaticDispatch<Self>;
 
     fn new_shard(&self, _index: ShardIndex) -> Self::Shard {
         Default::default()
@@ -55,29 +62,36 @@ impl ShardedStateApp for App<Batched<Kv>> {
     }
 }
 
-impl App<Batched<Kv>> {
+impl App<Kv> {
     fn shard_of(&self, op: &KvOp) -> ShardIndex {
         match op {
-            KvOp::Insert(key, _) | KvOp::Update(key, _) | KvOp::Get(key) => {
-                self.shard_index_from_hash(key)
-            }
+            KvOp::Put(key, _) | KvOp::Get(key) => self.shard_index_from_hash(key),
         }
     }
 
     fn execute(
         &self,
         op: &KvOp,
-        shards: &mut HashMap<ShardIndex, BTreeMap<String, String>>,
+        shards: &mut HashMap<ShardIndex, HashMap<String, String>>,
     ) -> KvRes {
-        Kv::execute_with_store(op, shards.get_mut(&self.shard_of(op)).unwrap())
+        match op {
+            KvOp::Put(key, value) => {
+                shards
+                    .get_mut(&self.shard_of(op))
+                    .unwrap()
+                    .insert(key.clone(), value.clone());
+                KvRes::Put
+            }
+            KvOp::Get(key) => KvRes::Get(shards.get(&self.shard_of(op)).unwrap().get(key).cloned()),
+        }
     }
 }
 
-impl PartialStateExecute<BTreeMap<String, String>, Vec<KvRes>> for StaticDispatch<Batched<Kv>> {
+impl PartialStateExecute<App<Kv>> for StaticDispatch<App<Kv>> {
     fn proceed(
         &mut self,
-        shards: &mut HashMap<ShardIndex, BTreeMap<String, String>>,
-    ) -> PartialStateExecuteOutput<Vec<KvRes>> {
+        shards: &mut HashMap<ShardIndex, <App<Kv> as ShardedStateApp>::Shard>,
+    ) -> PartialStateExecuteOutput<<App<Kv> as ShardedStateApp>::Res> {
         let required_indices = &self
             .op
             .iter()

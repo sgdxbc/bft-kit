@@ -16,17 +16,20 @@ pub mod app;
 
 pub type ShardIndex = u32;
 
-pub trait ShardedStateApp {
+pub trait ShardedStateApp: Sized {
     type Op;
     type Res;
     type Shard;
-    type Execute: PartialStateExecute<Self::Shard, Self::Res>;
+    type Execute: PartialStateExecute<Self>;
     fn new_shard(&self, index: ShardIndex) -> Self::Shard;
     fn new_execute(&self, op: Self::Op) -> Self::Execute;
 }
 
-pub trait PartialStateExecute<S, Res> {
-    fn proceed(&mut self, shards: &mut HashMap<ShardIndex, S>) -> PartialStateExecuteOutput<Res>;
+pub trait PartialStateExecute<A: ShardedStateApp> {
+    fn proceed(
+        &mut self,
+        shards: &mut HashMap<ShardIndex, A::Shard>,
+    ) -> PartialStateExecuteOutput<A::Res>;
 }
 
 pub enum PartialStateExecuteOutput<R> {
