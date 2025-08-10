@@ -17,6 +17,7 @@ pub struct Utxo {
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct UtxoId(pub TxId, pub u8);
 
+#[derive(Debug, Clone)]
 pub struct UtxoData {
     pub owner: PublicKey,
     pub amount: u64,
@@ -27,6 +28,12 @@ impl Utxo {
         Self {
             outputs: Default::default(),
         }
+    }
+}
+
+impl Default for Utxo {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -43,8 +50,12 @@ pub enum UtxoOpInput {
 }
 
 impl UtxoOp {
-    fn tx_id(&self) -> TxId {
+    pub fn tx_id(&self) -> TxId {
         self.digest()
+    }
+
+    pub fn total_output(&self) -> u64 {
+        self.outputs.iter().map(|o| o.amount).sum()
     }
 }
 
@@ -56,39 +67,55 @@ pub enum UtxoError {
     InvalidSignature,
 }
 
+impl Utxo {
+    pub fn total_input(&self, op: &UtxoOp) -> Result<u64, UtxoError> {
+        let UtxoOpInput::Spend(spend) = &op.input else {
+            return Ok(0);
+        };
+        let mut total = 0;
+        for (id, sig) in spend.iter().zip(&op.sigs) {
+            let Some(output) = self.outputs.get(id) else {
+                continue;
+            };
+            verify(op, &output.owner, sig).map_err(|_| UtxoError::InvalidSignature)?;
+            total += output.amount
+        }
+        Ok(total)
+    }
+
+    pub fn remove_input(&mut self, op: &UtxoOp) {
+        let UtxoOpInput::Spend(spend) = &op.input else {
+            return;
+        };
+        for input in spend {
+            self.outputs.remove(input);
+        }
+    }
+
+    pub fn insert_outputs(&mut self, outputs: impl Iterator<Item = (UtxoId, UtxoData)>) {
+        for (id, output) in outputs {
+            self.outputs.insert(id, output);
+        }
+    }
+}
+
 impl AppState for Utxo {
     type Op = UtxoOp;
     type Res = Result<(), UtxoError>;
 
     fn execute(&mut self, op: Self::Op) -> Self::Res {
-        if let UtxoOpInput::Spend(inputs) = &op.input {
-            if inputs
-                .iter()
-                .filter_map(|id| self.outputs.get(id))
-                .map(|output| output.amount)
-                .sum::<u64>()
-                < op.outputs.iter().map(|o| o.amount).sum::<u64>()
-            {
-                return Err(UtxoError::InsufficientFunds);
-            }
-
-            for (input, sig) in inputs.iter().zip(&op.sigs) {
-                let Some(output) = self.outputs.get(input) else {
-                    return Err(UtxoError::InvalidSignature);
-                };
-                verify(&op, &output.owner, sig).map_err(|_| UtxoError::InvalidSignature)?
-            }
-
-            for input in inputs {
-                self.outputs.remove(input);
-            }
+        if matches!(op.input, UtxoOpInput::Spend(_)) && self.total_input(&op)? < op.total_output() {
+            return Err(UtxoError::InsufficientFunds);
         }
+        self.remove_input(&op);
 
         let tx_id = op.tx_id();
-        for (index, output) in op.outputs.into_iter().enumerate() {
-            self.outputs
-                .insert(UtxoId(tx_id.clone(), index as _), output);
-        }
+        self.insert_outputs(
+            op.outputs
+                .into_iter()
+                .enumerate()
+                .map(|(index, output)| (UtxoId(tx_id.clone(), index as _), output)),
+        );
         Ok(())
     }
 }
