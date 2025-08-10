@@ -12,7 +12,7 @@ pub mod ycsb;
 pub trait AppState {
     type Op;
     type Res;
-    fn execute(&mut self, op: &Self::Op) -> Self::Res;
+    fn execute(&mut self, op: Self::Op) -> Self::Res;
 }
 
 pub struct Batched<A>(A);
@@ -21,8 +21,8 @@ impl<A: AppState> AppState for Batched<A> {
     type Op = Vec<A::Op>;
     type Res = Vec<A::Res>;
 
-    fn execute(&mut self, ops: &Self::Op) -> Self::Res {
-        ops.iter().map(|op| self.0.execute(op)).collect()
+    fn execute(&mut self, ops: Self::Op) -> Self::Res {
+        ops.into_iter().map(|op| self.0.execute(op)).collect()
     }
 }
 
@@ -45,7 +45,7 @@ impl<A: AppState> State for Buffered<A> {
     type Output = A::Res;
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         match self.ops.pop_front() {
-            Some(op) => Proceed::Output(self.app.execute(&op)),
+            Some(op) => Proceed::Output(self.app.execute(op)),
             None => Proceed::Pending(None),
         }
     }

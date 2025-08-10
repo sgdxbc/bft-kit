@@ -109,7 +109,7 @@ where
             }
             let reply = Reply {
                 client_seq: request.client_seq,
-                res: self.app.execute(&request.op),
+                res: self.app.execute(request.op),
                 replication_metadata: metadata.clone(),
             };
             self.replies.insert(request.client_id, reply.clone());

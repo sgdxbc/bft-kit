@@ -5,7 +5,7 @@ pub struct Null;
 impl AppState for Null {
     type Op = ();
     type Res = ();
-    fn execute(&mut self, &(): &Self::Op) -> Self::Res {}
+    fn execute(&mut self, (): Self::Op) -> Self::Res {}
 }
 
 impl WorkloadState for Null {
