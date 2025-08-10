@@ -20,12 +20,12 @@ pub trait ShardedStateApp: Sized {
     type Op;
     type Res;
     type Shard;
-    type Execute: PartialStateExecute<Self>;
+    type Execute: PartialStateExecuteState<Self>;
     fn new_shard(&self, index: ShardIndex) -> Self::Shard;
     fn new_execute(&self, op: Self::Op) -> Self::Execute;
 }
 
-pub trait PartialStateExecute<A: ShardedStateApp> {
+pub trait PartialStateExecuteState<A: ShardedStateApp> {
     fn proceed(
         &mut self,
         shards: &mut HashMap<ShardIndex, A::Shard>,
