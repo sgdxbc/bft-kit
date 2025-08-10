@@ -3,11 +3,12 @@ use std::time::Duration;
 use crate::{
     Never,
     app::AppState,
-    replication::{Replicated, ReplicationState},
     service::{ClientSeq, Request},
     state::{Proceed, State},
     workload::WorkloadState,
 };
+
+use super::{Replicated, ReplicationState};
 
 pub struct Replica<W> {
     workload: W,

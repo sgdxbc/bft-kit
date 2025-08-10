@@ -3,13 +3,12 @@ use std::{collections::BTreeMap, time::Duration};
 use crate::{
     Never,
     app::AppState,
-    replication::{Replicated, ReplicationState},
     service::{ClientId, ClientSeq, Reply, Request},
     state::{Proceed, State},
     workload::ClientState,
 };
 
-use super::ReplicationRecipient;
+use super::{Replicated, ReplicationRecipient, ReplicationState};
 
 pub struct Client<A: AppState> {
     id: ClientId,

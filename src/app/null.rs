@@ -1,4 +1,6 @@
-use crate::{app::AppState, workload::WorkloadState};
+use crate::workload::WorkloadState;
+
+use super::AppState;
 
 pub struct Null;
 

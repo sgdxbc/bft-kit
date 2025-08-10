@@ -4,11 +4,10 @@ use tokio_util::{bytes::Bytes, task::TaskTracker};
 
 use crate::{
     Never,
-    replication::ReplicaIndex,
     transport::{BINCODE_CONFIG, PerformSend, run_write, trace_error},
 };
 
-use super::ReplicationRecipient;
+use super::{ReplicaIndex, ReplicationRecipient};
 
 pub trait ReplicaTable {
     fn get(&self, index: ReplicaIndex) -> Option<&Connection>;

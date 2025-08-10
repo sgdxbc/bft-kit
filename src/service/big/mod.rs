@@ -6,11 +6,10 @@ use std::{
 use crate::{
     Never,
     replication::ReplicationState,
-    service::{ClientId, Reply},
     state::{Proceed, State},
 };
 
-use super::Request;
+use super::{ClientId, Reply, Request};
 
 pub mod app;
 
@@ -49,7 +48,6 @@ pub struct Service<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp> {
     request_buffer: VecDeque<(Request<A::Op>, R::Metadata)>,
 
     send_buffer: Vec<ServiceSend<R, A>>,
-    reordered_pushes: HashMap<StateVersion, Vec<message::PushShard<A>>>,
 }
 
 impl<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp> Service<R, A> {
@@ -65,7 +63,6 @@ impl<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp> Service<R, A> {
             replies: Default::default(),
             request_buffer: Default::default(),
             send_buffer: Default::default(),
-            reordered_pushes: Default::default(),
         }
     }
 }
@@ -90,7 +87,8 @@ pub enum ServiceMessage<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp>
 }
 
 pub enum Message<A: ShardedStateApp> {
-    PushShard(message::PushShard<A>),
+    QueryShard(message::QueryShard),
+    QueryShardOk(message::QueryShardOk<A::Shard>),
 }
 
 impl<R: ReplicationState<Request<A::Op>>, A: ShardedStateApp> State for Service<R, A>
@@ -116,15 +114,13 @@ where
                 _ => self.replication.submit(request),
             },
             ServiceMessage::Service(message) => match message {
-                Message::PushShard(push_shard) => {
-                    if push_shard.state_version < self.state.version {
+                Message::QueryShard(query_shard) => {}
+                Message::QueryShardOk(query_shard_ok) => {
+                    if query_shard_ok.state_version < self.state.version {
                         return;
                     }
-                    if push_shard.state_version > self.state.version {
-                        self.reordered_pushes
-                            .entry(push_shard.state_version)
-                            .or_default()
-                            .push(push_shard);
+                    if query_shard_ok.state_version > self.state.version {
+                        // should not happen
                         return;
                     }
                     //
@@ -153,9 +149,15 @@ struct StateManager<S> {
 }
 
 mod message {
-    use super::{ShardIndex, StateVersion};
+    use super::{ServiceIndex, ShardIndex, StateVersion};
 
-    pub struct PushShard<S> {
+    pub struct QueryShard {
+        pub state_version: StateVersion,
+        pub shard_index: ShardIndex,
+        pub service_index: ServiceIndex,
+    }
+
+    pub struct QueryShardOk<S> {
         pub state_version: StateVersion,
         pub shard_index: ShardIndex,
         pub shard: S,

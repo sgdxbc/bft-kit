@@ -14,8 +14,9 @@ use crate::{
     service::ClientId,
     state::{Proceed, State},
     transport::{BINCODE_CONFIG, PerformSend, read_loop, trace_error},
-    workload::Latencies,
 };
+
+use super::Latencies;
 
 pub async fn run_worker<S: State<Output = anyhow::Result<()>> + Into<Latencies>>(
     mut worker: S,

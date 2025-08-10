@@ -15,12 +15,13 @@ use crate::{
     app::AppState,
     crypto::cert::quinn::{client_config, server_config},
     replication::{ReplicaIndex, transport::ReplicaTable},
-    service::{ClientId, ReplicationState, Reply, Request, ServiceMessage, ServiceSend},
     state::Proceed,
     transport::{BINCODE_CONFIG, PerformSend, read_loop, run_write, trace_error},
 };
 
-use super::ServiceState;
+use super::{
+    ClientId, ReplicationState, Reply, Request, ServiceMessage, ServiceSend, ServiceState,
+};
 
 pub async fn run_service<S: ServiceState<A, R>, A: AppState, R: ReplicationState<S::Log>>(
     mut service: S,
