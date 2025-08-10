@@ -2,9 +2,11 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
+use crate::crypto::{Digest, DigestHash as _, UpdateHash, verify};
+
 use super::AppState;
 
-pub type TxId = u64;
+pub type TxId = Digest;
 pub type PublicKey = crate::crypto::PublicKey;
 pub type Sig = crate::crypto::Sig;
 
@@ -29,15 +31,21 @@ impl Utxo {
 }
 
 pub struct UtxoOp {
-    pub id: TxId,
     pub input: UtxoOpInput,
     pub outputs: Vec<UtxoData>,
+    pub nonce: u64,
     pub sigs: Vec<Sig>,
 }
 
 pub enum UtxoOpInput {
     Spend(Vec<UtxoId>),
     Mint,
+}
+
+impl UtxoOp {
+    fn tx_id(&self) -> TxId {
+        self.digest()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -53,11 +61,9 @@ impl AppState for Utxo {
     type Res = Result<(), UtxoError>;
 
     fn execute(&mut self, op: Self::Op) -> Self::Res {
-        if let UtxoOpInput::Spend(inputs) = op.input {
-            // TODO also check owner signature
+        if let UtxoOpInput::Spend(inputs) = &op.input {
             if inputs
                 .iter()
-                // should we just report invalid fund if this `get` misses?
                 .filter_map(|id| self.outputs.get(id))
                 .map(|output| output.amount)
                 .sum::<u64>()
@@ -66,14 +72,43 @@ impl AppState for Utxo {
                 return Err(UtxoError::InsufficientFunds);
             }
 
+            for (input, sig) in inputs.iter().zip(&op.sigs) {
+                let Some(output) = self.outputs.get(input) else {
+                    return Err(UtxoError::InvalidSignature);
+                };
+                verify(&op, &output.owner, sig).map_err(|_| UtxoError::InvalidSignature)?
+            }
+
             for input in inputs {
-                self.outputs.remove(&input);
+                self.outputs.remove(input);
             }
         }
 
+        let tx_id = op.tx_id();
         for (index, output) in op.outputs.into_iter().enumerate() {
-            self.outputs.insert(UtxoId(op.id, index as _), output);
+            self.outputs
+                .insert(UtxoId(tx_id.clone(), index as _), output);
         }
         Ok(())
+    }
+}
+
+impl UpdateHash for UtxoOp {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
+        match &self.input {
+            UtxoOpInput::Spend(inputs) => {
+                state.update(b"spend");
+                for UtxoId(tx_id, index) in inputs {
+                    state.update(tx_id);
+                    state.update(index.to_le_bytes())
+                }
+            }
+            UtxoOpInput::Mint => state.update(b"mint"),
+        }
+        for output in &self.outputs {
+            output.owner.update(state);
+            state.update(output.amount.to_le_bytes())
+        }
+        state.update(self.nonce.to_le_bytes())
     }
 }

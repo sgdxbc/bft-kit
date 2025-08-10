@@ -30,6 +30,12 @@ impl From<sha2::Sha256> for Digest {
     }
 }
 
+impl AsRef<[u8]> for Digest {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 pub trait UpdateHash {
     fn update<D: sha2::Digest>(&self, state: &mut D);
 }
@@ -234,5 +240,29 @@ impl<'de, C> BorrowDecode<'de, C> for Sig {
         decoder: &mut D,
     ) -> Result<Self, DecodeError> {
         Decode::decode(decoder)
+    }
+}
+
+impl Encode for PublicKey {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        match self {
+            Self::Secp256k1(public_key) => {
+                Encode::encode("secp256k1", encoder)?;
+                Encode::encode(&public_key.serialize(), encoder)
+            }
+            Self::Ed25519(verifying_key) => {
+                Encode::encode("ed25519", encoder)?;
+                Encode::encode(&verifying_key.to_bytes(), encoder)
+            }
+        }
+    }
+}
+
+impl UpdateHash for PublicKey {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
+        state.update(bincode::encode_to_vec(self, bincode::config::standard()).unwrap())
     }
 }
