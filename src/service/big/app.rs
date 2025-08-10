@@ -32,6 +32,33 @@ pub struct StaticDispatch<A: ShardedStateApp> {
     app: A,
 }
 
+pub use crate::app::null::Null;
+
+impl ShardedStateApp for App<Null> {
+    type Op = ();
+    type Res = ();
+    type Shard = ();
+    type Execute = StaticDispatch<Self>;
+    fn new_shard(&self, _index: ShardIndex) -> Self::Shard {
+        ()
+    }
+    fn new_execute(&self, op: Self::Op) -> Self::Execute {
+        StaticDispatch {
+            op,
+            app: self.clone(),
+        }
+    }
+}
+
+impl PartialStateExecute<App<Null>> for StaticDispatch<App<Null>> {
+    fn proceed(
+        &mut self,
+        _shards: &mut HashMap<ShardIndex, <App<Null> as ShardedStateApp>::Shard>,
+    ) -> PartialStateExecuteOutput<<App<Null> as ShardedStateApp>::Res> {
+        PartialStateExecuteOutput::Complete(())
+    }
+}
+
 pub struct Kv;
 
 pub enum KvOp {
