@@ -11,12 +11,12 @@ use crate::app::utxo::{UtxoError, UtxoId, UtxoOp, UtxoOpInput};
 use super::{PartialStateExecute, PartialStateExecuteOutput, ShardIndex, ShardedStateApp};
 
 #[derive_where(Debug, Clone)]
-pub struct App<A> {
+pub struct ShardSchema<A> {
     num_shard: ShardIndex,
     _app: PhantomData<A>,
 }
 
-impl<A> App<A> {
+impl<A> ShardSchema<A> {
     pub fn new(num_shard: ShardIndex) -> Self {
         Self {
             num_shard,
@@ -29,34 +29,66 @@ impl<A> App<A> {
     }
 }
 
-pub struct StaticDispatch<A: ShardedStateApp> {
-    op: A::Op,
-    app: A,
+pub struct StaticDispatchExecuteState<A: ShardedStateApp> {
+    op: Option<A::Op>,
+    schema: A,
 }
 
-pub use crate::app::null::Null;
-
-impl ShardedStateApp for App<Null> {
-    type Op = ();
-    type Res = ();
-    type Shard = ();
-    type Execute = StaticDispatch<Self>;
-    fn new_shard(&self, _index: ShardIndex) -> Self::Shard {
-        ()
-    }
-    fn new_execute(&self, op: Self::Op) -> Self::Execute {
-        StaticDispatch {
-            op,
-            app: self.clone(),
+impl<A> ShardSchema<A> {
+    fn static_dispatch(&self, op: <Self as ShardedStateApp>::Op) -> StaticDispatchExecuteState<Self>
+    where
+        Self: ShardedStateApp,
+    {
+        StaticDispatchExecuteState {
+            op: Some(op),
+            schema: self.clone(),
         }
     }
 }
 
-impl PartialStateExecute<App<Null>> for StaticDispatch<App<Null>> {
+trait StaticDispatch: ShardedStateApp {
+    fn shards_of(&self, op: &Self::Op) -> HashSet<ShardIndex>;
+    fn execute(&self, op: Self::Op, shards: &mut HashMap<ShardIndex, Self::Shard>) -> Self::Res;
+}
+
+impl<A: ShardedStateApp> PartialStateExecute<A> for StaticDispatchExecuteState<A>
+where
+    A: StaticDispatch,
+{
     fn proceed(
         &mut self,
-        _shards: &mut HashMap<ShardIndex, <App<Null> as ShardedStateApp>::Shard>,
-    ) -> PartialStateExecuteOutput<<App<Null> as ShardedStateApp>::Res> {
+        shards: &mut HashMap<ShardIndex, A::Shard>,
+    ) -> PartialStateExecuteOutput<A::Res> {
+        let required_indices = &self.schema.shards_of(self.op.as_ref().unwrap())
+            - &shards.keys().cloned().collect::<HashSet<_>>();
+        if !required_indices.is_empty() {
+            PartialStateExecuteOutput::RequireAccess(required_indices)
+        } else {
+            PartialStateExecuteOutput::Complete(
+                self.schema.execute(self.op.take().unwrap(), shards),
+            )
+        }
+    }
+}
+
+pub use crate::app::null::Null;
+
+impl ShardedStateApp for ShardSchema<Null> {
+    type Op = ();
+    type Res = ();
+    type Shard = ();
+    type Execute = StaticDispatchExecuteState<Self>;
+    fn new_shard(&self, _index: ShardIndex) -> Self::Shard {}
+    fn new_execute(&self, op: Self::Op) -> Self::Execute {
+        self.static_dispatch(op)
+    }
+}
+
+impl PartialStateExecute<ShardSchema<Null>> for StaticDispatchExecuteState<ShardSchema<Null>> {
+    fn proceed(
+        &mut self,
+        _shards: &mut HashMap<ShardIndex, <ShardSchema<Null> as ShardedStateApp>::Shard>,
+    ) -> PartialStateExecuteOutput<<ShardSchema<Null> as ShardedStateApp>::Res> {
         PartialStateExecuteOutput::Complete(())
     }
 }
@@ -73,25 +105,22 @@ pub enum KvRes {
     Get(Option<String>),
 }
 
-impl ShardedStateApp for App<Kv> {
+impl ShardedStateApp for ShardSchema<Kv> {
     type Op = Vec<KvOp>;
     type Res = Vec<KvRes>;
     type Shard = HashMap<String, String>;
-    type Execute = StaticDispatch<Self>;
+    type Execute = StaticDispatchExecuteState<Self>;
 
     fn new_shard(&self, _index: ShardIndex) -> Self::Shard {
         Default::default()
     }
 
     fn new_execute(&self, op: Self::Op) -> Self::Execute {
-        StaticDispatch {
-            op,
-            app: self.clone(),
-        }
+        self.static_dispatch(op)
     }
 }
 
-impl App<Kv> {
+impl ShardSchema<Kv> {
     fn shard_of(&self, op: &KvOp) -> ShardIndex {
         match op {
             KvOp::Put(key, _) | KvOp::Get(key) => self.shard_index_from_hash(key),
@@ -116,49 +145,32 @@ impl App<Kv> {
     }
 }
 
-impl PartialStateExecute<App<Kv>> for StaticDispatch<App<Kv>> {
-    fn proceed(
-        &mut self,
-        shards: &mut HashMap<ShardIndex, <App<Kv> as ShardedStateApp>::Shard>,
-    ) -> PartialStateExecuteOutput<<App<Kv> as ShardedStateApp>::Res> {
-        let required_indices = &self
-            .op
-            .iter()
-            .map(|op| self.app.shard_of(op))
-            .collect::<HashSet<_>>()
-            - &shards.keys().cloned().collect::<HashSet<_>>();
-        if !required_indices.is_empty() {
-            PartialStateExecuteOutput::RequireAccess(required_indices)
-        } else {
-            let res = self
-                .op
-                .iter()
-                .map(|op| self.app.execute(op, shards))
-                .collect();
-            PartialStateExecuteOutput::Complete(res)
-        }
+impl StaticDispatch for ShardSchema<Kv> {
+    fn shards_of(&self, op: &Self::Op) -> HashSet<ShardIndex> {
+        op.iter().map(|op| self.shard_of(op)).collect()
+    }
+
+    fn execute(&self, op: Self::Op, shards: &mut HashMap<ShardIndex, Self::Shard>) -> Self::Res {
+        op.into_iter().map(|op| self.execute(&op, shards)).collect()
     }
 }
 
 pub use crate::app::utxo::Utxo;
 
-impl ShardedStateApp for App<Utxo> {
+impl ShardedStateApp for ShardSchema<Utxo> {
     type Op = UtxoOp;
     type Res = Result<(), UtxoError>;
     type Shard = Utxo;
-    type Execute = StaticDispatch<Self>;
+    type Execute = StaticDispatchExecuteState<Self>;
     fn new_shard(&self, _index: ShardIndex) -> Self::Shard {
         Default::default()
     }
     fn new_execute(&self, op: Self::Op) -> Self::Execute {
-        StaticDispatch {
-            op,
-            app: self.clone(),
-        }
+        self.static_dispatch(op)
     }
 }
 
-impl App<Utxo> {
+impl StaticDispatch for ShardSchema<Utxo> {
     // consider shard by owner?
     fn shards_of(&self, op: &UtxoOp) -> HashSet<ShardIndex> {
         let mut shards = HashSet::new();
@@ -174,15 +186,11 @@ impl App<Utxo> {
         shards
     }
 
-    fn execute(
-        &self,
-        op: &UtxoOp,
-        shards: &mut HashMap<ShardIndex, Utxo>,
-    ) -> Result<(), UtxoError> {
+    fn execute(&self, op: UtxoOp, shards: &mut HashMap<ShardIndex, Utxo>) -> Result<(), UtxoError> {
         if matches!(op.input, UtxoOpInput::Spend(_))
             && shards
                 .values()
-                .map(|shard| shard.total_input(op))
+                .map(|shard| shard.total_input(&op))
                 .sum::<Result<u64, _>>()?
                 < op.total_output()
         {
@@ -191,12 +199,11 @@ impl App<Utxo> {
         let tx_id = op.tx_id();
         let output_iter = op
             .outputs
-            .clone()
             .into_iter()
             .enumerate()
             .map(|(index, output)| (UtxoId(tx_id.clone(), index as _), output));
         for (&index, shard) in shards {
-            shard.remove_input(op);
+            shard.remove_input(&op.input);
             shard.insert_outputs(
                 output_iter
                     .clone()
@@ -204,20 +211,5 @@ impl App<Utxo> {
             );
         }
         Ok(())
-    }
-}
-
-impl PartialStateExecute<App<Utxo>> for StaticDispatch<App<Utxo>> {
-    fn proceed(
-        &mut self,
-        shards: &mut HashMap<ShardIndex, <App<Utxo> as ShardedStateApp>::Shard>,
-    ) -> PartialStateExecuteOutput<<App<Utxo> as ShardedStateApp>::Res> {
-        let required_indices =
-            &self.app.shards_of(&self.op) - &shards.keys().cloned().collect::<HashSet<_>>();
-        if !required_indices.is_empty() {
-            PartialStateExecuteOutput::RequireAccess(required_indices)
-        } else {
-            PartialStateExecuteOutput::Complete(self.app.execute(&self.op, shards))
-        }
     }
 }

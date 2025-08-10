@@ -83,8 +83,8 @@ impl Utxo {
         Ok(total)
     }
 
-    pub fn remove_input(&mut self, op: &UtxoOp) {
-        let UtxoOpInput::Spend(spend) = &op.input else {
+    pub fn remove_input(&mut self, input: &UtxoOpInput) {
+        let UtxoOpInput::Spend(spend) = input else {
             return;
         };
         for input in spend {
@@ -107,7 +107,7 @@ impl AppState for Utxo {
         if matches!(op.input, UtxoOpInput::Spend(_)) && self.total_input(&op)? < op.total_output() {
             return Err(UtxoError::InsufficientFunds);
         }
-        self.remove_input(&op);
+        self.remove_input(&op.input);
 
         let tx_id = op.tx_id();
         self.insert_outputs(
