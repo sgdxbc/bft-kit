@@ -31,8 +31,8 @@ pub async fn run_service<S: ServiceState<A, R>, A: AppState, R: ReplicationState
 ) -> anyhow::Result<()>
 where
     Request<A::Op>: Decode<()>,
-    Reply<A::Res, R::Metadata>: Encode,
     R::Message: Decode<()>,
+    Reply<A::Res, R::Metadata>: Encode,
     HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
 {
     let mut endpoint = Endpoint::server(server_config(), addrs[replica_index as usize])?;
