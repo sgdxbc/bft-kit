@@ -6,9 +6,12 @@ use std::{
 
 use derive_where::derive_where;
 
-use crate::app::utxo::{UtxoError, UtxoId, UtxoOp, UtxoOpInput};
+use crate::{
+    app::utxo::{UtxoError, UtxoId, UtxoOp, UtxoOpInput},
+    service::ServiceApp,
+};
 
-use super::{DataShardingApp, DataShardingExecuteState, DataShardingExecuteOutput, ShardIndex};
+use super::{DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState, ShardIndex};
 
 #[derive_where(Debug, Clone)]
 pub struct DataShardingSchema<A> {
@@ -35,7 +38,7 @@ pub struct StaticDispatchExecute<A: DataShardingApp> {
 }
 
 impl<A> DataShardingSchema<A> {
-    fn static_dispatch(&self, op: <Self as DataShardingApp>::Op) -> StaticDispatchExecute<Self>
+    fn static_dispatch(&self, op: <Self as ServiceApp>::Op) -> StaticDispatchExecute<Self>
     where
         Self: DataShardingApp,
     {
@@ -70,9 +73,12 @@ impl<A: StaticDispatch> DataShardingExecuteState<A> for StaticDispatchExecute<A>
 
 pub struct Null;
 
-impl DataShardingApp for DataShardingSchema<Null> {
+impl ServiceApp for DataShardingSchema<Null> {
     type Op = ();
     type Res = ();
+}
+
+impl DataShardingApp for DataShardingSchema<Null> {
     type Shard = ();
     type Execute = StaticDispatchExecute<Self>;
     fn new_shard(&self, _index: ShardIndex) -> Self::Shard {}
@@ -90,26 +96,31 @@ impl DataShardingExecuteState<DataShardingSchema<Null>>
     fn proceed(
         &mut self,
         _shards: &mut HashMap<ShardIndex, <DataShardingSchema<Null> as DataShardingApp>::Shard>,
-    ) -> DataShardingExecuteOutput<<DataShardingSchema<Null> as DataShardingApp>::Res> {
+    ) -> DataShardingExecuteOutput<<DataShardingSchema<Null> as ServiceApp>::Res> {
         DataShardingExecuteOutput::Complete(())
     }
 }
 
 pub struct Kv;
 
+#[derive(Debug, Clone)]
 pub enum KvOp {
     Put(String, String),
     Get(String),
 }
 
+#[derive(Debug, Clone)]
 pub enum KvRes {
     Put,
     Get(Option<String>),
 }
 
-impl DataShardingApp for DataShardingSchema<Kv> {
+impl ServiceApp for DataShardingSchema<Kv> {
     type Op = Vec<KvOp>;
     type Res = Vec<KvRes>;
+}
+
+impl DataShardingApp for DataShardingSchema<Kv> {
     type Shard = HashMap<String, String>;
     type Execute = StaticDispatchExecute<Self>;
     fn new_shard(&self, _index: ShardIndex) -> Self::Shard {
@@ -159,9 +170,12 @@ impl StaticDispatch for DataShardingSchema<Kv> {
 
 pub struct Utxo;
 
-impl DataShardingApp for DataShardingSchema<Utxo> {
+impl ServiceApp for DataShardingSchema<Utxo> {
     type Op = UtxoOp;
     type Res = Result<(), UtxoError>;
+}
+
+impl DataShardingApp for DataShardingSchema<Utxo> {
     type Shard = crate::app::utxo::Utxo;
     type Execute = StaticDispatchExecute<Self>;
     fn new_shard(&self, _index: ShardIndex) -> Self::Shard {

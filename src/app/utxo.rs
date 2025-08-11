@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use crate::crypto::{Digest, DigestHash as _, UpdateHash, verify};
+use crate::{
+    crypto::{Digest, DigestHash as _, UpdateHash, verify},
+    service::ServiceApp,
+};
 
 use super::AppState;
 
@@ -99,10 +102,12 @@ impl Utxo {
     }
 }
 
-impl AppState for Utxo {
+impl ServiceApp for Utxo {
     type Op = UtxoOp;
     type Res = Result<(), UtxoError>;
+}
 
+impl AppState for Utxo {
     fn execute(&mut self, op: Self::Op) -> Self::Res {
         if matches!(op.input, UtxoOpInput::Spend(_)) && self.total_input(&op)? < op.total_output() {
             return Err(UtxoError::InsufficientFunds);

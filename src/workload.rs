@@ -6,26 +6,25 @@ use std::{
 use hdrhistogram::Histogram;
 
 use crate::{
-    app::AppState,
-    service::ClientSeq,
+    service::{ClientSeq, ServiceApp},
     state::{Proceed, State},
 };
 
 pub mod transport;
 
-pub trait ClientState<A: AppState>: State<Output = (ClientSeq, A::Res)> {
+pub trait ClientState<A: ServiceApp>: State<Output = (ClientSeq, A::Res)> {
     fn submit(&mut self, op: A::Op) -> ClientSeq;
 }
 
 pub trait WorkloadState {
-    type App: AppState;
+    type App: ServiceApp;
 
-    fn next_op(&mut self) -> Option<<Self::App as AppState>::Op>;
+    fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op>;
 
     fn validate(
         &self,
-        op: <Self::App as AppState>::Op,
-        res: <Self::App as AppState>::Res,
+        op: <Self::App as ServiceApp>::Op,
+        res: <Self::App as ServiceApp>::Res,
     ) -> anyhow::Result<()>;
 }
 
@@ -34,7 +33,7 @@ pub type Latencies = Histogram<u64>;
 pub struct CloseLoopWorker<W: WorkloadState, C> {
     workload: W,
     client: C,
-    submitted: Option<(Instant, <W::App as AppState>::Op)>,
+    submitted: Option<(Instant, <W::App as ServiceApp>::Op)>,
     latencies: Latencies,
 }
 
@@ -57,7 +56,7 @@ impl<W: WorkloadState, C> From<CloseLoopWorker<W, C>> for Latencies {
 
 impl<C: ClientState<W::App>, W: WorkloadState> State for CloseLoopWorker<W, C>
 where
-    <W::App as AppState>::Op: Clone,
+    <W::App as ServiceApp>::Op: Clone,
 {
     type Send = C::Send;
     type Output = anyhow::Result<()>;
@@ -100,7 +99,7 @@ where
 pub struct OpenLoopWorker<W: WorkloadState, C> {
     workload: W,
     client: C,
-    submitted: HashMap<ClientSeq, (Instant, <W::App as AppState>::Op)>,
+    submitted: HashMap<ClientSeq, (Instant, <W::App as ServiceApp>::Op)>,
     latencies: Latencies,
     next_submit: Option<Instant>,
     target_tput: f32,
@@ -127,7 +126,7 @@ impl<W: WorkloadState, C> From<OpenLoopWorker<W, C>> for Latencies {
 
 impl<W: WorkloadState, C: ClientState<W::App>> State for OpenLoopWorker<W, C>
 where
-    <W::App as AppState>::Op: Clone,
+    <W::App as ServiceApp>::Op: Clone,
 {
     type Send = C::Send;
     type Output = anyhow::Result<()>;
@@ -203,7 +202,7 @@ impl<W> Take<W> {
 impl<W: WorkloadState> WorkloadState for Take<W> {
     type App = W::App;
 
-    fn next_op(&mut self) -> Option<<Self::App as AppState>::Op> {
+    fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
         if self.count == 0 {
             return None;
         }
@@ -213,8 +212,8 @@ impl<W: WorkloadState> WorkloadState for Take<W> {
 
     fn validate(
         &self,
-        op: <Self::App as AppState>::Op,
-        res: <Self::App as AppState>::Res,
+        op: <Self::App as ServiceApp>::Op,
+        res: <Self::App as ServiceApp>::Res,
     ) -> anyhow::Result<()> {
         self.workload.validate(op, res)
     }

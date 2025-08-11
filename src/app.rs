@@ -2,6 +2,7 @@ use std::{collections::VecDeque, time::Duration};
 
 use crate::{
     Never,
+    service::ServiceApp,
     state::{Proceed, State},
 };
 
@@ -9,18 +10,18 @@ pub mod null;
 pub mod utxo;
 pub mod ycsb;
 
-pub trait AppState {
-    type Op;
-    type Res;
+pub trait AppState: ServiceApp {
     fn execute(&mut self, op: Self::Op) -> Self::Res;
 }
 
 pub struct Batched<A>(A);
 
-impl<A: AppState> AppState for Batched<A> {
+impl<A: AppState> ServiceApp for Batched<A> {
     type Op = Vec<A::Op>;
     type Res = Vec<A::Res>;
+}
 
+impl<A: AppState> AppState for Batched<A> {
     fn execute(&mut self, ops: Self::Op) -> Self::Res {
         ops.into_iter().map(|op| self.0.execute(op)).collect()
     }

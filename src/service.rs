@@ -15,25 +15,39 @@ use crate::{
 pub mod big;
 pub mod transport;
 
-pub trait ServiceState<A: AppState, R: ReplicationState<Self::Log>>:
+pub type ServiceIndex = u16;
+
+pub trait ServiceState<A: ServiceApp, R: ReplicationState<Self::Log>>:
     State<
-        Send = ServiceSend<A::Res, R::Metadata, R::Send>,
+        Send = ServiceSend<A::Res, R::Metadata, Self::ServiceMessage, R::Send>,
         Output = Never,
-        Message = ServiceMessage<A::Op, R::Message>,
+        Message = ServiceMessage<A::Op, Self::ServiceMessage, R::Message>,
     >
 {
     type Log;
+    type ServiceMessage;
 }
 
-pub enum ServiceSend<Res, RD, RS> {
+pub trait ServiceApp {
+    type Op;
+    type Res;
+}
+
+pub enum ServiceSend<Res, RD, M, RS> {
     Reply(ClientId, Reply<Res, RD>),
-    // cross service send
+    Service(ServiceRecipient, M),
     Replication(RS),
 }
 
-pub enum ServiceMessage<Op, RM> {
+pub enum ServiceRecipient {
+    All, // broad?
+    Multi(Vec<ServiceIndex>),
+    Uni(ServiceIndex),
+}
+
+pub enum ServiceMessage<Op, M, RM> {
     Request(Request<Op>),
-    // cross service message
+    Service(M),
     Replication(RM),
 }
 
@@ -57,20 +71,21 @@ pub struct Reply<Res, RD> {
     pub replication_metadata: RD,
 }
 
-pub struct Service<R: ReplicationState<Request<A::Op>>, A: AppState> {
-    replication: R,
+pub struct Service<A: AppState, R: ReplicationState<Request<A::Op>>> {
     app: A,
+    replication: R,
+
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     replicated: Option<(ReplicatedRequests<A::Op>, R::Metadata)>,
 
     request_buffer: Vec<Request<A::Op>>,
-    output_buffer: Vec<Proceed<ServiceSend<A::Res, R::Metadata, R::Send>, Never>>,
+    output_buffer: Vec<Proceed<ServiceSend<A::Res, R::Metadata, Never, R::Send>, Never>>,
 }
 
 type ReplicatedRequests<Op> = VecDeque<Request<Op>>;
 
-impl<R: ReplicationState<Request<A::Op>>, A: AppState> Service<R, A> {
-    pub fn new(replication: R, app: A) -> Self {
+impl<A: AppState, R: ReplicationState<Request<A::Op>>> Service<A, R> {
+    pub fn new(app: A, replication: R) -> Self {
         Self {
             replication,
             app,
@@ -82,21 +97,22 @@ impl<R: ReplicationState<Request<A::Op>>, A: AppState> Service<R, A> {
     }
 }
 
-impl<R: ReplicationState<Request<A::Op>>, A: AppState> ServiceState<A, R> for Service<R, A>
+impl<A: AppState, R: ReplicationState<Request<A::Op>>> ServiceState<A, R> for Service<A, R>
 where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
 {
     type Log = Request<A::Op>;
+    type ServiceMessage = Never;
 }
 
-impl<R: ReplicationState<Request<A::Op>>, A: AppState> State for Service<R, A>
+impl<A: AppState, R: ReplicationState<Request<A::Op>>> State for Service<A, R>
 where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
     // ServiceMessage<R, A>: std::fmt::Debug,
 {
-    type Send = ServiceSend<A::Res, R::Metadata, R::Send>;
+    type Send = ServiceSend<A::Res, R::Metadata, Never, R::Send>;
     type Output = Never;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some((requests, metadata)) = &mut self.replicated {
@@ -134,7 +150,7 @@ where
         }
     }
 
-    type Message = ServiceMessage<A::Op, R::Message>;
+    type Message = ServiceMessage<A::Op, Never, R::Message>;
     fn receive(&mut self, message: Self::Message) {
         // dbg!(&message);
         match message {

@@ -2,8 +2,7 @@ use std::time::Duration;
 
 use crate::{
     Never,
-    app::AppState,
-    service::{ClientSeq, Request},
+    service::{ClientSeq, Request, ServiceApp},
     state::{Proceed, State},
     workload::WorkloadState,
 };
@@ -21,10 +20,10 @@ impl<W> Replica<W> {
     }
 }
 
-impl<W: WorkloadState> ReplicationState<Request<<W::App as AppState>::Op>> for Replica<W> {
+impl<W: WorkloadState> ReplicationState<Request<<W::App as ServiceApp>::Op>> for Replica<W> {
     type Metadata = ();
 
-    fn submit(&mut self, _request: Request<<W::App as AppState>::Op>) {
+    fn submit(&mut self, _request: Request<<W::App as ServiceApp>::Op>) {
         unimplemented!()
     }
 }
@@ -32,8 +31,8 @@ impl<W: WorkloadState> ReplicationState<Request<<W::App as AppState>::Op>> for R
 impl<W: WorkloadState> State for Replica<W> {
     type Send = Never;
     type Output = Replicated<
-        Request<<W::App as AppState>::Op>,
-        <Self as ReplicationState<Request<<W::App as AppState>::Op>>>::Metadata,
+        Request<<W::App as ServiceApp>::Op>,
+        <Self as ReplicationState<Request<<W::App as ServiceApp>::Op>>>::Metadata,
     >;
 
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {

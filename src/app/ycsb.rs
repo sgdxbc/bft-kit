@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::service::ServiceApp;
+
 use super::AppState;
 
 pub struct Db {
@@ -34,10 +36,12 @@ pub enum YcsbRes {
     NotFound,
 }
 
-impl AppState for Db {
+impl ServiceApp for Db {
     type Op = YcsbOp;
     type Res = YcsbRes;
+}
 
+impl AppState for Db {
     fn execute(&mut self, op: Self::Op) -> Self::Res {
         match op {
             YcsbOp::Insert(key, value) => {

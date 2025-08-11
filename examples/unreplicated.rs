@@ -19,14 +19,8 @@ async fn main() -> anyhow::Result<()> {
 
     let cancel = CancellationToken::new();
 
-    let replica = Replica::new();
-    let service = Service::new(replica, Null);
-    let service_task = spawn(run_service(
-        service,
-        0,
-        addrs.clone(),
-        cancel.clone(),
-    ));
+    let service = Service::new(Null, Replica::new());
+    let service_task = spawn(run_service(service, 0, addrs.clone(), cancel.clone()));
 
     let mut settings = Settings::new();
     settings.parse("client.timeout 1.");

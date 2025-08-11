@@ -214,6 +214,7 @@ where
                     ),
                 ));
             }
+            Proceed::Send(ServiceSend::Service(..)) => todo!(),
             Proceed::Send(ServiceSend::Replication(send)) => {
                 replica_table.perform(send, write_tracker)?
             }

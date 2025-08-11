@@ -12,15 +12,18 @@ use crate::{
     state::{Proceed, State},
 };
 
-use super::{ClientId, ClientSeq, Reply, Request};
+use super::{
+    ClientId, ClientSeq, Reply, Request, ServiceApp, ServiceIndex, ServiceMessage,
+    ServiceRecipient, ServiceSend, ServiceState,
+};
 
 pub mod app;
+#[cfg(test)]
+mod tests;
 
 pub type ShardIndex = u32;
 
-pub trait DataShardingApp: Sized {
-    type Op;
-    type Res;
+pub trait DataShardingApp: ServiceApp + Sized {
     type Shard;
     type Execute: DataShardingExecuteState<Self>;
     fn new_shard(&self, index: ShardIndex) -> Self::Shard;
@@ -40,12 +43,11 @@ pub enum DataShardingExecuteOutput<R> {
     Complete(R),
 }
 
-pub type ServiceIndex = u16;
 type StateVersion = u64;
 
-pub struct Service<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> {
-    replication: R,
+pub struct Service<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
     app: A,
+    replication: R,
 
     state: StateManager<A>,
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
@@ -55,7 +57,7 @@ pub struct Service<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> {
     request_buffer: Vec<Request<A::Op>>,
     query_shard_buffer: Vec<message::QueryShard>,
     query_shard_ok_buffer: Vec<message::QueryShardOk<A::Shard>>,
-    output_buffer: Vec<Proceed<ServiceSend<R, A>, Never>>,
+    output_buffer: Vec<Proceed<ServiceSend<A::Res, R::Metadata, Message<A>, R::Send>, Never>>,
 }
 
 struct Executing<RD> {
@@ -64,7 +66,7 @@ struct Executing<RD> {
     metadata: RD,
 }
 
-impl<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> Service<R, A> {
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> Service<A, R> {
     pub fn new(replication: R, app: A, index: ServiceIndex, state_config: StateConfig) -> Self {
         Self {
             replication,
@@ -81,36 +83,28 @@ impl<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> Service<R, A> {
     }
 }
 
-pub enum ServiceSend<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> {
-    Service(ServiceRecipient, Message<A>),
-    Reply(ClientId, Reply<A::Res, R::Metadata>),
-    Replication(R::Send),
-}
-
-pub enum ServiceRecipient {
-    All, // broad?
-    Multi(Vec<ServiceIndex>),
-    Uni(ServiceIndex),
-}
-
-pub enum ServiceMessage<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> {
-    Request(Request<A::Op>),
-    Service(Message<A>),
-    Replication(R::Message),
-}
-
 pub enum Message<A: DataShardingApp> {
     QueryShard(message::QueryShard),
     QueryShardOk(message::QueryShardOk<A::Shard>),
 }
 
-impl<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> State for Service<R, A>
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> ServiceState<A, R> for Service<A, R>
 where
     Reply<A::Res, R::Metadata>: Clone,
     A::Shard: Clone,
     R::Metadata: Clone,
 {
-    type Send = ServiceSend<R, A>;
+    type Log = Request<A::Op>;
+    type ServiceMessage = Message<A>;
+}
+
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> State for Service<A, R>
+where
+    Reply<A::Res, R::Metadata>: Clone,
+    A::Shard: Clone,
+    R::Metadata: Clone,
+{
+    type Send = ServiceSend<A::Res, R::Metadata, Message<A>, R::Send>;
     type Output = Never;
 
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
@@ -209,7 +203,7 @@ where
         }
     }
 
-    type Message = ServiceMessage<R, A>;
+    type Message = ServiceMessage<A::Op, Message<A>, R::Message>;
     fn receive(&mut self, message: Self::Message) {
         match message {
             ServiceMessage::Replication(metadata) => self.replication.receive(metadata),
@@ -368,22 +362,5 @@ mod message {
         pub state_version: StateVersion,
         pub shard_index: ShardIndex,
         pub shard: S,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn output_service_indices_of() {
-        let config = StateConfig {
-            num_service: 100,
-            num_active_copy: 7,
-        };
-        println!("{:2?}", config.service_indices_of(0));
-        println!("{:2?}", config.service_indices_of(1));
-        println!("{:2?}", config.service_indices_of(2));
-        println!("{:2?}", config.service_indices_of(3))
     }
 }
