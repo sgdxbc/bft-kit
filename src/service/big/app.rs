@@ -8,7 +8,7 @@ use derive_where::derive_where;
 
 use crate::app::utxo::{UtxoError, UtxoId, UtxoOp, UtxoOpInput};
 
-use super::{DataShardingApp, DataShardingExecuteState, PartialStateExecuteOutput, ShardIndex};
+use super::{DataShardingApp, DataShardingExecuteState, DataShardingExecuteOutput, ShardIndex};
 
 #[derive_where(Debug, Clone)]
 pub struct DataShardingSchema<A> {
@@ -55,13 +55,13 @@ impl<A: StaticDispatch> DataShardingExecuteState<A> for StaticDispatchExecute<A>
     fn proceed(
         &mut self,
         shards: &mut HashMap<ShardIndex, A::Shard>,
-    ) -> PartialStateExecuteOutput<A::Res> {
+    ) -> DataShardingExecuteOutput<A::Res> {
         let required_indices = &self.schema.shards_of(self.op.as_ref().unwrap())
             - &shards.keys().cloned().collect::<HashSet<_>>();
         if !required_indices.is_empty() {
-            PartialStateExecuteOutput::RequireAccess(required_indices)
+            DataShardingExecuteOutput::RequireAccess(required_indices)
         } else {
-            PartialStateExecuteOutput::Complete(
+            DataShardingExecuteOutput::Complete(
                 self.schema.execute(self.op.take().unwrap(), shards),
             )
         }
@@ -90,8 +90,8 @@ impl DataShardingExecuteState<DataShardingSchema<Null>>
     fn proceed(
         &mut self,
         _shards: &mut HashMap<ShardIndex, <DataShardingSchema<Null> as DataShardingApp>::Shard>,
-    ) -> PartialStateExecuteOutput<<DataShardingSchema<Null> as DataShardingApp>::Res> {
-        PartialStateExecuteOutput::Complete(())
+    ) -> DataShardingExecuteOutput<<DataShardingSchema<Null> as DataShardingApp>::Res> {
+        DataShardingExecuteOutput::Complete(())
     }
 }
 
