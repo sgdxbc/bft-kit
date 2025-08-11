@@ -103,13 +103,13 @@ impl DataShardingExecuteState<DataShardingSchema<Null>>
 
 pub struct Kv;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KvOp {
     Put(String, String),
     Get(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KvRes {
     Put,
     Get(Option<String>),

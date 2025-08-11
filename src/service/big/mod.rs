@@ -83,6 +83,7 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> Service<A, R> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum Message<A: DataShardingApp> {
     QueryShard(message::QueryShard),
     QueryShardOk(message::QueryShardOk<A::Shard>),
@@ -352,12 +353,14 @@ impl<A: DataShardingApp> StateManager<A> {
 mod message {
     use super::{ServiceIndex, ShardIndex, StateVersion};
 
+    #[derive(Debug, Clone)]
     pub struct QueryShard {
         pub state_version: StateVersion,
         pub shard_index: ShardIndex,
         pub service_index: ServiceIndex,
     }
 
+    #[derive(Debug, Clone)]
     pub struct QueryShardOk<S> {
         pub state_version: StateVersion,
         pub shard_index: ShardIndex,
