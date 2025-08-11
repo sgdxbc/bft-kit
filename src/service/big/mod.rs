@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use derive_where::derive_where;
 use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
 
 use crate::{
@@ -13,8 +14,8 @@ use crate::{
 };
 
 use super::{
-    ClientId, ClientSeq, Reply, Request, ServiceApp, ServiceIndex, ServiceMessage,
-    ServiceRecipient, ServiceSend, ServiceState,
+    ClientId, ClientSeq, Message, Reply, Request, Send, ServiceApp, ServiceIndex, ServiceRecipient,
+    ServiceState,
 };
 
 pub mod app;
@@ -57,7 +58,7 @@ pub struct Service<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
     request_buffer: Vec<Request<A::Op>>,
     query_shard_buffer: Vec<message::QueryShard>,
     query_shard_ok_buffer: Vec<message::QueryShardOk<A::Shard>>,
-    output_buffer: Vec<Proceed<ServiceSend<Message<A>, A::Res, R::Metadata, R::Send>, Never>>,
+    output_buffer: Vec<Proceed<Send<ServiceSend<A, R>, Reply<A::Res, R::Metadata>>, Never>>,
 }
 
 struct Executing<RD> {
@@ -83,20 +84,32 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> Service<A, R> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum Message<A: DataShardingApp> {
+pub enum ServiceSend<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
+    Service(ServiceRecipient, ServiceMessage<A>),
+    Replication(R::Send),
+}
+
+#[derive_where(Debug, Clone; A::Shard)]
+pub enum ServiceMessage<A: DataShardingApp> {
     QueryShard(message::QueryShard),
     QueryShardOk(message::QueryShardOk<A::Shard>),
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> ServiceState<A, R> for Service<A, R>
+pub enum ToServiceMessage<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
+    Service(ServiceMessage<A>),
+    Replication(R::Message),
+}
+
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> ServiceState<A, R::Metadata>
+    for Service<A, R>
 where
     Reply<A::Res, R::Metadata>: Clone,
     A::Shard: Clone,
     R::Metadata: Clone,
 {
     type Log = Request<A::Op>;
-    type ServiceMessage = Message<A>;
+    type ServiceSend = ServiceSend<A, R>;
+    type ServiceMessage = ToServiceMessage<A, R>;
 }
 
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> State for Service<A, R>
@@ -105,7 +118,7 @@ where
     A::Shard: Clone,
     R::Metadata: Clone,
 {
-    type Send = ServiceSend<Message<A>, A::Res, R::Metadata, R::Send>;
+    type Send = Send<ServiceSend<A, R>, Reply<A::Res, R::Metadata>>;
     type Output = Never;
 
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
@@ -123,11 +136,13 @@ where
                                 shard_index,
                                 service_index: self.state.index,
                             };
-                            self.output_buffer.push(Proceed::Send(ServiceSend::Service(
-                                ServiceRecipient::Multi(
-                                    self.state.config.service_indices_of(shard_index),
+                            self.output_buffer.push(Proceed::Send(Send::Service(
+                                ServiceSend::Service(
+                                    ServiceRecipient::Multi(
+                                        self.state.config.service_indices_of(shard_index),
+                                    ),
+                                    ServiceMessage::QueryShard(query_shard),
                                 ),
-                                Message::QueryShard(query_shard),
                             )));
                         }
                     }
@@ -135,11 +150,11 @@ where
                 }
                 DataShardingExecuteOutput::Complete(res) => {
                     let executing = self.executing.pop_front().unwrap();
-                    Proceed::Send(ServiceSend::Reply(
+                    Proceed::Send(Send::Reply(
                         executing.client_id,
                         Reply {
                             client_seq: executing.client_seq,
-                            replication_metadata: executing.metadata,
+                            metadata: executing.metadata,
                             res,
                         },
                     ))
@@ -176,10 +191,10 @@ where
                         shard_index: query_shard.shard_index,
                         shard: shard.clone(),
                     };
-                    Proceed::Send(ServiceSend::Service(
+                    Proceed::Send(Send::Service(ServiceSend::Service(
                         ServiceRecipient::Uni(query_shard.service_index),
-                        Message::QueryShardOk(query_shard_ok),
-                    ))
+                        ServiceMessage::QueryShardOk(query_shard_ok),
+                    )))
                 }
             };
         }
@@ -187,7 +202,9 @@ where
             self.replication.submit(request)
         }
         match self.replication.proceed(since_start) {
-            Proceed::Send(message) => Proceed::Send(ServiceSend::Replication(message)),
+            Proceed::Send(message) => {
+                Proceed::Send(Send::Service(ServiceSend::Replication(message)))
+            }
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after), // TODO
             Proceed::Output(output) => {
                 for request in output.logs {
@@ -204,36 +221,40 @@ where
         }
     }
 
-    type Message = ServiceMessage<Message<A>, A::Op, R::Message>;
+    type Message = Message<ToServiceMessage<A, R>, Request<A::Op>>;
     fn receive(&mut self, message: Self::Message) {
         match message {
-            ServiceMessage::Replication(metadata) => self.replication.receive(metadata),
-            ServiceMessage::Request(request) => match self.replies.get(&request.client_id) {
+            Message::Request(request) => match self.replies.get(&request.client_id) {
                 Some(reply) if reply.client_seq > request.client_seq => {}
-                Some(reply) if reply.client_seq == request.client_seq => self.output_buffer.push(
-                    Proceed::Send(ServiceSend::Reply(request.client_id, reply.clone())),
-                ),
+                Some(reply) if reply.client_seq == request.client_seq => self
+                    .output_buffer
+                    .push(Proceed::Send(Send::Reply(request.client_id, reply.clone()))),
                 _ => self.request_buffer.push(request),
             },
-            ServiceMessage::Service(message) => match message {
-                Message::QueryShard(query_shard) => {
-                    if query_shard.state_version > self.state.version {
-                        // TODO buffer it?
-                        return;
-                    }
-                    self.query_shard_buffer.push(query_shard)
+            Message::Service(ToServiceMessage::Replication(metadata)) => {
+                self.replication.receive(metadata)
+            }
+            Message::Service(ToServiceMessage::Service(ServiceMessage::QueryShard(
+                query_shard,
+            ))) => {
+                if query_shard.state_version > self.state.version {
+                    // TODO buffer it?
+                    return;
                 }
-                Message::QueryShardOk(query_shard_ok) => {
-                    if query_shard_ok.state_version < self.state.version {
-                        return;
-                    }
-                    if let Some(querying) = self.querying.get(&query_shard_ok.state_version)
-                        && querying.contains(&query_shard_ok.shard_index)
-                    {
-                        self.query_shard_ok_buffer.push(query_shard_ok);
-                    }
+                self.query_shard_buffer.push(query_shard)
+            }
+            Message::Service(ToServiceMessage::Service(ServiceMessage::QueryShardOk(
+                query_shard_ok,
+            ))) => {
+                if query_shard_ok.state_version < self.state.version {
+                    return;
                 }
-            },
+                if let Some(querying) = self.querying.get(&query_shard_ok.state_version)
+                    && querying.contains(&query_shard_ok.shard_index)
+                {
+                    self.query_shard_ok_buffer.push(query_shard_ok);
+                }
+            }
         };
     }
 }

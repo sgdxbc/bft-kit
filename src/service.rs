@@ -1,6 +1,6 @@
 use bincode::{Decode, Encode};
 
-use crate::{Never, replication::ReplicationState, state::State};
+use crate::{Never, state::State};
 
 pub mod big;
 pub mod transport;
@@ -8,14 +8,15 @@ pub mod unsharded;
 
 pub type ServiceIndex = u16;
 
-pub trait ServiceState<A: ServiceApp, R: ReplicationState<Self::Log>>:
+pub trait ServiceState<A: ServiceApp, D>:
     State<
-        Send = ServiceSend<Self::ServiceMessage, A::Res, R::Metadata, R::Send>,
+        Send = Send<Self::ServiceSend, Reply<A::Res, D>>,
         Output = Never,
-        Message = ServiceMessage<Self::ServiceMessage, A::Op, R::Message>,
+        Message = Message<Self::ServiceMessage, Request<A::Op>>,
     >
 {
     type Log;
+    type ServiceSend;
     type ServiceMessage;
 }
 
@@ -24,10 +25,9 @@ pub trait ServiceApp {
     type Res;
 }
 
-pub enum ServiceSend<M, Res, RD = (), RS = Never> {
-    Service(ServiceRecipient, M),
-    Reply(ClientId, Reply<Res, RD>),
-    Replication(RS),
+pub enum Send<S, R> {
+    Service(S),
+    Reply(ClientId, R),
 }
 
 pub enum ServiceRecipient {
@@ -36,10 +36,9 @@ pub enum ServiceRecipient {
     Uni(ServiceIndex),
 }
 
-pub enum ServiceMessage<M, Op, RM = Never> {
+pub enum Message<M, R> {
     Service(M),
-    Request(Request<Op>),
-    Replication(RM),
+    Request(R),
 }
 
 // id is randomly assigned while index is continuously assigned
@@ -56,8 +55,8 @@ pub struct Request<Op> {
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
-pub struct Reply<Res, RD> {
+pub struct Reply<Res, D> {
     pub client_seq: ClientSeq,
     pub res: Res,
-    pub replication_metadata: RD,
+    pub metadata: D,
 }

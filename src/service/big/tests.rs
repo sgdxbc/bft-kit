@@ -22,7 +22,7 @@ type R = Replica<Request<Vec<KvOp>>>;
 
 struct SystemState {
     services: Vec<Service<A, R>>,
-    service_network: VecDeque<(ServiceIndex, Message<A>)>,
+    service_network: VecDeque<(ServiceIndex, ServiceMessage<A>)>,
     replies: Vec<(ClientId, Reply<Vec<KvRes>, ()>)>,
 }
 
@@ -49,7 +49,8 @@ fn idle_pending() {
 impl SystemState {
     fn deliver_messages(&mut self) {
         while let Some((index, message)) = self.service_network.pop_front() {
-            self.services[index as usize].receive(ServiceMessage::Service(message))
+            self.services[index as usize]
+                .receive(Message::Service(ToServiceMessage::Service(message)))
         }
     }
 
@@ -57,18 +58,25 @@ impl SystemState {
         loop {
             match self.services[index as usize].proceed(since_start) {
                 Proceed::Pending(tick_after) => break tick_after,
-                Proceed::Send(ServiceSend::Reply(client_id, reply)) => {
+                Proceed::Send(Send::Reply(client_id, reply)) => {
                     self.replies.push((client_id, reply))
                 }
-                Proceed::Send(ServiceSend::Service(ServiceRecipient::Uni(index), message)) => {
-                    self.service_network.push_back((index, message))
-                }
-                Proceed::Send(ServiceSend::Service(ServiceRecipient::Multi(indices), message)) => {
+                Proceed::Send(Send::Service(ServiceSend::Service(
+                    ServiceRecipient::Uni(index),
+                    message,
+                ))) => self.service_network.push_back((index, message)),
+                Proceed::Send(Send::Service(ServiceSend::Service(
+                    ServiceRecipient::Multi(indices),
+                    message,
+                ))) => {
                     for index in indices {
                         self.service_network.push_back((index, message.clone()))
                     }
                 }
-                Proceed::Send(ServiceSend::Service(ServiceRecipient::All, message)) => {
+                Proceed::Send(Send::Service(ServiceSend::Service(
+                    ServiceRecipient::All,
+                    message,
+                ))) => {
                     for index in 0..self.services.len() {
                         self.service_network
                             .push_back((index as _, message.clone()))
@@ -102,10 +110,7 @@ fn one_service() {
         service_network: Default::default(),
         replies: Default::default(),
     };
-    state.services[0].receive(ServiceMessage::Request(request(KvOp::Put(
-        "k".into(),
-        "v".into(),
-    ))));
+    state.services[0].receive(Message::Request(request(KvOp::Put("k".into(), "v".into()))));
     state.progress(0, Duration::ZERO);
     let (_, reply) = state.replies.remove(0);
     assert_eq!(reply.res, vec![KvRes::Put]);
