@@ -15,6 +15,28 @@ use crate::{
 pub mod big;
 pub mod transport;
 
+pub trait ServiceState<A: AppState, R: ReplicationState<Self::Log>>:
+    State<
+        Send = ServiceSend<A::Res, R::Metadata, R::Send>,
+        Output = Never,
+        Message = ServiceMessage<A::Op, R::Message>,
+    >
+{
+    type Log;
+}
+
+pub enum ServiceSend<Res, RD, RS> {
+    Reply(ClientId, Reply<Res, RD>),
+    // cross service send
+    Replication(RS),
+}
+
+pub enum ServiceMessage<Op, RM> {
+    Request(Request<Op>),
+    // cross service message
+    Replication(RM),
+}
+
 // id is randomly assigned while index is continuously assigned
 // index is statically assigned while sequence monotonically increases
 
@@ -41,7 +63,8 @@ pub struct Service<R: ReplicationState<Request<A::Op>>, A: AppState> {
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     replicated: Option<(ReplicatedRequests<A::Op>, R::Metadata)>,
 
-    receive_buffer: Vec<Request<A::Op>>,
+    request_buffer: Vec<Request<A::Op>>,
+    output_buffer: Vec<Proceed<ServiceSend<A::Res, R::Metadata, R::Send>, Never>>,
 }
 
 type ReplicatedRequests<Op> = VecDeque<Request<Op>>;
@@ -53,31 +76,10 @@ impl<R: ReplicationState<Request<A::Op>>, A: AppState> Service<R, A> {
             app,
             replies: Default::default(),
             replicated: None,
-            receive_buffer: Default::default(),
+            request_buffer: Default::default(),
+            output_buffer: Default::default(),
         }
     }
-}
-
-pub enum ServiceSend<Res, RD, RS> {
-    Reply(ClientId, Reply<Res, RD>),
-    // cross service send
-    Replication(RS),
-}
-
-pub enum ServiceMessage<Op, RM> {
-    Request(Request<Op>),
-    // cross service message
-    Replication(RM),
-}
-
-pub trait ServiceState<A: AppState, R: ReplicationState<Self::Log>>:
-    State<
-        Send = ServiceSend<A::Res, R::Metadata, R::Send>,
-        Output = Never,
-        Message = ServiceMessage<A::Op, R::Message>,
-    >
-{
-    type Log;
 }
 
 impl<R: ReplicationState<Request<A::Op>>, A: AppState> ServiceState<A, R> for Service<R, A>
@@ -116,19 +118,9 @@ where
             return Proceed::Send(ServiceSend::Reply(request.client_id, reply));
         }
 
-        if let Some(request) = self.receive_buffer.pop() {
-            return match self.replies.get(&request.client_id) {
-                Some(reply) if reply.client_seq > request.client_seq => self.proceed(since_start),
-                Some(reply) if reply.client_seq == request.client_seq => {
-                    Proceed::Send(ServiceSend::Reply(request.client_id, reply.clone()))
-                }
-                _ => {
-                    self.replication.submit(request);
-                    self.proceed(since_start)
-                }
-            };
+        while let Some(request) = self.request_buffer.pop() {
+            self.replication.submit(request)
         }
-
         match self.replication.proceed(since_start) {
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
             Proceed::Send(send) => Proceed::Send(ServiceSend::Replication(send)),
@@ -146,7 +138,13 @@ where
     fn receive(&mut self, message: Self::Message) {
         // dbg!(&message);
         match message {
-            ServiceMessage::Request(request) => self.receive_buffer.push(request),
+            ServiceMessage::Request(request) => match self.replies.get(&request.client_id) {
+                Some(reply) if reply.client_seq > request.client_seq => {}
+                Some(reply) if reply.client_seq == request.client_seq => self.output_buffer.push(
+                    Proceed::Send(ServiceSend::Reply(request.client_id, reply.clone())),
+                ),
+                _ => self.request_buffer.push(request),
+            },
             ServiceMessage::Replication(message) => self.replication.receive(message),
         }
     }
