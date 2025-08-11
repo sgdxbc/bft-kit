@@ -58,7 +58,7 @@ pub struct Service<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
     request_buffer: Vec<Request<A::Op>>,
     query_shard_buffer: Vec<message::QueryShard>,
     query_shard_ok_buffer: Vec<message::QueryShardOk<A::Shard>>,
-    output_buffer: Vec<Proceed<Send<ServiceSend<A, R>, Reply<A::Res, R::Metadata>>, Never>>,
+    send_buffer: Vec<Send<ServiceSend<A, R>, Reply<A::Res, R::Metadata>>>,
 }
 
 struct Executing<RD> {
@@ -79,7 +79,7 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> Service<A, R> {
             request_buffer: Default::default(),
             query_shard_buffer: Default::default(),
             query_shard_ok_buffer: Default::default(),
-            output_buffer: Default::default(),
+            send_buffer: Default::default(),
         }
     }
 }
@@ -122,8 +122,8 @@ where
     type Output = Never;
 
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some(output) = self.output_buffer.pop() {
-            return output;
+        if let Some(send) = self.send_buffer.pop() {
+            return Proceed::Send(send);
         }
         if let Some(proceed) = self.state.proceed() {
             return match proceed {
@@ -136,13 +136,11 @@ where
                                 shard_index,
                                 service_index: self.state.index,
                             };
-                            self.output_buffer.push(Proceed::Send(Send::Service(
-                                ServiceSend::Service(
-                                    ServiceRecipient::Multi(
-                                        self.state.config.service_indices_of(shard_index),
-                                    ),
-                                    ServiceMessage::QueryShard(query_shard),
+                            self.send_buffer.push(Send::Service(ServiceSend::Service(
+                                ServiceRecipient::Multi(
+                                    self.state.config.service_indices_of(shard_index),
                                 ),
+                                ServiceMessage::QueryShard(query_shard),
                             )));
                         }
                     }
@@ -227,8 +225,8 @@ where
             Message::Request(request) => match self.replies.get(&request.client_id) {
                 Some(reply) if reply.client_seq > request.client_seq => {}
                 Some(reply) if reply.client_seq == request.client_seq => self
-                    .output_buffer
-                    .push(Proceed::Send(Send::Reply(request.client_id, reply.clone()))),
+                    .send_buffer
+                    .push(Send::Reply(request.client_id, reply.clone())),
                 _ => self.request_buffer.push(request),
             },
             Message::Service(ToServiceMessage::Replication(metadata)) => {

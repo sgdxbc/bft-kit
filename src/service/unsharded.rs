@@ -20,7 +20,7 @@ pub struct Service<A: AppState, R: ReplicationState<Request<A::Op>>> {
     replicated: Option<(ReplicatedRequests<A::Op>, R::Metadata)>,
 
     request_buffer: Vec<Request<A::Op>>,
-    output_buffer: Vec<Proceed<Send<Never, Reply<A::Res, R::Metadata>>, Never>>,
+    send_buffer: Vec<Send<R::Send, Reply<A::Res, R::Metadata>>>,
 }
 
 type ReplicatedRequests<Op> = VecDeque<Request<Op>>;
@@ -33,7 +33,7 @@ impl<A: AppState, R: ReplicationState<Request<A::Op>>> Service<A, R> {
             replies: Default::default(),
             replicated: None,
             request_buffer: Default::default(),
-            output_buffer: Default::default(),
+            send_buffer: Default::default(),
         }
     }
 }
@@ -58,6 +58,10 @@ where
     type Send = Send<R::Send, Reply<A::Res, R::Metadata>>;
     type Output = Never;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+        if let Some(send) = self.send_buffer.pop() {
+            return Proceed::Send(send);
+        }
+
         if let Some((requests, metadata)) = &mut self.replicated {
             let Some(request) = requests.pop_front() else {
                 self.replicated = None;
@@ -100,8 +104,8 @@ where
             Message::Request(request) => match self.replies.get(&request.client_id) {
                 Some(reply) if reply.client_seq > request.client_seq => {}
                 Some(reply) if reply.client_seq == request.client_seq => self
-                    .output_buffer
-                    .push(Proceed::Send(Send::Reply(request.client_id, reply.clone()))),
+                    .send_buffer
+                    .push(Send::Reply(request.client_id, reply.clone())),
                 _ => self.request_buffer.push(request),
             },
             Message::Service(message) => self.replication.receive(message),

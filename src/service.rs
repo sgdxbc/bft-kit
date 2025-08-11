@@ -3,7 +3,6 @@ use bincode::{Decode, Encode};
 use crate::{Never, state::State};
 
 pub mod big;
-pub mod transport;
 pub mod unsharded;
 
 pub type ServiceIndex = u16;
