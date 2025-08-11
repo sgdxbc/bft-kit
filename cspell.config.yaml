@@ -50,5 +50,6 @@ words:
   - tput
   - txns
   - unreplicated
+  - unsharded
   - utxo
   - Ycsb

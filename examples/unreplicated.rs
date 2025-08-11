@@ -5,7 +5,7 @@ use bft_kit::{
     init_logging,
     parse::Settings,
     replication::unreplicated::{Client, Replica},
-    service::{Service, transport::run_service},
+    service::{transport::run_service, unsharded::Service},
     workload::{self, CloseLoopWorker, transport::run_worker},
 };
 use tokio::spawn;

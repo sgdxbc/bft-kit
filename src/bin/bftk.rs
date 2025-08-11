@@ -6,7 +6,7 @@ use bft_kit::{
     init_logging_file,
     parse::Settings,
     replication::{ReplicaIndex, unreplicated},
-    service::{Service, transport::run_service},
+    service::{transport::run_service, unsharded::Service},
     set_affinity_block_on,
     workload::{CloseLoopWorker, Latencies, OpenLoopWorker, transport::run_worker},
 };
