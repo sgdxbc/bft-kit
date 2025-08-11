@@ -8,15 +8,15 @@ use derive_where::derive_where;
 
 use crate::app::utxo::{UtxoError, UtxoId, UtxoOp, UtxoOpInput};
 
-use super::{PartialStateExecuteOutput, PartialStateExecuteState, ShardIndex, ShardedStateApp};
+use super::{DataShardingApp, DataShardingExecuteState, PartialStateExecuteOutput, ShardIndex};
 
 #[derive_where(Debug, Clone)]
-pub struct ShardSchema<A> {
+pub struct DataShardingSchema<A> {
     num_shard: ShardIndex,
     _app: PhantomData<A>,
 }
 
-impl<A> ShardSchema<A> {
+impl<A> DataShardingSchema<A> {
     pub fn new(num_shard: ShardIndex) -> Self {
         Self {
             num_shard,
@@ -29,15 +29,15 @@ impl<A> ShardSchema<A> {
     }
 }
 
-pub struct StaticDispatchExecute<A: ShardedStateApp> {
+pub struct StaticDispatchExecute<A: DataShardingApp> {
     op: Option<A::Op>,
     schema: A,
 }
 
-impl<A> ShardSchema<A> {
-    fn static_dispatch(&self, op: <Self as ShardedStateApp>::Op) -> StaticDispatchExecute<Self>
+impl<A> DataShardingSchema<A> {
+    fn static_dispatch(&self, op: <Self as DataShardingApp>::Op) -> StaticDispatchExecute<Self>
     where
-        Self: ShardedStateApp,
+        Self: DataShardingApp,
     {
         StaticDispatchExecute {
             op: Some(op),
@@ -46,12 +46,12 @@ impl<A> ShardSchema<A> {
     }
 }
 
-trait StaticDispatch: ShardedStateApp {
+trait StaticDispatch: DataShardingApp {
     fn shards_of(&self, op: &Self::Op) -> HashSet<ShardIndex>;
     fn execute(&self, op: Self::Op, shards: &mut HashMap<ShardIndex, Self::Shard>) -> Self::Res;
 }
 
-impl<A: StaticDispatch> PartialStateExecuteState<A> for StaticDispatchExecute<A> {
+impl<A: StaticDispatch> DataShardingExecuteState<A> for StaticDispatchExecute<A> {
     fn proceed(
         &mut self,
         shards: &mut HashMap<ShardIndex, A::Shard>,
@@ -68,9 +68,9 @@ impl<A: StaticDispatch> PartialStateExecuteState<A> for StaticDispatchExecute<A>
     }
 }
 
-pub use crate::app::null::Null;
+pub struct Null;
 
-impl ShardedStateApp for ShardSchema<Null> {
+impl DataShardingApp for DataShardingSchema<Null> {
     type Op = ();
     type Res = ();
     type Shard = ();
@@ -79,13 +79,18 @@ impl ShardedStateApp for ShardSchema<Null> {
     fn new_execute(&self, op: Self::Op) -> Self::Execute {
         self.static_dispatch(op)
     }
+    fn num_shard(&self) -> ShardIndex {
+        self.num_shard
+    }
 }
 
-impl PartialStateExecuteState<ShardSchema<Null>> for StaticDispatchExecute<ShardSchema<Null>> {
+impl DataShardingExecuteState<DataShardingSchema<Null>>
+    for StaticDispatchExecute<DataShardingSchema<Null>>
+{
     fn proceed(
         &mut self,
-        _shards: &mut HashMap<ShardIndex, <ShardSchema<Null> as ShardedStateApp>::Shard>,
-    ) -> PartialStateExecuteOutput<<ShardSchema<Null> as ShardedStateApp>::Res> {
+        _shards: &mut HashMap<ShardIndex, <DataShardingSchema<Null> as DataShardingApp>::Shard>,
+    ) -> PartialStateExecuteOutput<<DataShardingSchema<Null> as DataShardingApp>::Res> {
         PartialStateExecuteOutput::Complete(())
     }
 }
@@ -102,7 +107,7 @@ pub enum KvRes {
     Get(Option<String>),
 }
 
-impl ShardedStateApp for ShardSchema<Kv> {
+impl DataShardingApp for DataShardingSchema<Kv> {
     type Op = Vec<KvOp>;
     type Res = Vec<KvRes>;
     type Shard = HashMap<String, String>;
@@ -113,9 +118,12 @@ impl ShardedStateApp for ShardSchema<Kv> {
     fn new_execute(&self, op: Self::Op) -> Self::Execute {
         self.static_dispatch(op)
     }
+    fn num_shard(&self) -> ShardIndex {
+        self.num_shard
+    }
 }
 
-impl ShardSchema<Kv> {
+impl DataShardingSchema<Kv> {
     fn shard_of(&self, op: &KvOp) -> ShardIndex {
         match op {
             KvOp::Put(key, _) | KvOp::Get(key) => self.shard_index_from_hash(key),
@@ -140,7 +148,7 @@ impl ShardSchema<Kv> {
     }
 }
 
-impl StaticDispatch for ShardSchema<Kv> {
+impl StaticDispatch for DataShardingSchema<Kv> {
     fn shards_of(&self, op: &Self::Op) -> HashSet<ShardIndex> {
         op.iter().map(|op| self.shard_of(op)).collect()
     }
@@ -149,12 +157,12 @@ impl StaticDispatch for ShardSchema<Kv> {
     }
 }
 
-pub use crate::app::utxo::Utxo;
+pub struct Utxo;
 
-impl ShardedStateApp for ShardSchema<Utxo> {
+impl DataShardingApp for DataShardingSchema<Utxo> {
     type Op = UtxoOp;
     type Res = Result<(), UtxoError>;
-    type Shard = Utxo;
+    type Shard = crate::app::utxo::Utxo;
     type Execute = StaticDispatchExecute<Self>;
     fn new_shard(&self, _index: ShardIndex) -> Self::Shard {
         Default::default()
@@ -162,9 +170,12 @@ impl ShardedStateApp for ShardSchema<Utxo> {
     fn new_execute(&self, op: Self::Op) -> Self::Execute {
         self.static_dispatch(op)
     }
+    fn num_shard(&self) -> ShardIndex {
+        self.num_shard
+    }
 }
 
-impl StaticDispatch for ShardSchema<Utxo> {
+impl StaticDispatch for DataShardingSchema<Utxo> {
     // consider shard by owner?
     fn shards_of(&self, op: &UtxoOp) -> HashSet<ShardIndex> {
         let mut shards = HashSet::new();
@@ -180,7 +191,11 @@ impl StaticDispatch for ShardSchema<Utxo> {
         shards
     }
 
-    fn execute(&self, op: UtxoOp, shards: &mut HashMap<ShardIndex, Utxo>) -> Result<(), UtxoError> {
+    fn execute(
+        &self,
+        op: UtxoOp,
+        shards: &mut HashMap<ShardIndex, crate::app::utxo::Utxo>,
+    ) -> Result<(), UtxoError> {
         if matches!(op.input, UtxoOpInput::Spend(_))
             && shards
                 .values()
