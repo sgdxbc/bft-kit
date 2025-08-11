@@ -45,6 +45,7 @@ type StateVersion = u64;
 
 pub struct Service<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> {
     replication: R,
+    app: A,
 
     state: StateManager<A>,
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
@@ -67,7 +68,8 @@ impl<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> Service<R, A> {
     pub fn new(replication: R, app: A, index: ServiceIndex, state_config: StateConfig) -> Self {
         Self {
             replication,
-            state: StateManager::new(app, index, state_config),
+            state: StateManager::new(index, state_config, &app),
+            app,
             replies: Default::default(),
             executing: Default::default(),
             querying: Default::default(),
@@ -119,22 +121,20 @@ where
         if let Some(proceed) = self.state.proceed() {
             return match proceed {
                 DataShardingExecuteOutput::RequireAccess(required_indices) => {
-                    self.querying
-                        .entry(self.state.version)
-                        .or_default()
-                        .extend(required_indices.clone());
-                    self.output_buffer
-                        .extend(required_indices.into_iter().map(|shard_index| {
+                    let querying = self.querying.entry(self.state.version).or_default();
+                    for shard_index in required_indices {
+                        if querying.insert(shard_index) {
                             let query_shard = message::QueryShard {
                                 state_version: self.state.version,
                                 shard_index,
                                 service_index: self.state.index,
                             };
-                            Proceed::Send(ServiceSend::Service(
+                            self.output_buffer.push(Proceed::Send(ServiceSend::Service(
                                 ServiceRecipient::All,
                                 Message::QueryShard(query_shard),
-                            ))
-                        }));
+                            )));
+                        }
+                    }
                     self.proceed(since_start)
                 }
                 DataShardingExecuteOutput::Complete(res) => {
@@ -150,8 +150,11 @@ where
                 }
             };
         }
-        if let Some(query_shard_ok) = self.query_shard_ok_buffer.pop() {
+        while let Some(query_shard_ok) = self.query_shard_ok_buffer.pop() {
             assert!(query_shard_ok.state_version == self.state.version);
+            if query_shard_ok.state_version > self.state.version {
+                todo!()
+            }
             self.state
                 .install_shard(query_shard_ok.shard_index, query_shard_ok.shard);
             let querying = self
@@ -161,7 +164,7 @@ where
             querying.remove(&query_shard_ok.shard_index);
             if querying.is_empty() {
                 self.querying.remove(&query_shard_ok.state_version);
-                return self.proceed(since_start);
+                return self.proceed(since_start); // `state` will proceed
             }
         }
         if let Some(query_shard) = self.query_shard_buffer.pop() {
@@ -184,24 +187,15 @@ where
                 }
             };
         }
-        if let Some(request) = self.request_buffer.pop() {
-            return match self.replies.get(&request.client_id) {
-                Some(reply) if reply.client_seq > request.client_seq => self.proceed(since_start),
-                Some(reply) if reply.client_seq == request.client_seq => {
-                    Proceed::Send(ServiceSend::Reply(request.client_id, reply.clone()))
-                }
-                _ => {
-                    self.replication.submit(request);
-                    self.proceed(since_start)
-                }
-            };
+        while let Some(request) = self.request_buffer.pop() {
+            self.replication.submit(request)
         }
         match self.replication.proceed(since_start) {
             Proceed::Send(message) => Proceed::Send(ServiceSend::Replication(message)),
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after), // TODO
             Proceed::Output(output) => {
                 for request in output.logs {
-                    self.state.push_op(request.op);
+                    self.state.push_execute(self.app.new_execute(request.op));
                     let executing = Executing {
                         client_id: request.client_id,
                         client_seq: request.client_seq,
@@ -218,7 +212,13 @@ where
     fn receive(&mut self, message: Self::Message) {
         match message {
             ServiceMessage::Replication(metadata) => self.replication.receive(metadata),
-            ServiceMessage::Request(request) => self.request_buffer.push(request),
+            ServiceMessage::Request(request) => match self.replies.get(&request.client_id) {
+                Some(reply) if reply.client_seq > request.client_seq => {}
+                Some(reply) if reply.client_seq == request.client_seq => self.output_buffer.push(
+                    Proceed::Send(ServiceSend::Reply(request.client_id, reply.clone())),
+                ),
+                _ => self.request_buffer.push(request),
+            },
             ServiceMessage::Service(message) => match message {
                 Message::QueryShard(query_shard) => {
                     if query_shard.state_version > self.state.version {
@@ -231,11 +231,11 @@ where
                     if query_shard_ok.state_version < self.state.version {
                         return;
                     }
-                    if query_shard_ok.state_version > self.state.version {
-                        // should not happen
-                        return;
+                    if let Some(querying) = self.querying.get(&query_shard_ok.state_version)
+                        && querying.contains(&query_shard_ok.shard_index)
+                    {
+                        self.query_shard_ok_buffer.push(query_shard_ok);
                     }
-                    self.query_shard_ok_buffer.push(query_shard_ok);
                 }
             },
         };
@@ -243,20 +243,18 @@ where
 }
 
 struct StateManager<A: DataShardingApp> {
-    app: A,
-
     index: ServiceIndex,
     config: StateConfig,
 
     version: StateVersion,                           // of shard_store[-1]
     shard_store: Vec<HashMap<ShardIndex, A::Shard>>, // [version -> shards]
-    executions: VecDeque<A::Execute>,
+    executes: VecDeque<A::Execute>,
     // shards of `version` that are required by executions[0]
     // if executions[0].proceed() returns Complete, these shards become shards of
     // `version + 1`
     // for the shards that this service `should_serve`, this map keeps copies of
-    // them for the execution to mutate
-    execution_shards: HashMap<ShardIndex, A::Shard>,
+    // them for the `execute` to mutate
+    execute: HashMap<ShardIndex, A::Shard>,
 }
 
 pub struct StateConfig {
@@ -277,55 +275,41 @@ impl StateConfig {
 }
 
 impl<A: DataShardingApp> StateManager<A> {
-    fn new(app: A, index: ServiceIndex, config: StateConfig) -> Self {
+    fn new(index: ServiceIndex, config: StateConfig, app: &A) -> Self {
         let shards = (0..app.num_shard())
             .filter(|&shard_index| config.should_serve(index, shard_index))
             .map(|shard_index| (shard_index, app.new_shard(shard_index)))
             .collect();
         Self {
-            app,
             index,
             config,
             version: 0,
             shard_store: vec![shards],
-            executions: Default::default(),
-            execution_shards: Default::default(),
+            executes: Default::default(),
+            execute: Default::default(),
         }
     }
 
-    fn push_op(&mut self, op: A::Op) -> (StateVersion, HashSet<ShardIndex>) {
-        let mut execution = self.app.new_execute(op);
-        let DataShardingExecuteOutput::RequireAccess(required_indices) =
-            execution.proceed(&mut Default::default())
-        else {
-            unimplemented!()
-        };
-        self.executions.push_back(execution);
-        (
-            self.version + self.executions.len() as StateVersion,
-            required_indices
-                .into_iter()
-                .filter(|&index| !self.config.should_serve(self.index, index))
-                .collect(),
-        )
+    fn push_execute(&mut self, execute: A::Execute) {
+        self.executes.push_back(execute)
     }
 
     fn install_shard(&mut self, index: ShardIndex, shard: A::Shard) {
-        self.execution_shards.insert(index, shard);
+        self.execute.insert(index, shard);
     }
 
     fn proceed(&mut self) -> Option<DataShardingExecuteOutput<A::Res>>
     where
         A::Shard: Clone,
     {
-        let execution = self.executions.front_mut()?;
-        match execution.proceed(&mut self.execution_shards) {
+        let execute = self.executes.front_mut()?;
+        match execute.proceed(&mut self.execute) {
             DataShardingExecuteOutput::RequireAccess(required_indices) => {
                 let mut missing_indices = HashSet::new();
                 for index in required_indices {
                     if self.config.should_serve(self.index, index) {
                         let shard = self.query_shard(self.version, index).unwrap().clone();
-                        self.execution_shards.insert(index, shard);
+                        self.execute.insert(index, shard);
                     } else {
                         missing_indices.insert(index);
                     }
@@ -333,14 +317,14 @@ impl<A: DataShardingApp> StateManager<A> {
                 if !missing_indices.is_empty() {
                     Some(DataShardingExecuteOutput::RequireAccess(missing_indices))
                 } else {
-                    self.proceed() // the execution will proceed in this recursion
+                    self.proceed() // the `execute` will proceed in this recursion
                 }
             }
             DataShardingExecuteOutput::Complete(res) => {
-                self.executions.pop_front();
-                self.execution_shards
+                self.executes.pop_front();
+                self.execute
                     .retain(|&shard_index, _| self.config.should_serve(self.index, shard_index));
-                self.shard_store.push(take(&mut self.execution_shards));
+                self.shard_store.push(take(&mut self.execute));
                 self.version += 1;
                 Some(DataShardingExecuteOutput::Complete(res))
             }
