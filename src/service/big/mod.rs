@@ -88,10 +88,9 @@ pub enum ServiceSend<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> {
 }
 
 pub enum ServiceRecipient {
-    // some message is only interested by 2f+k services. in that case just send to
-    // every other service use All. difference should not be much
-    All,
-    Index(ServiceIndex),
+    All, // broad?
+    Multi(Vec<ServiceIndex>),
+    Uni(ServiceIndex),
 }
 
 pub enum ServiceMessage<R: ReplicationState<Request<A::Op>>, A: DataShardingApp> {
@@ -130,7 +129,9 @@ where
                                 service_index: self.state.index,
                             };
                             self.output_buffer.push(Proceed::Send(ServiceSend::Service(
-                                ServiceRecipient::All,
+                                ServiceRecipient::Multi(
+                                    self.state.config.service_indices_of(shard_index),
+                                ),
                                 Message::QueryShard(query_shard),
                             )));
                         }
@@ -181,7 +182,7 @@ where
                         shard: shard.clone(),
                     };
                     Proceed::Send(ServiceSend::Service(
-                        ServiceRecipient::Index(query_shard.service_index),
+                        ServiceRecipient::Uni(query_shard.service_index),
                         Message::QueryShardOk(query_shard_ok),
                     ))
                 }
