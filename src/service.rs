@@ -35,6 +35,7 @@ pub enum ServiceRecipient {
     Uni(ServiceIndex),
 }
 
+#[derive(Debug)]
 pub enum Message<R, M> {
     Request(R),
     Intermediate(M),

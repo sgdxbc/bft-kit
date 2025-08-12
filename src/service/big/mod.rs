@@ -39,6 +39,7 @@ pub trait DataShardingExecuteState<A: DataShardingApp> {
     ) -> DataShardingExecuteOutput<A::Res>;
 }
 
+#[derive(Debug)]
 pub enum DataShardingExecuteOutput<R> {
     RequireAccess(HashSet<ShardIndex>),
     Complete(R),
@@ -95,6 +96,7 @@ pub enum ServiceMessage<A: DataShardingApp> {
     QueryShardOk(message::QueryShardOk<A::Shard>),
 }
 
+#[derive_where(Debug; ServiceMessage<A>, R::Message)]
 pub enum IntermediateMessage<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
     Service(ServiceMessage<A>),
     Replication(R::Message),
@@ -105,6 +107,10 @@ where
     Reply<A::Res, R::Metadata>: Clone,
     A::Shard: Clone,
     R::Metadata: Clone,
+    A::Op: std::fmt::Debug,
+    A::Res: std::fmt::Debug,
+    A::Shard: std::fmt::Debug,
+    R::Message: std::fmt::Debug,
 {
     type ServiceSend = IntermediateSend<A, R>;
     type ServiceMessage = IntermediateMessage<A, R>;
@@ -116,6 +122,10 @@ where
     Reply<A::Res, R::Metadata>: Clone,
     A::Shard: Clone,
     R::Metadata: Clone,
+    A::Op: std::fmt::Debug,
+    A::Res: std::fmt::Debug,
+    A::Shard: std::fmt::Debug,
+    R::Message: std::fmt::Debug,
 {
     type Send = Send<Reply<A::Res, R::Metadata>, IntermediateSend<A, R>>;
     type Output = Never;
@@ -125,7 +135,10 @@ where
         if let Some(send) = self.send_buffer.pop() {
             return Proceed::Send(send);
         }
-        if let Some(proceed) = self.state.proceed() {
+        if !self.querying.contains_key(&self.state.version)
+            && let Some(proceed) = self.state.proceed()
+        {
+            tracing::trace!(%self.state.index, ?proceed, "state proceed");
             return match proceed {
                 DataShardingExecuteOutput::RequireAccess(required_indices) => {
                     let querying = self.querying.entry(self.state.version).or_default();
@@ -204,6 +217,7 @@ where
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after), // TODO
             Proceed::Output(output) => {
                 for request in output.logs {
+                    tracing::trace!(%self.state.index, ?request.op, "push execute");
                     self.state.push_execute(self.app.new_execute(request.op));
                     let executing = Executing {
                         client_id: request.client_id,
@@ -219,6 +233,7 @@ where
 
     type Message = Message<Request<A::Op>, IntermediateMessage<A, R>>;
     fn receive(&mut self, message: Self::Message) {
+        tracing::trace!(%self.state.index, ?message);
         use {IntermediateMessage::*, Message::*, ServiceMessage::*};
         match message {
             Request(request) => match self.replies.get(&request.client_id) {

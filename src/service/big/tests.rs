@@ -1,3 +1,5 @@
+use test_log::test;
+
 use crate::replication::unreplicated::Replica;
 
 use super::{
@@ -54,7 +56,7 @@ impl SystemState {
         }
     }
 
-    fn progress(&mut self, index: ServiceIndex, since_start: Duration) -> Option<Duration> {
+    fn proceed_service(&mut self, index: ServiceIndex, since_start: Duration) -> Option<Duration> {
         loop {
             match self.services[index as usize].proceed(since_start) {
                 Proceed::Pending(tick_after) => break tick_after,
@@ -111,7 +113,73 @@ fn one_service() {
         replies: Default::default(),
     };
     state.services[0].receive(Message::Request(request(KvOp::Put("k".into(), "v".into()))));
-    state.progress(0, Duration::ZERO);
+    state.proceed_service(0, Duration::ZERO);
     let (_, reply) = state.replies.remove(0);
     assert_eq!(reply.res, vec![KvRes::Put]);
+    state.services[0].receive(Message::Request(request(KvOp::Get("k".into()))));
+    state.proceed_service(0, Duration::ZERO);
+    let (_, reply) = state.replies.remove(0);
+    assert_eq!(reply.res, vec![KvRes::Get(Some("v".into()))]);
+}
+
+impl SystemState {
+    fn new(num_service: ServiceIndex) -> Self {
+        Self {
+            services: (0..num_service)
+                .map(|i| {
+                    Service::new(
+                        Replica::new(),
+                        DataShardingSchema::new(10),
+                        i,
+                        StateConfig {
+                            num_service,
+                            num_active_copy: 1,
+                        },
+                    )
+                })
+                .collect(),
+            service_network: Default::default(),
+            replies: Default::default(),
+        }
+    }
+
+    fn receive(&mut self, request: Request<Vec<KvOp>>) {
+        for service in &mut self.services {
+            service.receive(Message::Request(request.clone()));
+        }
+    }
+
+    fn proceed(&mut self, since_start: Duration) -> Option<Duration> {
+        loop {
+            let mut min_tick_after = None;
+            for index in 0..self.services.len() as ServiceIndex {
+                let tick_after = self.proceed_service(index, since_start);
+                min_tick_after =
+                    if let (Some(tick_after), Some(min_tick_after)) = (tick_after, min_tick_after) {
+                        Some(tick_after.min(min_tick_after))
+                    } else {
+                        min_tick_after.or(tick_after)
+                    }
+            }
+        }
+    }
+
+    fn run(&mut self, since_start: Duration) -> Option<Duration> {
+        let mut tick_after;
+        while {
+            tick_after = self.proceed(since_start);
+            self.service_network.len() > 0
+        } {
+            self.deliver_messages()
+        }
+        tick_after
+    }
+}
+
+#[test]
+fn multiple_services() {
+    let mut state = SystemState::new(2);
+    state.receive(request(KvOp::Put("k".into(), "v".into())));
+    state.run(Duration::ZERO);
+    assert_eq!(state.replies.len(), 2);
 }
