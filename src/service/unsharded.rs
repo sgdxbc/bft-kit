@@ -38,15 +38,14 @@ impl<A: AppState, R: ReplicationState<Request<A::Op>>> Service<A, R> {
     }
 }
 
-impl<A: AppState, R: ReplicationState<Request<A::Op>>> ServiceState<A, R::Metadata>
-    for Service<A, R>
+impl<A: AppState, R: ReplicationState<Request<A::Op>>> ServiceState<A> for Service<A, R>
 where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
 {
-    type Log = Request<A::Op>;
     type ServiceSend = R::Send;
     type ServiceMessage = R::Message;
+    type Metadata = R::Metadata;
 }
 
 impl<A: AppState, R: ReplicationState<Request<A::Op>>> State for Service<A, R>
@@ -146,8 +145,12 @@ pub mod transport {
         cancel: CancellationToken,
     ) -> anyhow::Result<()>
     where
-        Service<A, R>:
-            ServiceState<A, R::Metadata, ServiceSend = R::Send, ServiceMessage = R::Message>,
+        Service<A, R>: ServiceState<
+                A,
+                ServiceSend = R::Send,
+                ServiceMessage = R::Message,
+                Metadata = R::Metadata,
+            >,
         R::Message: Decode<()>,
         Request<A::Op>: Decode<()>,
         Reply<A::Res, R::Metadata>: Encode,
@@ -313,8 +316,12 @@ pub mod transport {
         write_tracker: &TaskTracker,
     ) -> anyhow::Result<Option<Duration>>
     where
-        Service<A, R>:
-            ServiceState<A, R::Metadata, ServiceSend = R::Send, ServiceMessage = R::Message>,
+        Service<A, R>: ServiceState<
+                A,
+                ServiceSend = R::Send,
+                ServiceMessage = R::Message,
+                Metadata = R::Metadata,
+            >,
         Reply<A::Res, R::Metadata>: Encode,
         HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
     {

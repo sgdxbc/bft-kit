@@ -100,16 +100,15 @@ pub enum ToServiceMessage<A: DataShardingApp, R: ReplicationState<Request<A::Op>
     Replication(R::Message),
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> ServiceState<A, R::Metadata>
-    for Service<A, R>
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> ServiceState<A> for Service<A, R>
 where
     Reply<A::Res, R::Metadata>: Clone,
     A::Shard: Clone,
     R::Metadata: Clone,
 {
-    type Log = Request<A::Op>;
     type ServiceSend = ServiceSend<A, R>;
     type ServiceMessage = ToServiceMessage<A, R>;
+    type Metadata = R::Metadata;
 }
 
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> State for Service<A, R>

@@ -5,18 +5,16 @@ use crate::{Never, state::State};
 pub mod big;
 pub mod unsharded;
 
-pub type ServiceIndex = u16;
-
-pub trait ServiceState<A: ServiceApp, D>:
+pub trait ServiceState<A: ServiceApp>:
     State<
-        Send = Send<Self::ServiceSend, Reply<A::Res, D>>,
+        Send = Send<Self::ServiceSend, Reply<A::Res, Self::Metadata>>,
         Output = Never,
         Message = Message<Self::ServiceMessage, Request<A::Op>>,
     >
 {
-    type Log;
     type ServiceSend;
     type ServiceMessage;
+    type Metadata;
 }
 
 pub trait ServiceApp {
@@ -28,6 +26,8 @@ pub enum Send<S, R> {
     Service(S),
     Reply(ClientId, R),
 }
+
+pub type ServiceIndex = u16;
 
 pub enum ServiceRecipient {
     All, // broad?
