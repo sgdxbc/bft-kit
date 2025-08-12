@@ -19,7 +19,7 @@ pub struct Service<A: AppState, R: ReplicationState<Request<A::Op>>> {
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     replicated: Option<(ReplicatedRequests<A::Op>, R::Metadata)>,
 
-    request_buffer: Vec<Request<A::Op>>,
+    submit_buffer: Vec<Request<A::Op>>,
     send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, R::Send>>,
 }
 
@@ -32,7 +32,7 @@ impl<A: AppState, R: ReplicationState<Request<A::Op>>> Service<A, R> {
             app,
             replies: Default::default(),
             replicated: None,
-            request_buffer: Default::default(),
+            submit_buffer: Default::default(),
             send_buffer: Default::default(),
         }
     }
@@ -83,12 +83,12 @@ where
             return Proceed::Send(Send::Reply(request.client_id, reply));
         }
 
-        while let Some(request) = self.request_buffer.pop() {
+        while let Some(request) = self.submit_buffer.pop() {
             self.replication.submit(request)
         }
         match self.replication.proceed(since_start) {
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
-            Proceed::Send(send) => Proceed::Send(Send::Service(send)),
+            Proceed::Send(send) => Proceed::Send(Send::Intermediate(send)),
             Proceed::Output(replicated) => {
                 let replaced = self
                     .replicated
@@ -108,9 +108,9 @@ where
                 Some(reply) if reply.client_seq == request.client_seq => self
                     .send_buffer
                     .push(Send::Reply(request.client_id, reply.clone())),
-                _ => self.request_buffer.push(request),
+                _ => self.submit_buffer.push(request),
             },
-            Message::Service(message) => self.replication.receive(message),
+            Message::Intermediate(message) => self.replication.receive(message),
         }
     }
 }
@@ -282,7 +282,7 @@ pub mod transport {
                 Event::ReplicationMessage(bytes) => {
                     let (message, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                     anyhow::ensure!(len == bytes.len());
-                    service.receive(Message::Service(message))
+                    service.receive(Message::Intermediate(message))
                 }
                 Event::Tick => {}
             }
@@ -344,7 +344,7 @@ pub mod transport {
                         ),
                     ));
                 }
-                Proceed::Send(Send::Service(send)) => replica_table.perform(send, write_tracker)?,
+                Proceed::Send(Send::Intermediate(send)) => replica_table.perform(send, write_tracker)?,
             }
         }
     }

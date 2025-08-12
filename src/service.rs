@@ -24,7 +24,7 @@ pub trait ServiceApp {
 
 pub enum Send<R, S> {
     Reply(ClientId, R),
-    Service(S),
+    Intermediate(S),
 }
 
 pub type ServiceIndex = u16;
@@ -37,7 +37,7 @@ pub enum ServiceRecipient {
 
 pub enum Message<R, M> {
     Request(R),
-    Service(M),
+    Intermediate(M),
 }
 
 // id is randomly assigned while index is continuously assigned

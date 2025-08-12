@@ -55,10 +55,10 @@ pub struct Service<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
     executing: VecDeque<Executing<R::Metadata>>,
     querying: HashMap<StateVersion, HashSet<ShardIndex>>,
 
-    request_buffer: Vec<Request<A::Op>>,
+    submit_buffer: Vec<Request<A::Op>>,
     query_shard_buffer: Vec<message::QueryShard>,
     query_shard_ok_buffer: Vec<message::QueryShardOk<A::Shard>>,
-    send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<A, R>>>,
+    send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, IntermediateSend<A, R>>>,
 }
 
 struct Executing<RD> {
@@ -76,7 +76,7 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> Service<A, R> {
             replies: Default::default(),
             executing: Default::default(),
             querying: Default::default(),
-            request_buffer: Default::default(),
+            submit_buffer: Default::default(),
             query_shard_buffer: Default::default(),
             query_shard_ok_buffer: Default::default(),
             send_buffer: Default::default(),
@@ -84,7 +84,7 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> Service<A, R> {
     }
 }
 
-pub enum ServiceSend<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
+pub enum IntermediateSend<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
     Service(ServiceRecipient, ServiceMessage<A>),
     Replication(R::Send),
 }
@@ -95,7 +95,7 @@ pub enum ServiceMessage<A: DataShardingApp> {
     QueryShardOk(message::QueryShardOk<A::Shard>),
 }
 
-pub enum ToServiceMessage<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
+pub enum IntermediateMessage<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
     Service(ServiceMessage<A>),
     Replication(R::Message),
 }
@@ -106,8 +106,8 @@ where
     A::Shard: Clone,
     R::Metadata: Clone,
 {
-    type ServiceSend = ServiceSend<A, R>;
-    type ServiceMessage = ToServiceMessage<A, R>;
+    type ServiceSend = IntermediateSend<A, R>;
+    type ServiceMessage = IntermediateMessage<A, R>;
     type Metadata = R::Metadata;
 }
 
@@ -117,10 +117,11 @@ where
     A::Shard: Clone,
     R::Metadata: Clone,
 {
-    type Send = Send<Reply<A::Res, R::Metadata>, ServiceSend<A, R>>;
+    type Send = Send<Reply<A::Res, R::Metadata>, IntermediateSend<A, R>>;
     type Output = Never;
 
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+        use {IntermediateSend::*, Send::Intermediate, ServiceMessage::*, ServiceRecipient::*};
         if let Some(send) = self.send_buffer.pop() {
             return Proceed::Send(send);
         }
@@ -135,11 +136,9 @@ where
                                 shard_index,
                                 service_index: self.state.index,
                             };
-                            self.send_buffer.push(Send::Service(ServiceSend::Service(
-                                ServiceRecipient::Multi(
-                                    self.state.config.service_indices_of(shard_index),
-                                ),
-                                ServiceMessage::QueryShard(query_shard),
+                            self.send_buffer.push(Intermediate(Service(
+                                Multi(self.state.config.service_indices_of(shard_index)),
+                                QueryShard(query_shard),
                             )));
                         }
                     }
@@ -188,19 +187,19 @@ where
                         shard_index: query_shard.shard_index,
                         shard: shard.clone(),
                     };
-                    Proceed::Send(Send::Service(ServiceSend::Service(
-                        ServiceRecipient::Uni(query_shard.service_index),
-                        ServiceMessage::QueryShardOk(query_shard_ok),
+                    Proceed::Send(Intermediate(Service(
+                        Uni(query_shard.service_index),
+                        QueryShardOk(query_shard_ok),
                     )))
                 }
             };
         }
-        while let Some(request) = self.request_buffer.pop() {
+        while let Some(request) = self.submit_buffer.pop() {
             self.replication.submit(request)
         }
         match self.replication.proceed(since_start) {
-            Proceed::Send(message) => {
-                Proceed::Send(Send::Service(ServiceSend::Replication(message)))
+            Proceed::Send(send) => {
+                Proceed::Send(Send::Intermediate(IntermediateSend::Replication(send)))
             }
             Proceed::Pending(tick_after) => Proceed::Pending(tick_after), // TODO
             Proceed::Output(output) => {
@@ -218,31 +217,28 @@ where
         }
     }
 
-    type Message = Message<Request<A::Op>, ToServiceMessage<A, R>>;
+    type Message = Message<Request<A::Op>, IntermediateMessage<A, R>>;
     fn receive(&mut self, message: Self::Message) {
+        use {IntermediateMessage::*, Message::*, ServiceMessage::*};
         match message {
-            Message::Request(request) => match self.replies.get(&request.client_id) {
+            Request(request) => match self.replies.get(&request.client_id) {
                 Some(reply) if reply.client_seq > request.client_seq => {}
                 Some(reply) if reply.client_seq == request.client_seq => self
                     .send_buffer
                     .push(Send::Reply(request.client_id, reply.clone())),
-                _ => self.request_buffer.push(request),
+                _ => self.submit_buffer.push(request),
             },
-            Message::Service(ToServiceMessage::Replication(metadata)) => {
-                self.replication.receive(metadata)
-            }
-            Message::Service(ToServiceMessage::Service(ServiceMessage::QueryShard(
-                query_shard,
-            ))) => {
+
+            Intermediate(Replication(metadata)) => self.replication.receive(metadata),
+
+            Intermediate(Service(QueryShard(query_shard))) => {
                 if query_shard.state_version > self.state.version {
                     // TODO buffer it?
                     return;
                 }
                 self.query_shard_buffer.push(query_shard)
             }
-            Message::Service(ToServiceMessage::Service(ServiceMessage::QueryShardOk(
-                query_shard_ok,
-            ))) => {
+            Intermediate(Service(QueryShardOk(query_shard_ok))) => {
                 if query_shard_ok.state_version < self.state.version {
                     return;
                 }

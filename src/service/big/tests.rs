@@ -50,7 +50,7 @@ impl SystemState {
     fn deliver_messages(&mut self) {
         while let Some((index, message)) = self.service_network.pop_front() {
             self.services[index as usize]
-                .receive(Message::Service(ToServiceMessage::Service(message)))
+                .receive(Message::Intermediate(IntermediateMessage::Service(message)))
         }
     }
 
@@ -61,11 +61,11 @@ impl SystemState {
                 Proceed::Send(Send::Reply(client_id, reply)) => {
                     self.replies.push((client_id, reply))
                 }
-                Proceed::Send(Send::Service(ServiceSend::Service(
+                Proceed::Send(Send::Intermediate(IntermediateSend::Service(
                     ServiceRecipient::Uni(index),
                     message,
                 ))) => self.service_network.push_back((index, message)),
-                Proceed::Send(Send::Service(ServiceSend::Service(
+                Proceed::Send(Send::Intermediate(IntermediateSend::Service(
                     ServiceRecipient::Multi(indices),
                     message,
                 ))) => {
@@ -73,7 +73,7 @@ impl SystemState {
                         self.service_network.push_back((index, message.clone()))
                     }
                 }
-                Proceed::Send(Send::Service(ServiceSend::Service(
+                Proceed::Send(Send::Intermediate(IntermediateSend::Service(
                     ServiceRecipient::All,
                     message,
                 ))) => {
