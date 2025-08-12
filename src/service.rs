@@ -7,9 +7,9 @@ pub mod unsharded;
 
 pub trait ServiceState<A: ServiceApp>:
     State<
-        Send = Send<Self::ServiceSend, Reply<A::Res, Self::Metadata>>,
+        Send = Send<Reply<A::Res, Self::Metadata>, Self::ServiceSend>,
         Output = Never,
-        Message = Message<Self::ServiceMessage, Request<A::Op>>,
+        Message = Message<Request<A::Op>, Self::ServiceMessage>,
     >
 {
     type ServiceSend;
@@ -22,9 +22,9 @@ pub trait ServiceApp {
     type Res;
 }
 
-pub enum Send<S, R> {
-    Service(S),
+pub enum Send<R, S> {
     Reply(ClientId, R),
+    Service(S),
 }
 
 pub type ServiceIndex = u16;
@@ -35,9 +35,9 @@ pub enum ServiceRecipient {
     Uni(ServiceIndex),
 }
 
-pub enum Message<M, R> {
-    Service(M),
+pub enum Message<R, M> {
     Request(R),
+    Service(M),
 }
 
 // id is randomly assigned while index is continuously assigned

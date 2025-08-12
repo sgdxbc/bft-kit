@@ -20,7 +20,7 @@ pub struct Service<A: AppState, R: ReplicationState<Request<A::Op>>> {
     replicated: Option<(ReplicatedRequests<A::Op>, R::Metadata)>,
 
     request_buffer: Vec<Request<A::Op>>,
-    send_buffer: Vec<Send<R::Send, Reply<A::Res, R::Metadata>>>,
+    send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, R::Send>>,
 }
 
 type ReplicatedRequests<Op> = VecDeque<Request<Op>>;
@@ -54,7 +54,7 @@ where
     Reply<A::Res, R::Metadata>: Clone,
     // ServiceMessage<R, A>: std::fmt::Debug,
 {
-    type Send = Send<R::Send, Reply<A::Res, R::Metadata>>;
+    type Send = Send<Reply<A::Res, R::Metadata>, R::Send>;
     type Output = Never;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(send) = self.send_buffer.pop() {
@@ -77,6 +77,9 @@ where
                 metadata: metadata.clone(),
             };
             self.replies.insert(request.client_id, reply.clone());
+            // in some cases `replicated` may contain plenty of requests, also, some kinds
+            // of the `execute` above could be costly
+            // return immediately without any batch processing to optimize for latency
             return Proceed::Send(Send::Reply(request.client_id, reply));
         }
 
@@ -96,7 +99,7 @@ where
         }
     }
 
-    type Message = Message<R::Message, Request<A::Op>>;
+    type Message = Message<Request<A::Op>, R::Message>;
     fn receive(&mut self, message: Self::Message) {
         // dbg!(&message);
         match message {

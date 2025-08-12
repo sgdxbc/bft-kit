@@ -58,7 +58,7 @@ pub struct Service<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
     request_buffer: Vec<Request<A::Op>>,
     query_shard_buffer: Vec<message::QueryShard>,
     query_shard_ok_buffer: Vec<message::QueryShardOk<A::Shard>>,
-    send_buffer: Vec<Send<ServiceSend<A, R>, Reply<A::Res, R::Metadata>>>,
+    send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<A, R>>>,
 }
 
 struct Executing<RD> {
@@ -117,7 +117,7 @@ where
     A::Shard: Clone,
     R::Metadata: Clone,
 {
-    type Send = Send<ServiceSend<A, R>, Reply<A::Res, R::Metadata>>;
+    type Send = Send<Reply<A::Res, R::Metadata>, ServiceSend<A, R>>;
     type Output = Never;
 
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
@@ -218,7 +218,7 @@ where
         }
     }
 
-    type Message = Message<ToServiceMessage<A, R>, Request<A::Op>>;
+    type Message = Message<Request<A::Op>, ToServiceMessage<A, R>>;
     fn receive(&mut self, message: Self::Message) {
         match message {
             Message::Request(request) => match self.replies.get(&request.client_id) {
