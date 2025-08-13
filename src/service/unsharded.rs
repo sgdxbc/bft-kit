@@ -10,20 +10,23 @@ use crate::{
     state::{Proceed, State},
 };
 
-use super::{ClientId, Message, Reply, Request, Send, ServiceState};
+use super::{ClientId, Message, Reply, Request, Send, ServiceApp, ServiceState};
 
 pub struct Service<A: AppState, R: ReplicationState<Request<A::Op>>> {
     app: A,
     replication: R,
 
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
-    replicated: Option<(ReplicatedRequests<A::Op>, R::Metadata)>,
+    replicated: Option<Replicated<A, R>>,
 
     submit_buffer: Vec<Request<A::Op>>,
     send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, R::Send>>,
 }
 
-type ReplicatedRequests<Op> = VecDeque<Request<Op>>;
+type Replicated<A, R> = (
+    VecDeque<Request<<A as ServiceApp>::Op>>,
+    <R as ReplicationState<Request<<A as ServiceApp>::Op>>>::Metadata,
+);
 
 impl<A: AppState, R: ReplicationState<Request<A::Op>>> Service<A, R> {
     pub fn new(app: A, replication: R) -> Self {
@@ -344,7 +347,9 @@ pub mod transport {
                         ),
                     ));
                 }
-                Proceed::Send(Send::Intermediate(send)) => replica_table.perform(send, write_tracker)?,
+                Proceed::Send(Send::Intermediate(send)) => {
+                    replica_table.perform(send, write_tracker)?
+                }
             }
         }
     }

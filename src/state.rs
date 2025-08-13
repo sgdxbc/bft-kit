@@ -16,3 +16,7 @@ pub enum Proceed<S, O = Never> {
     Send(S),
     Output(O),
 }
+
+pub fn earliest(tick_afters: impl IntoIterator<Item = Option<Duration>>) -> Option<Duration> {
+    tick_afters.into_iter().flatten().min()
+}

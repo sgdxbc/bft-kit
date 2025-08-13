@@ -4,23 +4,17 @@ use std::{
     time::Duration,
 };
 
-use derive_where::derive_where;
-use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
-
 use crate::{
     Never,
     replication::ReplicationState,
-    state::{Proceed, State},
+    state::{Proceed, State, earliest},
 };
 
 use super::{
-    ClientId, ClientSeq, Message, Reply, Request, Send, ServiceApp, ServiceIndex, ServiceRecipient,
-    ServiceState,
+    ClientId, ClientSeq, Message, Reply, Request, Send, ServiceApp, ServiceIndex, ServiceState,
 };
 
 pub mod app;
-#[cfg(test)]
-mod tests;
 
 pub type ShardIndex = u32;
 
@@ -45,341 +39,176 @@ pub enum DataShardingExecuteOutput<R> {
     Complete(R),
 }
 
-type StateVersion = u64;
+pub trait StorageState<S>: State<Output = StorageStateOutput<S>> {
+    fn fetch(&mut self, index: ShardIndex);
+    // TODO an interface for fetch shard ahead
+    fn bump(&mut self, shards: HashMap<ShardIndex, S>);
+}
 
-pub struct Service<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
+pub enum StorageStateOutput<S> {
+    Fetched(ShardIndex, S),
+    Skipped(StateVersion), // number of versions to skip execute
+}
+
+pub struct Service<A: DataShardingApp, S: State, R: ReplicationState<Request<A::Op>>> {
     app: A,
+    storage: S,
     replication: R,
 
-    state: StateManager<A>,
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
-    executing: VecDeque<Executing<R::Metadata>>,
-    querying: HashMap<StateVersion, HashSet<ShardIndex>>,
+    replicated: VecDeque<Replicated<A, R>>,
+    shards: HashMap<ShardIndex, A::Shard>,
 
     submit_buffer: Vec<Request<A::Op>>,
-    query_shard_buffer: Vec<message::QueryShard>,
-    query_shard_ok_buffer: Vec<message::QueryShardOk<A::Shard>>,
-    send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, IntermediateSend<A, R>>>,
+    send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<S, R>>>,
 }
 
-struct Executing<RD> {
+type Replicated<A, R> = (
+    VecDeque<Executing<A>>,
+    <R as ReplicationState<Request<<A as ServiceApp>::Op>>>::Metadata,
+);
+
+struct Executing<A: DataShardingApp> {
+    execute: A::Execute,
     client_id: ClientId,
     client_seq: ClientSeq,
-    metadata: RD,
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> Service<A, R> {
-    pub fn new(replication: R, app: A, index: ServiceIndex, state_config: StateConfig) -> Self {
-        Self {
-            replication,
-            state: StateManager::new(index, state_config, &app),
-            app,
-            replies: Default::default(),
-            executing: Default::default(),
-            querying: Default::default(),
-            submit_buffer: Default::default(),
-            query_shard_buffer: Default::default(),
-            query_shard_ok_buffer: Default::default(),
-            send_buffer: Default::default(),
-        }
-    }
-}
-
-pub enum IntermediateSend<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
-    Service(ServiceRecipient, ServiceMessage<A>),
+pub enum ServiceSend<S: State, R: State> {
+    Storage(S::Send),
     Replication(R::Send),
 }
 
-#[derive_where(Debug, Clone; A::Shard)]
-pub enum ServiceMessage<A: DataShardingApp> {
-    QueryShard(message::QueryShard),
-    QueryShardOk(message::QueryShardOk<A::Shard>),
-}
-
-#[derive_where(Debug; ServiceMessage<A>, R::Message)]
-pub enum IntermediateMessage<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> {
-    Service(ServiceMessage<A>),
+pub enum ServiceMessage<S: State, R: State> {
+    Storage(S::Message),
     Replication(R::Message),
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> ServiceState<A> for Service<A, R>
+impl<A: DataShardingApp, S: StorageState<A::Shard>, R: ReplicationState<Request<A::Op>>>
+    ServiceState<A> for Service<A, S, R>
 where
-    Reply<A::Res, R::Metadata>: Clone,
-    A::Shard: Clone,
     R::Metadata: Clone,
-    A::Op: std::fmt::Debug,
-    A::Res: std::fmt::Debug,
-    A::Shard: std::fmt::Debug,
-    R::Message: std::fmt::Debug,
+    Reply<A::Res, R::Metadata>: Clone,
 {
-    type ServiceSend = IntermediateSend<A, R>;
-    type ServiceMessage = IntermediateMessage<A, R>;
+    type ServiceSend = ServiceSend<S, R>;
+    type ServiceMessage = ServiceMessage<S, R>;
     type Metadata = R::Metadata;
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>> State for Service<A, R>
+impl<A: DataShardingApp, S: StorageState<A::Shard>, R: ReplicationState<Request<A::Op>>> State
+    for Service<A, S, R>
 where
-    Reply<A::Res, R::Metadata>: Clone,
-    A::Shard: Clone,
     R::Metadata: Clone,
-    A::Op: std::fmt::Debug,
-    A::Res: std::fmt::Debug,
-    A::Shard: std::fmt::Debug,
-    R::Message: std::fmt::Debug,
+    Reply<A::Res, R::Metadata>: Clone,
 {
-    type Send = Send<Reply<A::Res, R::Metadata>, IntermediateSend<A, R>>;
+    type Send = Send<Reply<A::Res, R::Metadata>, <Self as ServiceState<A>>::ServiceSend>;
     type Output = Never;
-
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        use {IntermediateSend::*, Send::Intermediate, ServiceMessage::*, ServiceRecipient::*};
         if let Some(send) = self.send_buffer.pop() {
             return Proceed::Send(send);
         }
-        if !self.querying.contains_key(&self.state.version)
-            && let Some(proceed) = self.state.proceed()
-        {
-            tracing::trace!(%self.state.index, ?proceed, "state proceed");
-            return match proceed {
+
+        if let Some((executing_buffer, metadata)) = self.replicated.front_mut() {
+            let Some(executing) = executing_buffer.front_mut() else {
+                self.replicated.pop_front();
+                return self.proceed(since_start);
+            };
+            // it would be better if we can filter before constructing `A::Execute`
+            // anyway should be rare
+            if let Some(reply) = self.replies.get(&executing.client_id)
+                && reply.client_seq >= executing.client_seq
+            {
+                return self.proceed(since_start);
+            }
+
+            match executing.execute.proceed(&mut self.shards) {
                 DataShardingExecuteOutput::RequireAccess(required_indices) => {
-                    let querying = self.querying.entry(self.state.version).or_default();
                     for shard_index in required_indices {
-                        if querying.insert(shard_index) {
-                            let query_shard = message::QueryShard {
-                                state_version: self.state.version,
-                                shard_index,
-                                service_index: self.state.index,
-                            };
-                            self.send_buffer.push(Intermediate(Service(
-                                Multi(self.state.config.service_indices_of(shard_index)),
-                                QueryShard(query_shard),
-                            )));
-                        }
+                        assert!(!self.shards.contains_key(&shard_index));
+                        self.storage.fetch(shard_index);
                     }
-                    self.proceed(since_start)
                 }
                 DataShardingExecuteOutput::Complete(res) => {
-                    let executing = self.executing.pop_front().unwrap();
-                    Proceed::Send(Send::Reply(
-                        executing.client_id,
-                        Reply {
-                            client_seq: executing.client_seq,
-                            metadata: executing.metadata,
-                            res,
-                        },
-                    ))
+                    self.storage.bump(take(&mut self.shards));
+
+                    let reply = Reply {
+                        client_seq: executing.client_seq,
+                        res,
+                        metadata: metadata.clone(),
+                    };
+                    self.replies.insert(executing.client_id, reply.clone());
+                    let proceed = Proceed::Send(Send::Reply(executing.client_id, reply));
+                    executing_buffer.pop_front();
+                    return proceed;
                 }
-            };
+            }
         }
-        while let Some(query_shard_ok) = self.query_shard_ok_buffer.pop() {
-            assert!(query_shard_ok.state_version == self.state.version);
-            if query_shard_ok.state_version > self.state.version {
+
+        let storage_tick_after;
+        match self.storage.proceed(since_start) {
+            Proceed::Pending(tick_after) => storage_tick_after = tick_after,
+            Proceed::Send(send) => {
+                return Proceed::Send(Send::Intermediate(ServiceSend::Storage(send)));
+            }
+            Proceed::Output(StorageStateOutput::Fetched(shard_index, shard)) => {
+                self.shards.insert(shard_index, shard);
+                return self.proceed(since_start);
+            }
+            Proceed::Output(StorageStateOutput::Skipped(_)) => {
                 todo!()
             }
-            self.state
-                .install_shard(query_shard_ok.shard_index, query_shard_ok.shard);
-            let querying = self
-                .querying
-                .get_mut(&query_shard_ok.state_version)
-                .unwrap();
-            querying.remove(&query_shard_ok.shard_index);
-            if querying.is_empty() {
-                self.querying.remove(&query_shard_ok.state_version);
-                return self.proceed(since_start); // `state` will proceed
-            }
         }
-        if let Some(query_shard) = self.query_shard_buffer.pop() {
-            // TODO check whether a higher bump certificate is available
-            return match self
-                .state
-                .query_shard(query_shard.state_version, query_shard.shard_index)
-            {
-                None => self.proceed(since_start),
-                Some(shard) => {
-                    let query_shard_ok = message::QueryShardOk {
-                        state_version: query_shard.state_version,
-                        shard_index: query_shard.shard_index,
-                        shard: shard.clone(),
-                    };
-                    Proceed::Send(Intermediate(Service(
-                        Uni(query_shard.service_index),
-                        QueryShardOk(query_shard_ok),
-                    )))
-                }
-            };
-        }
+
         while let Some(request) = self.submit_buffer.pop() {
             self.replication.submit(request)
         }
         match self.replication.proceed(since_start) {
-            Proceed::Send(send) => {
-                Proceed::Send(Send::Intermediate(IntermediateSend::Replication(send)))
+            Proceed::Pending(tick_after) => {
+                Proceed::Pending(earliest([storage_tick_after, tick_after]))
             }
-            Proceed::Pending(tick_after) => Proceed::Pending(tick_after), // TODO
-            Proceed::Output(output) => {
-                for request in output.logs {
-                    tracing::trace!(%self.state.index, ?request.op, "push execute");
-                    self.state.push_execute(self.app.new_execute(request.op));
-                    let executing = Executing {
+            Proceed::Send(send) => {
+                Proceed::Send(Send::Intermediate(ServiceSend::Replication(send)))
+            }
+            Proceed::Output(replicated) => {
+                let mut executing_buffer = VecDeque::new();
+                for request in replicated.logs {
+                    // may query ahead here as an optimization
+                    executing_buffer.push_back(Executing {
+                        execute: self.app.new_execute(request.op),
                         client_id: request.client_id,
                         client_seq: request.client_seq,
-                        metadata: output.metadata.clone(),
-                    };
-                    self.executing.push_back(executing)
+                    })
                 }
+                self.replicated
+                    .push_back((executing_buffer, replicated.metadata));
                 self.proceed(since_start)
             }
         }
     }
 
-    type Message = Message<Request<A::Op>, IntermediateMessage<A, R>>;
+    type Message = Message<Request<A::Op>, <Self as ServiceState<A>>::ServiceMessage>;
     fn receive(&mut self, message: Self::Message) {
-        tracing::trace!(%self.state.index, ?message);
-        use {IntermediateMessage::*, Message::*, ServiceMessage::*};
         match message {
-            Request(request) => match self.replies.get(&request.client_id) {
+            Message::Request(request) => match self.replies.get(&request.client_id) {
                 Some(reply) if reply.client_seq > request.client_seq => {}
                 Some(reply) if reply.client_seq == request.client_seq => self
                     .send_buffer
                     .push(Send::Reply(request.client_id, reply.clone())),
                 _ => self.submit_buffer.push(request),
             },
-
-            Intermediate(Replication(metadata)) => self.replication.receive(metadata),
-
-            Intermediate(Service(QueryShard(query_shard))) => {
-                if query_shard.state_version > self.state.version {
-                    // TODO buffer it?
-                    return;
-                }
-                self.query_shard_buffer.push(query_shard)
+            Message::Intermediate(ServiceMessage::Storage(message)) => {
+                self.storage.receive(message)
             }
-            Intermediate(Service(QueryShardOk(query_shard_ok))) => {
-                if query_shard_ok.state_version < self.state.version {
-                    return;
-                }
-                if let Some(querying) = self.querying.get(&query_shard_ok.state_version)
-                    && querying.contains(&query_shard_ok.shard_index)
-                {
-                    self.query_shard_ok_buffer.push(query_shard_ok);
-                }
-            }
-        };
-    }
-}
-
-struct StateManager<A: DataShardingApp> {
-    index: ServiceIndex,
-    config: StateConfig,
-
-    version: StateVersion,                           // of shard_store[-1]
-    shard_store: Vec<HashMap<ShardIndex, A::Shard>>, // [version -> shards]
-    executes: VecDeque<A::Execute>,
-    // shards of `version` that are required by executions[0]
-    // if executions[0].proceed() returns Complete, these shards become shards of
-    // `version + 1`
-    // for the shards that this service `should_serve`, this map keeps copies of
-    // them for the `execute` to mutate
-    execute: HashMap<ShardIndex, A::Shard>,
-}
-
-pub struct StateConfig {
-    num_service: ServiceIndex,
-    num_active_copy: usize,
-}
-
-impl StateConfig {
-    fn service_indices_of(&self, shard_index: ShardIndex) -> Vec<ServiceIndex> {
-        let mut rng = StdRng::seed_from_u64(shard_index as _);
-        (0..self.num_service).choose_multiple(&mut rng, self.num_active_copy)
-    }
-
-    fn should_serve(&self, service_index: ServiceIndex, shard_index: ShardIndex) -> bool {
-        self.service_indices_of(shard_index)
-            .contains(&service_index)
-    }
-}
-
-impl<A: DataShardingApp> StateManager<A> {
-    fn new(index: ServiceIndex, config: StateConfig, app: &A) -> Self {
-        let shards = (0..app.num_shard())
-            .filter(|&shard_index| config.should_serve(index, shard_index))
-            .map(|shard_index| (shard_index, app.new_shard(shard_index)))
-            .collect();
-        Self {
-            index,
-            config,
-            version: 0,
-            shard_store: vec![shards],
-            executes: Default::default(),
-            execute: Default::default(),
-        }
-    }
-
-    fn push_execute(&mut self, execute: A::Execute) {
-        self.executes.push_back(execute)
-    }
-
-    fn install_shard(&mut self, index: ShardIndex, shard: A::Shard) {
-        self.execute.insert(index, shard);
-    }
-
-    fn proceed(&mut self) -> Option<DataShardingExecuteOutput<A::Res>>
-    where
-        A::Shard: Clone,
-    {
-        let execute = self.executes.front_mut()?;
-        match execute.proceed(&mut self.execute) {
-            DataShardingExecuteOutput::RequireAccess(required_indices) => {
-                let mut missing_indices = HashSet::new();
-                for index in required_indices {
-                    if self.config.should_serve(self.index, index) {
-                        let shard = self.query_shard(self.version, index).unwrap().clone();
-                        self.execute.insert(index, shard);
-                    } else {
-                        missing_indices.insert(index);
-                    }
-                }
-                if !missing_indices.is_empty() {
-                    Some(DataShardingExecuteOutput::RequireAccess(missing_indices))
-                } else {
-                    self.proceed() // the `execute` will proceed in this recursion
-                }
-            }
-            DataShardingExecuteOutput::Complete(res) => {
-                self.executes.pop_front();
-                self.execute
-                    .retain(|&shard_index, _| self.config.should_serve(self.index, shard_index));
-                self.shard_store.push(take(&mut self.execute));
-                self.version += 1;
-                Some(DataShardingExecuteOutput::Complete(res))
+            Message::Intermediate(ServiceMessage::Replication(message)) => {
+                self.replication.receive(message)
             }
         }
     }
-
-    // the lowest version that has not been cleared
-    fn first_version(&self) -> StateVersion {
-        self.version - (self.shard_store.len() - 1) as StateVersion
-    }
-
-    fn query_shard(&self, version: StateVersion, index: ShardIndex) -> Option<&A::Shard> {
-        assert!(version <= self.version);
-        assert!(self.config.should_serve(self.index, index));
-        if version < self.first_version() {
-            return None;
-        }
-        for shards in self.shard_store[..=(version - self.first_version()) as usize]
-            .iter()
-            .rev()
-        {
-            if let Some(shard) = shards.get(&index) {
-                return Some(shard);
-            }
-        }
-        unimplemented!()
-    }
 }
 
-mod message {
+type StateVersion = u64;
+
+pub mod message {
     use super::{ServiceIndex, ShardIndex, StateVersion};
 
     #[derive(Debug, Clone)]
