@@ -249,13 +249,12 @@ type NodeIndex = ServiceIndex;
 pub struct ShardedStorage<S> {
     config: ShardedStorageConfig,
     service_index: ServiceIndex,
-    // node_indices: HashSet<NodeIndex>, // of the virtual "storage nodes" hosted by this storage
-    // caching. compute once on startup
-    // stored_indices: Vec<ShardIndex>,
+
     version: StateVersion, // of shards[-1]
     shards: Vec<HashMap<ShardIndex, S>>,
     fetching: HashSet<ShardIndex>,
     fetched_table: HashMap<ShardIndex, S>,
+    reordering_fetch_table: HashMap<StateVersion, HashMap<ShardIndex, HashSet<ServiceIndex>>>,
 
     proceed_buffer: Vec<Proceed<ShardedStorageSend<S>, StorageStateOutput<S>>>,
 }
@@ -286,11 +285,9 @@ impl<S> ShardedStorage<S> {
         node_indices: HashSet<NodeIndex>,
         app: &impl DataShardingApp<Shard = S>,
     ) -> Self {
-        // let mut stored_indices = Vec::new();
         let mut shards = HashMap::new();
         for shard_index in 0..config.num_shard {
             if config.should_store(&node_indices, shard_index) {
-                // stored_indices.push(shard_index);
                 shards.insert(shard_index, app.new_shard(shard_index));
             }
         }
@@ -302,6 +299,7 @@ impl<S> ShardedStorage<S> {
             shards: vec![shards],
             fetching: Default::default(),
             fetched_table: Default::default(),
+            reordering_fetch_table: Default::default(),
             proceed_buffer: Default::default(),
         }
     }
@@ -350,9 +348,24 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
                 *shard = new_shard;
             }
         }
+
+        self.version += 1;
+        if let Some(fetches) = self.reordering_fetch_table.remove(&self.version) {
+            for (shard_index, service_indices) in fetches {
+                let fetch_ok = message::FetchOk {
+                    version: self.version,
+                    shard_index,
+                    shard: stored_shards[&shard_index].clone(),
+                };
+                self.proceed_buffer.push(Proceed::Send((
+                    ServiceRecipient::Multi(service_indices.into_iter().collect()),
+                    ShardedStorageMessage::FetchOk(fetch_ok),
+                )))
+            }
+        }
+
         self.shards.push(stored_shards);
-        self.fetching.clear();
-        self.version += 1
+        self.fetching.clear()
     }
 }
 
@@ -379,7 +392,12 @@ impl<S: Clone> State for ShardedStorage<S> {
         match message {
             ShardedStorageMessage::Fetch(fetch) => {
                 if fetch.version > self.version {
-                    // buffer and reply later?
+                    self.reordering_fetch_table
+                        .entry(fetch.version)
+                        .or_default()
+                        .entry(fetch.shard_index)
+                        .or_default()
+                        .insert(fetch.service_index);
                     return;
                 }
 
