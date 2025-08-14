@@ -85,9 +85,6 @@ impl DataShardingApp for DataShardingSchema<Null> {
     fn new_execute(&self, op: Self::Op) -> Self::Execute {
         self.static_dispatch(op)
     }
-    fn num_shard(&self) -> ShardIndex {
-        self.num_shard
-    }
 }
 
 impl DataShardingExecuteState<DataShardingSchema<Null>>
@@ -128,9 +125,6 @@ impl DataShardingApp for DataShardingSchema<Kv> {
     }
     fn new_execute(&self, op: Self::Op) -> Self::Execute {
         self.static_dispatch(op)
-    }
-    fn num_shard(&self) -> ShardIndex {
-        self.num_shard
     }
 }
 
@@ -183,9 +177,6 @@ impl DataShardingApp for DataShardingSchema<Utxo> {
     }
     fn new_execute(&self, op: Self::Op) -> Self::Execute {
         self.static_dispatch(op)
-    }
-    fn num_shard(&self) -> ShardIndex {
-        self.num_shard
     }
 }
 

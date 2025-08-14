@@ -4,6 +4,8 @@ use std::{
     time::Duration,
 };
 
+use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
+
 use crate::{
     Never,
     replication::ReplicationState,
@@ -11,7 +13,8 @@ use crate::{
 };
 
 use super::{
-    ClientId, ClientSeq, Message, Reply, Request, Send, ServiceApp, ServiceIndex, ServiceState,
+    ClientId, ClientSeq, Message, Reply, Request, Send, ServiceApp, ServiceIndex, ServiceRecipient,
+    ServiceState,
 };
 
 pub mod app;
@@ -20,10 +23,10 @@ pub type ShardIndex = u32;
 
 pub trait DataShardingApp: ServiceApp + Sized {
     type Shard;
-    type Execute: DataShardingExecuteState<Self>;
     fn new_shard(&self, index: ShardIndex) -> Self::Shard;
+
+    type Execute: DataShardingExecuteState<Self>;
     fn new_execute(&self, op: Self::Op) -> Self::Execute;
-    fn num_shard(&self) -> ShardIndex;
 }
 
 pub trait DataShardingExecuteState<A: DataShardingApp> {
@@ -50,17 +53,21 @@ pub enum StorageStateOutput<S> {
     Skipped(StateVersion), // number of versions to skip execute
 }
 
-pub struct Service<A: DataShardingApp, S: State, R: ReplicationState<Request<A::Op>>> {
+pub struct Service<
+    A: DataShardingApp,
+    R: ReplicationState<Request<A::Op>>,
+    S: State = ShardedStorage<<A as DataShardingApp>::Shard>,
+> {
     app: A,
-    storage: S,
     replication: R,
+    storage: S,
 
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     replicated: VecDeque<Replicated<A, R>>,
     shards: HashMap<ShardIndex, A::Shard>,
 
     submit_buffer: Vec<Request<A::Op>>,
-    send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<S, R>>>,
+    send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<R, S>>>,
 }
 
 type Replicated<A, R> = (
@@ -74,29 +81,29 @@ struct Executing<A: DataShardingApp> {
     client_seq: ClientSeq,
 }
 
-pub enum ServiceSend<S: State, R: State> {
-    Storage(S::Send),
+pub enum ServiceSend<R: State, S: State> {
     Replication(R::Send),
+    Storage(S::Send),
 }
 
-pub enum ServiceMessage<S: State, R: State> {
-    Storage(S::Message),
+pub enum ServiceMessage<R: State, S: State> {
     Replication(R::Message),
+    Storage(S::Message),
 }
 
-impl<A: DataShardingApp, S: StorageState<A::Shard>, R: ReplicationState<Request<A::Op>>>
-    ServiceState<A> for Service<A, S, R>
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>>
+    ServiceState<A> for Service<A, R, S>
 where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
 {
-    type ServiceSend = ServiceSend<S, R>;
-    type ServiceMessage = ServiceMessage<S, R>;
+    type ServiceSend = ServiceSend<R, S>;
+    type ServiceMessage = ServiceMessage<R, S>;
     type Metadata = R::Metadata;
 }
 
-impl<A: DataShardingApp, S: StorageState<A::Shard>, R: ReplicationState<Request<A::Op>>> State
-    for Service<A, S, R>
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>> State
+    for Service<A, R, S>
 where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
@@ -207,20 +214,196 @@ where
 }
 
 type StateVersion = u64;
+type NodeIndex = ServiceIndex;
+
+pub struct ShardedStorage<S> {
+    config: ShardedStorageConfig,
+    service_index: ServiceIndex,
+    // node_indices: HashSet<NodeIndex>, // of the virtual "storage nodes" hosted by this storage
+    // caching. compute once on startup
+    stored_indices: Vec<ShardIndex>,
+
+    version: StateVersion, // of shards[-1]
+    shards: Vec<HashMap<ShardIndex, S>>,
+    fetching: HashSet<ShardIndex>,
+
+    proceed_buffer: Vec<Proceed<ShardedStorageSend<S>, StorageStateOutput<S>>>,
+}
+
+pub struct ShardedStorageConfig {
+    num_node: NodeIndex, // virtual "storage node"
+    num_shard: ShardIndex,
+    num_active_copy: usize,
+}
+
+impl ShardedStorageConfig {
+    fn node_indices_of(&self, index: ShardIndex) -> Vec<NodeIndex> {
+        (0..self.num_node)
+            .choose_multiple(&mut StdRng::seed_from_u64(index as _), self.num_active_copy)
+    }
+
+    fn should_store(&self, node_indices: &HashSet<NodeIndex>, index: ShardIndex) -> bool {
+        self.node_indices_of(index)
+            .into_iter()
+            .any(|node_index| node_indices.contains(&node_index))
+    }
+}
+
+impl<S> ShardedStorage<S> {
+    pub fn new(
+        config: ShardedStorageConfig,
+        service_index: ServiceIndex,
+        node_indices: HashSet<NodeIndex>,
+        app: &impl DataShardingApp<Shard = S>,
+    ) -> Self {
+        let mut stored_indices = Vec::new();
+        let mut shards = HashMap::new();
+        for shard_index in 0..config.num_shard {
+            if config.should_store(&node_indices, shard_index) {
+                stored_indices.push(shard_index);
+                shards.insert(shard_index, app.new_shard(shard_index));
+            }
+        }
+        Self {
+            config,
+            service_index,
+            stored_indices,
+            version: 0,
+            shards: vec![shards],
+            fetching: Default::default(),
+            proceed_buffer: Default::default(),
+        }
+    }
+}
+
+pub enum ShardedStorageMessage<S> {
+    Fetch(message::Fetch),
+    FetchOk(message::FetchOk<S>),
+}
+
+type ShardedStorageSend<S> = (ServiceRecipient, ShardedStorageMessage<S>);
+
+impl<S: Clone> StorageState<S> for ShardedStorage<S> {
+    fn fetch(&mut self, index: ShardIndex) {
+        if let Some(shard) = self.shards.last().unwrap().get(&index) {
+            self.proceed_buffer
+                .push(Proceed::Output(StorageStateOutput::Fetched(
+                    index,
+                    shard.clone(),
+                )));
+            return;
+        }
+        if !self.fetching.insert(index) {
+            return;
+        }
+        let fetch = message::Fetch {
+            version: self.version,
+            shard_index: index,
+            service_index: self.service_index,
+        };
+        let recipient = ServiceRecipient::Multi(self.config.node_indices_of(index));
+        self.proceed_buffer.push(Proceed::Send((
+            recipient,
+            ShardedStorageMessage::Fetch(fetch),
+        )))
+    }
+
+    fn bump(&mut self, mut shards: HashMap<ShardIndex, S>) {
+        let stored_shards = self
+            .stored_indices
+            .iter()
+            .map(|&shard_index| {
+                let shard = if let Some(shard) = shards.remove(&shard_index) {
+                    shard
+                } else {
+                    self.shards
+                        .last()
+                        .unwrap()
+                        .get(&shard_index)
+                        .unwrap()
+                        .clone()
+                };
+                (shard_index, shard)
+            })
+            .collect();
+        self.shards.push(stored_shards);
+        self.version += 1;
+    }
+}
+
+impl<S: Clone> State for ShardedStorage<S> {
+    type Send = ShardedStorageSend<S>;
+    type Output = StorageStateOutput<S>;
+
+    fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+        if let Some(proceed) = self.proceed_buffer.pop() {
+            return proceed;
+        }
+        Proceed::Pending(None)
+    }
+
+    type Message = ShardedStorageMessage<S>;
+    fn receive(&mut self, message: Self::Message) {
+        match message {
+            ShardedStorageMessage::Fetch(fetch) => {
+                if fetch.version > self.version {
+                    // buffer and reply later?
+                    return;
+                }
+
+                // TODO reply with bump certificate >= fetch.version if available
+
+                let first_version = self.version - (self.shards.len() - 1) as StateVersion;
+                assert!(fetch.version >= first_version);
+                let Some(shard) =
+                    self.shards[(fetch.version - first_version) as usize].get(&fetch.shard_index)
+                else {
+                    // should not happen (except faulty fetching)
+                    return;
+                };
+                let fetch_ok = message::FetchOk {
+                    version: fetch.version,
+                    shard_index: fetch.shard_index,
+                    shard: shard.clone(),
+                };
+                self.proceed_buffer.push(Proceed::Send((
+                    ServiceRecipient::Uni(fetch.service_index),
+                    ShardedStorageMessage::FetchOk(fetch_ok),
+                )))
+            }
+            ShardedStorageMessage::FetchOk(fetch_ok) => {
+                if fetch_ok.version < self.version {
+                    return;
+                }
+                if fetch_ok.version > self.version {
+                    // currently not happen
+                    return;
+                }
+
+                self.fetching.remove(&fetch_ok.shard_index);
+                self.proceed_buffer
+                    .push(Proceed::Output(StorageStateOutput::Fetched(
+                        fetch_ok.shard_index,
+                        fetch_ok.shard,
+                    )));
+            }
+        }
+    }
+}
 
 pub mod message {
     use super::{ServiceIndex, ShardIndex, StateVersion};
 
     #[derive(Debug, Clone)]
-    pub struct QueryShard {
-        pub state_version: StateVersion,
+    pub struct Fetch {
+        pub version: StateVersion,
         pub shard_index: ShardIndex,
         pub service_index: ServiceIndex,
     }
 
     #[derive(Debug, Clone)]
-    pub struct QueryShardOk<S> {
-        pub state_version: StateVersion,
+    pub struct FetchOk<S> {
+        pub version: StateVersion,
         pub shard_index: ShardIndex,
         pub shard: S,
     }
