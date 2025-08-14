@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use test_log::test;
 
 use crate::replication::unreplicated::Replica;
@@ -8,37 +10,48 @@ use super::{
 };
 
 #[test]
-fn output_service_indices_of() {
-    let config = StateConfig {
-        num_service: 100,
+fn print_placement() {
+    let config = ShardedStorageConfig {
+        num_node: 10,
+        num_shard: 1000,
         num_active_copy: 7,
     };
-    println!("{:2?}", config.service_indices_of(0));
-    println!("{:2?}", config.service_indices_of(1));
-    println!("{:2?}", config.service_indices_of(2));
-    println!("{:2?}", config.service_indices_of(3))
+    println!("{:?}", config.node_indices_of(0));
+    println!("{:?}", config.node_indices_of(1));
+    println!("{:?}", config.node_indices_of(2));
+    println!("{:?}", config.node_indices_of(3));
+
+    let mut node_overheads = BTreeMap::new();
+    for shard_index in 0..config.num_shard {
+        for node_index in config.node_indices_of(shard_index) {
+            *node_overheads.entry(node_index).or_insert(0) += 1
+        }
+    }
+    for (node_index, num_shard) in node_overheads {
+        println!("Node {node_index} has {num_shard} shards")
+    }
 }
 
 type A = DataShardingSchema<Kv>;
 type R = Replica<Request<Vec<KvOp>>>;
+type S = ShardedStorage<<A as DataShardingApp>::Shard>;
 
 struct SystemState {
     services: Vec<Service<A, R>>,
-    service_network: VecDeque<(ServiceIndex, ServiceMessage<A>)>,
+    service_network: VecDeque<(ServiceIndex, ServiceMessage<R, S>)>,
     replies: Vec<(ClientId, Reply<Vec<KvRes>, ()>)>,
 }
 
 #[test]
 fn idle_pending() {
-    let service = Service::new(
-        Replica::new(),
-        DataShardingSchema::new(1),
-        0,
-        StateConfig {
-            num_service: 1,
-            num_active_copy: 1,
-        },
-    );
+    let app = DataShardingSchema::new(1);
+    let storage_config = ShardedStorageConfig {
+        num_node: 1,
+        num_shard: 1,
+        num_active_copy: 1,
+    };
+    let storage = ShardedStorage::new(storage_config, 0, [0].into(), &app);
+    let service = Service::new(app, Replica::new(), storage);
     let mut state = SystemState {
         services: vec![service],
         service_network: Default::default(),
@@ -49,11 +62,8 @@ fn idle_pending() {
 }
 
 impl SystemState {
-    fn deliver_messages(&mut self) {
-        while let Some((index, message)) = self.service_network.pop_front() {
-            self.services[index as usize]
-                .receive(Message::Intermediate(IntermediateMessage::Service(message)))
-        }
+    fn deliver(&mut self, index: ServiceIndex, message: ServiceMessage<R, S>) {
+        self.services[index as usize].receive(Message::Intermediate(message))
     }
 
     fn proceed_service(&mut self, index: ServiceIndex, since_start: Duration) -> Option<Duration> {
@@ -63,60 +73,88 @@ impl SystemState {
                 Proceed::Send(Send::Reply(client_id, reply)) => {
                     self.replies.push((client_id, reply))
                 }
-                Proceed::Send(Send::Intermediate(IntermediateSend::Service(
+                Proceed::Send(Send::Intermediate(ServiceSend::Storage((
                     ServiceRecipient::Uni(index),
                     message,
-                ))) => self.service_network.push_back((index, message)),
-                Proceed::Send(Send::Intermediate(IntermediateSend::Service(
+                )))) => self
+                    .service_network
+                    .push_back((index, ServiceMessage::Storage(message))),
+                Proceed::Send(Send::Intermediate(ServiceSend::Storage((
                     ServiceRecipient::Multi(indices),
                     message,
-                ))) => {
+                )))) => {
                     for index in indices {
-                        self.service_network.push_back((index, message.clone()))
+                        self.service_network
+                            .push_back((index, ServiceMessage::Storage(message.clone())))
                     }
                 }
-                Proceed::Send(Send::Intermediate(IntermediateSend::Service(
+                Proceed::Send(Send::Intermediate(ServiceSend::Storage((
                     ServiceRecipient::All,
                     message,
-                ))) => {
+                )))) => {
                     for index in 0..self.services.len() {
                         self.service_network
-                            .push_back((index as _, message.clone()))
+                            .push_back((index as _, ServiceMessage::Storage(message.clone())))
                     }
                 }
             }
         }
     }
+
+    fn deliver_proceed(
+        &mut self,
+        index: ServiceIndex,
+        message: ServiceMessage<R, S>,
+        since_start: Duration,
+    ) -> Option<Duration> {
+        self.deliver(index, message);
+        self.proceed_service(index, since_start)
+    }
+
+    fn run(&mut self, since_start: Duration) -> Option<Duration> {
+        let mut tick_after = None;
+        while let Some((index, message)) = self.service_network.pop_front() {
+            tracing::trace!(%index, ?message);
+            tick_after = earliest([
+                self.deliver_proceed(index, message, since_start),
+                tick_after,
+            ])
+        }
+        tick_after
+    }
 }
 
-fn request(op: KvOp) -> Request<Vec<KvOp>> {
+fn request(seq: ClientSeq, op: KvOp) -> Request<Vec<KvOp>> {
     Request {
         client_id: 0,
-        client_seq: 0,
+        client_seq: seq,
         op: vec![op],
     }
 }
 
 #[test]
 fn one_service() {
+    let app = DataShardingSchema::new(1);
+    let storage_config = ShardedStorageConfig {
+        num_node: 1,
+        num_shard: 1,
+        num_active_copy: 1,
+    };
+    let storage = ShardedStorage::new(storage_config, 0, [0].into(), &app);
+    let service = Service::new(app, Replica::new(), storage);
     let mut state = SystemState {
-        services: vec![Service::new(
-            Replica::new(),
-            DataShardingSchema::new(1),
-            0,
-            StateConfig {
-                num_service: 1,
-                num_active_copy: 1,
-            },
-        )],
+        services: vec![service],
         service_network: Default::default(),
         replies: Default::default(),
     };
-    state.services[0].receive(Message::Request(request(KvOp::Put("k".into(), "v".into()))));
+    state.services[0].receive(Message::Request(request(
+        1,
+        KvOp::Put("k".into(), "v".into()),
+    )));
     state.proceed_service(0, Duration::ZERO);
     let (_, reply) = state.replies.remove(0);
     assert_eq!(reply.res, vec![KvRes::Put]);
-    state.services[0].receive(Message::Request(request(KvOp::Get("k".into()))));
+    state.services[0].receive(Message::Request(request(2, KvOp::Get("k".into()))));
     state.proceed_service(0, Duration::ZERO);
     let (_, reply) = state.replies.remove(0);
     assert_eq!(reply.res, vec![KvRes::Get(Some("v".into()))]);
@@ -126,16 +164,15 @@ impl SystemState {
     fn new(num_service: ServiceIndex) -> Self {
         Self {
             services: (0..num_service)
-                .map(|i| {
-                    Service::new(
-                        Replica::new(),
-                        DataShardingSchema::new(10),
-                        i,
-                        StateConfig {
-                            num_service,
-                            num_active_copy: 1,
-                        },
-                    )
+                .map(|index| {
+                    let app = DataShardingSchema::new(100);
+                    let storage_config = ShardedStorageConfig {
+                        num_node: num_service,
+                        num_shard: 100,
+                        num_active_copy: 1,
+                    };
+                    let storage = ShardedStorage::new(storage_config, index, [index].into(), &app);
+                    Service::new(app, Replica::new(), storage)
                 })
                 .collect(),
             service_network: Default::default(),
@@ -143,43 +180,21 @@ impl SystemState {
         }
     }
 
-    fn receive(&mut self, request: Request<Vec<KvOp>>) {
-        for service in &mut self.services {
-            service.receive(Message::Request(request.clone()));
-        }
-    }
-
-    fn proceed(&mut self, since_start: Duration) -> Option<Duration> {
-        loop {
-            let mut min_tick_after = None;
-            for index in 0..self.services.len() as ServiceIndex {
-                let tick_after = self.proceed_service(index, since_start);
-                min_tick_after =
-                    if let (Some(tick_after), Some(min_tick_after)) = (tick_after, min_tick_after) {
-                        Some(tick_after.min(min_tick_after))
-                    } else {
-                        min_tick_after.or(tick_after)
-                    }
-            }
-        }
-    }
-
-    fn run(&mut self, since_start: Duration) -> Option<Duration> {
-        let mut tick_after;
-        while {
-            tick_after = self.proceed(since_start);
-            self.service_network.len() > 0
-        } {
-            self.deliver_messages()
-        }
-        tick_after
+    fn receive(&mut self, request: Request<Vec<KvOp>>, since_start: Duration) -> Option<Duration> {
+        earliest((0..self.services.len()).map(|index| {
+            self.services[index].receive(Message::Request(request.clone()));
+            self.proceed_service(index as _, since_start)
+        }))
     }
 }
 
 #[test]
 fn multiple_services() {
     let mut state = SystemState::new(2);
-    state.receive(request(KvOp::Put("k".into(), "v".into())));
+    state.receive(
+        request(1, KvOp::Put("k".into(), "v".into())),
+        Duration::ZERO,
+    );
     state.run(Duration::ZERO);
     assert_eq!(state.replies.len(), 2);
 }

@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use derive_where::derive_where;
 use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
 
 use crate::{
@@ -18,6 +19,8 @@ use super::{
 };
 
 pub mod app;
+#[cfg(test)]
+mod tests;
 
 type ShardIndex = u32;
 type StateVersion = u64;
@@ -84,11 +87,30 @@ struct Executing<A: DataShardingApp> {
     client_seq: ClientSeq,
 }
 
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>>
+    Service<A, R, S>
+{
+    pub fn new(app: A, replication: R, storage: S) -> Self {
+        Self {
+            app,
+            replication,
+            storage,
+            replies: Default::default(),
+            replicated: Default::default(),
+            shards: Default::default(),
+            num_skip: 0,
+            submit_buffer: Default::default(),
+            send_buffer: Default::default(),
+        }
+    }
+}
+
 pub enum ServiceSend<R: State, S: State> {
     Replication(R::Send),
     Storage(S::Send),
 }
 
+#[derive_where(Debug; R::Message, S::Message)]
 pub enum ServiceMessage<R: State, S: State> {
     Replication(R::Message),
     Storage(S::Message),
@@ -141,7 +163,7 @@ where
                 DataShardingExecuteOutput::RequireAccess(required_indices) => {
                     for shard_index in required_indices {
                         assert!(!self.shards.contains_key(&shard_index));
-                        self.storage.fetch(shard_index);
+                        self.storage.fetch(shard_index)
                     }
                 }
                 DataShardingExecuteOutput::Complete(res) => {
@@ -229,11 +251,11 @@ pub struct ShardedStorage<S> {
     service_index: ServiceIndex,
     // node_indices: HashSet<NodeIndex>, // of the virtual "storage nodes" hosted by this storage
     // caching. compute once on startup
-    stored_indices: Vec<ShardIndex>,
-
+    // stored_indices: Vec<ShardIndex>,
     version: StateVersion, // of shards[-1]
     shards: Vec<HashMap<ShardIndex, S>>,
     fetching: HashSet<ShardIndex>,
+    fetched_table: HashMap<ShardIndex, S>,
 
     proceed_buffer: Vec<Proceed<ShardedStorageSend<S>, StorageStateOutput<S>>>,
 }
@@ -264,26 +286,28 @@ impl<S> ShardedStorage<S> {
         node_indices: HashSet<NodeIndex>,
         app: &impl DataShardingApp<Shard = S>,
     ) -> Self {
-        let mut stored_indices = Vec::new();
+        // let mut stored_indices = Vec::new();
         let mut shards = HashMap::new();
         for shard_index in 0..config.num_shard {
             if config.should_store(&node_indices, shard_index) {
-                stored_indices.push(shard_index);
+                // stored_indices.push(shard_index);
                 shards.insert(shard_index, app.new_shard(shard_index));
             }
         }
         Self {
             config,
             service_index,
-            stored_indices,
+            // stored_indices,
             version: 0,
             shards: vec![shards],
             fetching: Default::default(),
+            fetched_table: Default::default(),
             proceed_buffer: Default::default(),
         }
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum ShardedStorageMessage<S> {
     Fetch(message::Fetch),
     FetchOk(message::FetchOk<S>),
@@ -293,6 +317,8 @@ type ShardedStorageSend<S> = (ServiceRecipient, ShardedStorageMessage<S>);
 
 impl<S: Clone> StorageState<S> for ShardedStorage<S> {
     fn fetch(&mut self, index: ShardIndex) {
+        tracing::trace!(%self.service_index, shard_index = %index);
+
         if let Some(shard) = self.shards.last().unwrap().get(&index) {
             self.proceed_buffer
                 .push(Proceed::Output(StorageStateOutput::Fetched(
@@ -317,25 +343,16 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
     }
 
     fn bump(&mut self, mut shards: HashMap<ShardIndex, S>) {
-        let stored_shards = self
-            .stored_indices
-            .iter()
-            .map(|&shard_index| {
-                let shard = if let Some(shard) = shards.remove(&shard_index) {
-                    shard
-                } else {
-                    self.shards
-                        .last()
-                        .unwrap()
-                        .get(&shard_index)
-                        .unwrap()
-                        .clone()
-                };
-                (shard_index, shard)
-            })
-            .collect();
+        tracing::trace!(%self.service_index, %self.version, "bumping");
+        let mut stored_shards = self.shards.last().unwrap().clone();
+        for (shard_index, shard) in &mut stored_shards {
+            if let Some(new_shard) = shards.remove(shard_index) {
+                *shard = new_shard;
+            }
+        }
         self.shards.push(stored_shards);
-        self.version += 1;
+        self.fetching.clear();
+        self.version += 1
     }
 }
 
@@ -346,6 +363,13 @@ impl<S: Clone> State for ShardedStorage<S> {
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(proceed) = self.proceed_buffer.pop() {
             return proceed;
+        }
+        if let Some(&index) = self.fetched_table.keys().next() {
+            self.fetching.remove(&index);
+            return Proceed::Output(StorageStateOutput::Fetched(
+                index,
+                self.fetched_table.remove(&index).unwrap(),
+            ));
         }
         Proceed::Pending(None)
     }
@@ -380,20 +404,16 @@ impl<S: Clone> State for ShardedStorage<S> {
                 )))
             }
             ShardedStorageMessage::FetchOk(fetch_ok) => {
-                if fetch_ok.version < self.version {
-                    return;
-                }
                 if fetch_ok.version > self.version {
                     // currently not happen
                     return;
                 }
-
-                self.fetching.remove(&fetch_ok.shard_index);
-                self.proceed_buffer
-                    .push(Proceed::Output(StorageStateOutput::Fetched(
-                        fetch_ok.shard_index,
-                        fetch_ok.shard,
-                    )));
+                if fetch_ok.version < self.version || !self.fetching.contains(&fetch_ok.shard_index)
+                {
+                    return;
+                }
+                self.fetched_table
+                    .insert(fetch_ok.shard_index, fetch_ok.shard);
             }
         }
     }
