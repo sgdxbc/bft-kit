@@ -19,7 +19,8 @@ use super::{
 
 pub mod app;
 
-pub type ShardIndex = u32;
+type ShardIndex = u32;
+type StateVersion = u64;
 
 pub trait DataShardingApp: ServiceApp + Sized {
     type Shard;
@@ -65,6 +66,7 @@ pub struct Service<
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     replicated: VecDeque<Replicated<A, R>>,
     shards: HashMap<ShardIndex, A::Shard>,
+    num_skip: StateVersion,
 
     submit_buffer: Vec<Request<A::Op>>,
     send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<R, S>>>,
@@ -128,6 +130,12 @@ where
                 return self.proceed(since_start);
             }
 
+            if self.num_skip > 0 {
+                self.num_skip -= 1;
+                executing_buffer.pop_front();
+                return self.proceed(since_start);
+            }
+
             match executing.execute.proceed(&mut self.shards) {
                 DataShardingExecuteOutput::RequireAccess(required_indices) => {
                     for shard_index in required_indices {
@@ -161,8 +169,9 @@ where
                 self.shards.insert(shard_index, shard);
                 return self.proceed(since_start);
             }
-            Proceed::Output(StorageStateOutput::Skipped(_)) => {
-                todo!()
+            Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
+                self.num_skip += num_skipped;
+                return self.proceed(since_start);
             }
         }
 
@@ -213,7 +222,6 @@ where
     }
 }
 
-type StateVersion = u64;
 type NodeIndex = ServiceIndex;
 
 pub struct ShardedStorage<S> {
