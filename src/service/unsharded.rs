@@ -20,6 +20,7 @@ pub struct Service<A: AppState, R: ReplicationState<Request<A::Op>>> {
     replicated: Option<Replicated<A, R>>,
 
     submit_buffer: Vec<Request<A::Op>>,
+    #[allow(clippy::type_complexity)] // this matches <Self as State>::Send
     send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, R::Send>>,
 }
 

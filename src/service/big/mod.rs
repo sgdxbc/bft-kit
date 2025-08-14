@@ -69,6 +69,7 @@ pub struct Service<
     num_skip: StateVersion,
 
     submit_buffer: Vec<Request<A::Op>>,
+    #[allow(clippy::type_complexity)] // this matches <Self as State>::Send
     send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<R, S>>>,
 }
 
@@ -159,9 +160,8 @@ where
             }
         }
 
-        let storage_tick_after;
-        match self.storage.proceed(since_start) {
-            Proceed::Pending(tick_after) => storage_tick_after = tick_after,
+        let storage_tick_after = match self.storage.proceed(since_start) {
+            Proceed::Pending(tick_after) => tick_after,
             Proceed::Send(send) => {
                 return Proceed::Send(Send::Intermediate(ServiceSend::Storage(send)));
             }
@@ -173,7 +173,7 @@ where
                 self.num_skip += num_skipped;
                 return self.proceed(since_start);
             }
-        }
+        };
 
         while let Some(request) = self.submit_buffer.pop() {
             self.replication.submit(request)

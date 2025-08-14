@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, mem::take, time::Duration};
 
 use crate::{
     Never,
@@ -105,7 +105,7 @@ where
 }
 
 pub struct Replica<T> {
-    output_buffer: Vec<Replicated<T, ()>>,
+    submit_buffer: Vec<T>,
 }
 
 impl<T> Default for Replica<T> {
@@ -117,7 +117,7 @@ impl<T> Default for Replica<T> {
 impl<T> Replica<T> {
     pub fn new() -> Self {
         Self {
-            output_buffer: Default::default(),
+            submit_buffer: Default::default(),
         }
     }
 }
@@ -126,10 +126,7 @@ impl<T> ReplicationState<T> for Replica<T> {
     type Metadata = ();
 
     fn submit(&mut self, entry: T) {
-        self.output_buffer.push(Replicated {
-            logs: vec![entry],
-            metadata: (),
-        })
+        self.submit_buffer.push(entry)
     }
 }
 
@@ -137,9 +134,13 @@ impl<T> State for Replica<T> {
     type Send = Never;
     type Output = Replicated<T, ()>;
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        match self.output_buffer.pop() {
-            Some(output) => Proceed::Output(output),
-            None => Proceed::Pending(None),
+        if self.submit_buffer.is_empty() {
+            Proceed::Pending(None)
+        } else {
+            Proceed::Output(Replicated {
+                logs: take(&mut self.submit_buffer),
+                metadata: (),
+            })
         }
     }
 
