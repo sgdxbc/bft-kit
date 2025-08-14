@@ -391,6 +391,53 @@ impl<S: Clone> State for ShardedStorage<S> {
     }
 }
 
+pub struct FullReplicationStorage<S> {
+    shards: HashMap<ShardIndex, S>,
+    proceed_buffer: Vec<Proceed<Never, StorageStateOutput<S>>>,
+}
+
+impl<S> FullReplicationStorage<S> {
+    pub fn new(num_shard: ShardIndex, app: &impl DataShardingApp<Shard = S>) -> Self {
+        Self {
+            shards: (0..num_shard)
+                .map(|shard_index| (shard_index, app.new_shard(shard_index)))
+                .collect(),
+            proceed_buffer: Default::default(),
+        }
+    }
+}
+
+impl<S: Clone> StorageState<S> for FullReplicationStorage<S> {
+    fn fetch(&mut self, index: ShardIndex) {
+        self.proceed_buffer
+            .push(Proceed::Output(StorageStateOutput::Fetched(
+                index,
+                self.shards[&index].clone(),
+            )))
+    }
+
+    fn bump(&mut self, shards: HashMap<ShardIndex, S>) {
+        self.shards.extend(shards)
+    }
+}
+
+impl<S: Clone> State for FullReplicationStorage<S> {
+    type Send = Never;
+    type Output = StorageStateOutput<S>;
+
+    fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+        if let Some(proceed) = self.proceed_buffer.pop() {
+            return proceed;
+        }
+        Proceed::Pending(None)
+    }
+
+    type Message = Never;
+    fn receive(&mut self, _message: Self::Message) {
+        unreachable!()
+    }
+}
+
 pub mod message {
     use super::{ServiceIndex, ShardIndex, StateVersion};
 
