@@ -5,7 +5,6 @@ use std::{
 };
 
 use bincode::{Decode, Encode};
-use derive_where::derive_where;
 use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
 
 use crate::{
@@ -112,10 +111,14 @@ pub enum ServiceSend<R: State, S: State> {
     Storage(S::Send),
 }
 
-#[derive_where(Debug; R::Message, S::Message)]
-pub enum ServiceMessage<R: State, S: State> {
-    Replication(R::Message),
-    Storage(S::Message),
+// direct generics (instead of R::Message, S::Message) because derive Encode and
+// Decode only works with this form (and derive_where does not support arbitrary
+// traits)
+// maybe change ServiceSend to this form as well? seems not strictly unnecessary
+#[derive(Debug, Encode, Decode)]
+pub enum ServiceMessage<RM, SM> {
+    Replication(RM),
+    Storage(SM),
 }
 
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>>
@@ -125,7 +128,7 @@ where
     Reply<A::Res, R::Metadata>: Clone,
 {
     type ServiceSend = ServiceSend<R, S>;
-    type ServiceMessage = ServiceMessage<R, S>;
+    type ServiceMessage = ServiceMessage<R::Message, S::Message>;
     type Metadata = R::Metadata;
 }
 

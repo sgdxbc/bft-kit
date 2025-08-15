@@ -35,10 +35,11 @@ fn print_placement() {
 type A = DataShardingSchema<Kv>;
 type R = Replica<Request<Vec<KvOp>>>;
 type S = ShardedStorage<<A as DataShardingApp>::Shard>;
+type ServiceMessage = super::ServiceMessage<<R as State>::Message, <S as State>::Message>;
 
 struct SystemState {
     services: Vec<Service<A, R>>,
-    service_network: VecDeque<(ServiceIndex, ServiceMessage<R, S>)>,
+    service_network: VecDeque<(ServiceIndex, ServiceMessage)>,
     replies: Vec<(ClientId, Reply<Vec<KvRes>, ()>)>,
 }
 
@@ -62,7 +63,7 @@ fn idle_pending() {
 }
 
 impl SystemState {
-    fn deliver(&mut self, index: ServiceIndex, message: ServiceMessage<R, S>) {
+    fn deliver(&mut self, index: ServiceIndex, message: ServiceMessage) {
         self.services[index as usize].receive(Message::Intermediate(message))
     }
 
@@ -88,10 +89,7 @@ impl SystemState {
                             .push_back((index, ServiceMessage::Storage(message.clone())))
                     }
                 }
-                Proceed::Send(Send::Intermediate(ServiceSend::Storage((
-                    Dest::All,
-                    message,
-                )))) => {
+                Proceed::Send(Send::Intermediate(ServiceSend::Storage((Dest::All, message)))) => {
                     for index in 0..self.services.len() {
                         self.service_network
                             .push_back((index as _, ServiceMessage::Storage(message.clone())))
@@ -104,7 +102,7 @@ impl SystemState {
     fn deliver_proceed(
         &mut self,
         index: ServiceIndex,
-        message: ServiceMessage<R, S>,
+        message: ServiceMessage,
         since_start: Duration,
     ) -> Option<Duration> {
         self.deliver(index, message);
