@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use bincode::Encode;
 use quinn::Connection;
+use tokio::task::JoinHandle;
 use tokio_util::{bytes::Bytes, task::TaskTracker};
 
 use crate::{
@@ -59,5 +62,15 @@ impl<T: ReplicaTable + ?Sized, M: Encode> PerformSend<(Dest, M)> for T {
             }
         }
         Ok(())
+    }
+}
+
+impl ReplicaTable for HashMap<ReplicaIndex, (Connection, JoinHandle<()>)> {
+    fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
+        self.get(&index).map(|(connection, _)| connection)
+    }
+
+    fn get_all(&self) -> impl Iterator<Item = &Connection> {
+        self.values().map(|(connection, _)| connection)
     }
 }

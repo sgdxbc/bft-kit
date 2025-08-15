@@ -138,7 +138,7 @@ pub mod transport {
     use crate::{
         app::AppState,
         crypto::cert::quinn::{client_config, server_config},
-        replication::{ReplicaIndex, transport::ReplicaTable},
+        replication::ReplicaIndex,
         state::Proceed,
         transport::{BINCODE_CONFIG, PerformSend, read_loop, run_write, trace_error},
     };
@@ -347,16 +347,6 @@ pub mod transport {
                     replica_table.perform(send, write_tracker)?
                 }
             }
-        }
-    }
-
-    impl ReplicaTable for HashMap<ReplicaIndex, (Connection, JoinHandle<()>)> {
-        fn get(&self, index: ReplicaIndex) -> Option<&Connection> {
-            self.get(&index).map(|(connection, _)| connection)
-        }
-
-        fn get_all(&self) -> impl Iterator<Item = &Connection> {
-            self.values().map(|(connection, _)| connection)
         }
     }
 }

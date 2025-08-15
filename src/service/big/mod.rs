@@ -4,21 +4,23 @@ use std::{
     time::Duration,
 };
 
+use bincode::{Decode, Encode};
 use derive_where::derive_where;
 use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
 
 use crate::{
     Never,
-    replication::ReplicationState,
+    replication::{ReplicaIndex, ReplicationState},
     state::{Proceed, State, earliest},
 };
 
 use super::{
-    ClientId, ClientSeq, Message, Reply, Request, Send, ServiceApp, ServiceIndex, Dest,
-    ServiceState,
+    ClientId, ClientSeq, Message, Reply, Request, Send, ServiceApp, ServiceIndex, ServiceState,
 };
 
 pub mod app;
+pub mod transport;
+
 #[cfg(test)]
 mod tests;
 
@@ -248,13 +250,13 @@ type NodeIndex = ServiceIndex;
 
 pub struct ShardedStorage<S> {
     config: ShardedStorageConfig,
-    service_index: ServiceIndex,
+    replica_index: ReplicaIndex,
 
     version: StateVersion, // of shards[-1]
     shards: Vec<HashMap<ShardIndex, S>>,
     fetching: HashSet<ShardIndex>,
     fetched_table: HashMap<ShardIndex, S>,
-    reordering_fetch_table: HashMap<StateVersion, HashMap<ShardIndex, HashSet<ServiceIndex>>>,
+    reordering_fetch_table: HashMap<StateVersion, HashMap<ShardIndex, HashSet<ReplicaIndex>>>,
 
     proceed_buffer: Vec<Proceed<ShardedStorageSend<S>, StorageStateOutput<S>>>,
 }
@@ -281,7 +283,7 @@ impl ShardedStorageConfig {
 impl<S> ShardedStorage<S> {
     pub fn new(
         config: ShardedStorageConfig,
-        service_index: ServiceIndex,
+        replica_index: ReplicaIndex,
         node_indices: HashSet<NodeIndex>,
         app: &impl DataShardingApp<Shard = S>,
     ) -> Self {
@@ -293,7 +295,7 @@ impl<S> ShardedStorage<S> {
         }
         Self {
             config,
-            service_index,
+            replica_index,
             // stored_indices,
             version: 0,
             shards: vec![shards],
@@ -305,17 +307,24 @@ impl<S> ShardedStorage<S> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum ShardedStorageMessage<S> {
     Fetch(message::Fetch),
     FetchOk(message::FetchOk<S>),
+}
+
+// should we just add a Multi variant to replication::Dest?
+pub enum Dest {
+    One(ReplicaIndex),
+    Multi(Vec<ReplicaIndex>),
+    All,
 }
 
 type ShardedStorageSend<S> = (Dest, ShardedStorageMessage<S>);
 
 impl<S: Clone> StorageState<S> for ShardedStorage<S> {
     fn fetch(&mut self, index: ShardIndex) {
-        tracing::trace!(%self.service_index, shard_index = %index);
+        tracing::trace!(%self.replica_index, shard_index = %index);
 
         if let Some(shard) = self.shards.last().unwrap().get(&index) {
             self.proceed_buffer
@@ -331,7 +340,7 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
         let fetch = message::Fetch {
             version: self.version,
             shard_index: index,
-            service_index: self.service_index,
+            service_index: self.replica_index,
         };
         let recipient = Dest::Multi(self.config.node_indices_of(index));
         self.proceed_buffer.push(Proceed::Send((
@@ -341,7 +350,7 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
     }
 
     fn bump(&mut self, mut shards: HashMap<ShardIndex, S>) {
-        tracing::trace!(%self.service_index, %self.version, "bumping");
+        tracing::trace!(%self.replica_index, %self.version, "bumping");
         let mut stored_shards = self.shards.last().unwrap().clone();
         for (shard_index, shard) in &mut stored_shards {
             if let Some(new_shard) = shards.remove(shard_index) {
@@ -485,16 +494,18 @@ impl<S: Clone> State for FullReplicationStorage<S> {
 }
 
 pub mod message {
+    use bincode::{Decode, Encode};
+
     use super::{ServiceIndex, ShardIndex, StateVersion};
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Encode, Decode)]
     pub struct Fetch {
         pub version: StateVersion,
         pub shard_index: ShardIndex,
         pub service_index: ServiceIndex,
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Encode, Decode)]
     pub struct FetchOk<S> {
         pub version: StateVersion,
         pub shard_index: ShardIndex,
