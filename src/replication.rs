@@ -4,7 +4,7 @@ pub mod in_memory;
 pub mod transport;
 pub mod unreplicated;
 
-pub type ReplicaIndex = u16;
+pub type ReplicaIndex = crate::service::ServiceIndex;
 
 pub struct Replicated<L, D> {
     pub logs: Vec<L>,
@@ -17,7 +17,7 @@ pub trait ReplicationState<L>: State<Output = Replicated<L, Self::Metadata>> {
     fn submit(&mut self, log: L);
 }
 
-pub enum ReplicationRecipient {
+pub enum Dest {
     All,
-    Index(ReplicaIndex),
+    One(ReplicaIndex),
 }

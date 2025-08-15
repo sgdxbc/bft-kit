@@ -74,13 +74,13 @@ impl SystemState {
                     self.replies.push((client_id, reply))
                 }
                 Proceed::Send(Send::Intermediate(ServiceSend::Storage((
-                    ServiceRecipient::Uni(index),
+                    Dest::One(index),
                     message,
                 )))) => self
                     .service_network
                     .push_back((index, ServiceMessage::Storage(message))),
                 Proceed::Send(Send::Intermediate(ServiceSend::Storage((
-                    ServiceRecipient::Multi(indices),
+                    Dest::Multi(indices),
                     message,
                 )))) => {
                     for index in indices {
@@ -89,7 +89,7 @@ impl SystemState {
                     }
                 }
                 Proceed::Send(Send::Intermediate(ServiceSend::Storage((
-                    ServiceRecipient::All,
+                    Dest::All,
                     message,
                 )))) => {
                     for index in 0..self.services.len() {

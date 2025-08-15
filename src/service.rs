@@ -29,10 +29,10 @@ pub enum Send<R, S> {
 
 pub type ServiceIndex = u16;
 
-pub enum ServiceRecipient {
-    All, // broad?
+pub enum Dest {
+    One(ServiceIndex),
     Multi(Vec<ServiceIndex>),
-    Uni(ServiceIndex),
+    All,
 }
 
 #[derive(Debug)]

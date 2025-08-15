@@ -8,7 +8,7 @@ use crate::{
     workload::ClientState,
 };
 
-use super::{Replicated, ReplicationRecipient, ReplicationState};
+use super::{Replicated, Dest, ReplicationState};
 
 pub struct Client<A: AppState> {
     id: ClientId,
@@ -60,7 +60,7 @@ impl<A: AppState> State for Client<A>
 where
     A::Op: Clone,
 {
-    type Send = (ReplicationRecipient, Request<A::Op>);
+    type Send = (Dest, Request<A::Op>);
     type Output = (ClientSeq, A::Res);
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(reply) = self.receive_buffer.pop() {
@@ -83,7 +83,7 @@ where
                 client_seq: seq,
                 op,
             };
-            return Proceed::Send((ReplicationRecipient::Index(0), request));
+            return Proceed::Send((Dest::One(0), request));
         }
 
         loop {

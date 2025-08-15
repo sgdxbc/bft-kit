@@ -323,12 +323,7 @@ pub mod transport {
         write_tracker: &TaskTracker,
     ) -> anyhow::Result<Option<Duration>>
     where
-        Service<A, R>: ServiceState<
-                A,
-                ServiceSend = R::Send,
-                ServiceMessage = R::Message,
-                Metadata = R::Metadata,
-            >,
+        Service<A, R>: ServiceState<A, ServiceSend = R::Send, Metadata = R::Metadata>,
         Reply<A::Res, R::Metadata>: Encode,
         HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
     {

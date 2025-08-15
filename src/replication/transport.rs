@@ -7,7 +7,7 @@ use crate::{
     transport::{BINCODE_CONFIG, PerformSend, run_write, trace_error},
 };
 
-use super::{ReplicaIndex, ReplicationRecipient};
+use super::{Dest, ReplicaIndex};
 
 pub trait ReplicaTable {
     fn get(&self, index: ReplicaIndex) -> Option<&Connection>;
@@ -32,15 +32,15 @@ impl<T: ReplicaTable + ?Sized> PerformSend<Never> for T {
 // conflict hopefully), but cannot think of any protocol that only unicast
 // without broadcast
 
-impl<T: ReplicaTable + ?Sized, M: Encode> PerformSend<(ReplicationRecipient, M)> for T {
+impl<T: ReplicaTable + ?Sized, M: Encode> PerformSend<(Dest, M)> for T {
     fn perform(
         &self,
-        (recipient, message): (ReplicationRecipient, M),
+        (recipient, message): (Dest, M),
         send_tracker: &TaskTracker,
     ) -> anyhow::Result<()> {
         let bytes = Bytes::from(bincode::encode_to_vec(message, BINCODE_CONFIG)?);
         match recipient {
-            ReplicationRecipient::Index(index) => {
+            Dest::One(index) => {
                 let Some(connection) = self.get(index) else {
                     anyhow::bail!("unknown replica index {index}");
                 };
@@ -49,7 +49,7 @@ impl<T: ReplicaTable + ?Sized, M: Encode> PerformSend<(ReplicationRecipient, M)>
                     run_write(connection.clone(), bytes),
                 ));
             }
-            ReplicationRecipient::All => {
+            Dest::All => {
                 for connection in self.get_all() {
                     send_tracker.spawn(trace_error(
                         "replica connection write",

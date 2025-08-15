@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    ClientId, ClientSeq, Message, Reply, Request, Send, ServiceApp, ServiceIndex, ServiceRecipient,
+    ClientId, ClientSeq, Message, Reply, Request, Send, ServiceApp, ServiceIndex, Dest,
     ServiceState,
 };
 
@@ -311,7 +311,7 @@ pub enum ShardedStorageMessage<S> {
     FetchOk(message::FetchOk<S>),
 }
 
-type ShardedStorageSend<S> = (ServiceRecipient, ShardedStorageMessage<S>);
+type ShardedStorageSend<S> = (Dest, ShardedStorageMessage<S>);
 
 impl<S: Clone> StorageState<S> for ShardedStorage<S> {
     fn fetch(&mut self, index: ShardIndex) {
@@ -333,7 +333,7 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
             shard_index: index,
             service_index: self.service_index,
         };
-        let recipient = ServiceRecipient::Multi(self.config.node_indices_of(index));
+        let recipient = Dest::Multi(self.config.node_indices_of(index));
         self.proceed_buffer.push(Proceed::Send((
             recipient,
             ShardedStorageMessage::Fetch(fetch),
@@ -358,7 +358,7 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
                     shard: stored_shards[&shard_index].clone(),
                 };
                 self.proceed_buffer.push(Proceed::Send((
-                    ServiceRecipient::Multi(service_indices.into_iter().collect()),
+                    Dest::Multi(service_indices.into_iter().collect()),
                     ShardedStorageMessage::FetchOk(fetch_ok),
                 )))
             }
@@ -417,7 +417,7 @@ impl<S: Clone> State for ShardedStorage<S> {
                     shard: shard.clone(),
                 };
                 self.proceed_buffer.push(Proceed::Send((
-                    ServiceRecipient::Uni(fetch.service_index),
+                    Dest::One(fetch.service_index),
                     ShardedStorageMessage::FetchOk(fetch_ok),
                 )))
             }
