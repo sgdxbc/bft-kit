@@ -129,7 +129,7 @@ async fn service_big(
     settings: Settings,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let app = DataShardingSchema::<Kv>::new(settings.get("num_shard")?);
+    let app = DataShardingSchema::<Kv>::new(settings.get("big.num-shard")?);
     let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
     let service = big::Service::new(app, in_memory::Replica::new(Workload), storage);
     big::transport::run_service(service, index, settings.get_values("addr")?, cancel, false).await

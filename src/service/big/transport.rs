@@ -263,13 +263,11 @@ where
         task.await.unwrap() // not cancelled anywhere and propagate panics
     }
 
-    if !send_reply {
-        println!(
-            "Replica {replica_index}\n  {} ops, 50th {:?}",
-            service.execute_latencies.len(),
-            Duration::from_nanos(service.execute_latencies.value_at_quantile(0.5))
-        )
-    }
+    tracing::info!(
+        "Replica {replica_index}\n  {} ops, 50th {:?}",
+        service.execute_latencies.len(),
+        Duration::from_nanos(service.execute_latencies.value_at_quantile(0.5))
+    );
     Ok(())
 }
 
