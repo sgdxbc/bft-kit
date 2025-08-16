@@ -515,3 +515,19 @@ pub mod message {
         pub shard: S,
     }
 }
+
+mod parse {
+    use crate::parse::{Extract, Settings};
+
+    use super::ShardedStorageConfig;
+
+    impl Extract for ShardedStorageConfig {
+        fn extract(settings: &Settings) -> anyhow::Result<Self> {
+            Ok(Self {
+                num_shard: settings.get("num_shard")?,
+                num_node: settings.get("num_node")?,
+                num_active_copy: settings.get("num_active_copy")?,
+            })
+        }
+    }
+}

@@ -16,6 +16,7 @@ pub async fn read_loop<E: Send + Sync + 'static>(
             Err(ConnectionError::LocallyClosed | ConnectionError::ApplicationClosed(_)) => break,
             Err(err) => Err(err)?,
         };
+        // spawn per message read task if that matters a lot to performance
         let message = stream.read_to_end(1 << 16).await?;
         if event_sender.capacity() == 0 {
             tracing::warn!("message channel congested")

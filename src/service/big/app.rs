@@ -4,6 +4,7 @@ use std::{
     marker::PhantomData,
 };
 
+use bincode::{Decode, Encode};
 use derive_where::derive_where;
 
 use crate::{
@@ -100,13 +101,13 @@ impl DataShardingExecuteState<DataShardingSchema<Null>>
 
 pub struct Kv;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub enum KvOp {
     Put(String, String),
     Get(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub enum KvRes {
     Put,
     Get(Option<String>),
