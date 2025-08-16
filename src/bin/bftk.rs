@@ -8,7 +8,7 @@ use bft_kit::{
     replication::{ReplicaIndex, unreplicated},
     service::unsharded::{Service, transport::run_service},
     set_affinity_block_on,
-    workload::{CloseLoopWorker, Latencies, OpenLoopWorker, transport::run_worker},
+    workload::{CloseLoopWorker, NanoLatencies, OpenLoopWorker, transport::run_worker},
 };
 use rand::random;
 use tokio::{fs::read_to_string, signal::ctrl_c, task::JoinSet, time::sleep, try_join};
@@ -51,7 +51,7 @@ async fn workload() -> anyhow::Result<()> {
     }
 
     let worker_task = async {
-        let mut latencies = Latencies::new(3).unwrap();
+        let mut latencies = NanoLatencies::new(3).unwrap();
         while let Some(result) = worker_set.join_next().await {
             latencies += result??
         }
@@ -77,7 +77,7 @@ async fn worker(
     client_id: u32,
     client: unreplicated::Client<Null>,
     cancel: CancellationToken,
-) -> anyhow::Result<Latencies> {
+) -> anyhow::Result<NanoLatencies> {
     let settings = settings.as_ref();
     if settings.get("workload.close-loop")? {
         let worker = CloseLoopWorker::new(Null, client);

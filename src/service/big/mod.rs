@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     mem::take,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bincode::{Decode, Encode};
@@ -11,6 +11,7 @@ use crate::{
     Never,
     replication::{ReplicaIndex, ReplicationState},
     state::{Proceed, State, earliest},
+    workload::NanoLatencies,
 };
 
 use super::{
@@ -75,6 +76,8 @@ pub struct Service<
     submit_buffer: Vec<Request<A::Op>>,
     #[allow(clippy::type_complexity)] // this matches <Self as State>::Send
     send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<R, S>>>,
+
+    execute_latencies: NanoLatencies,
 }
 
 type Replicated<A, R> = (
@@ -86,6 +89,7 @@ struct Executing<A: DataShardingApp> {
     execute: A::Execute,
     client_id: ClientId,
     client_seq: ClientSeq,
+    start: Instant,
 }
 
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>>
@@ -102,6 +106,7 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A:
             num_skip: 0,
             submit_buffer: Default::default(),
             send_buffer: Default::default(),
+            execute_latencies: NanoLatencies::new(3).unwrap(),
         }
     }
 }
@@ -172,8 +177,8 @@ where
                     }
                 }
                 DataShardingExecuteOutput::Complete(res) => {
+                    self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
                     self.storage.bump(take(&mut self.shards));
-
                     let reply = Reply {
                         client_seq: executing.client_seq,
                         res,
@@ -205,6 +210,9 @@ where
         while let Some(request) = self.submit_buffer.pop() {
             self.replication.submit(request)
         }
+        if self.replicated.len() >= 10 {
+            return Proceed::Pending(storage_tick_after);
+        }
         match self.replication.proceed(since_start) {
             Proceed::Pending(tick_after) => {
                 Proceed::Pending(earliest([storage_tick_after, tick_after]))
@@ -214,12 +222,14 @@ where
             }
             Proceed::Output(replicated) => {
                 let mut executing_buffer = VecDeque::new();
+                let start = Instant::now();
                 for request in replicated.logs {
                     // may query ahead here as an optimization
                     executing_buffer.push_back(Executing {
                         execute: self.app.new_execute(request.op),
                         client_id: request.client_id,
                         client_seq: request.client_seq,
+                        start,
                     })
                 }
                 self.replicated
@@ -327,7 +337,7 @@ type ShardedStorageSend<S> = (Dest, ShardedStorageMessage<S>);
 
 impl<S: Clone> StorageState<S> for ShardedStorage<S> {
     fn fetch(&mut self, index: ShardIndex) {
-        tracing::trace!(%self.replica_index, shard_index = %index);
+        // tracing::trace!(%self.replica_index, shard_index = %index);
 
         if let Some(shard) = self.shards.last().unwrap().get(&index) {
             self.proceed_buffer
@@ -451,7 +461,7 @@ impl<S: Clone> State for ShardedStorage<S> {
 
 pub struct FullReplicationStorage<S> {
     shards: HashMap<ShardIndex, S>,
-    proceed_buffer: Vec<Proceed<Never, StorageStateOutput<S>>>,
+    output_buffer: Vec<StorageStateOutput<S>>,
 }
 
 impl<S> FullReplicationStorage<S> {
@@ -460,18 +470,17 @@ impl<S> FullReplicationStorage<S> {
             shards: (0..num_shard)
                 .map(|shard_index| (shard_index, app.new_shard(shard_index)))
                 .collect(),
-            proceed_buffer: Default::default(),
+            output_buffer: Default::default(),
         }
     }
 }
 
 impl<S: Clone> StorageState<S> for FullReplicationStorage<S> {
     fn fetch(&mut self, index: ShardIndex) {
-        self.proceed_buffer
-            .push(Proceed::Output(StorageStateOutput::Fetched(
-                index,
-                self.shards[&index].clone(),
-            )))
+        self.output_buffer.push(StorageStateOutput::Fetched(
+            index,
+            self.shards[&index].clone(),
+        ))
     }
 
     fn bump(&mut self, shards: HashMap<ShardIndex, S>) {
@@ -484,8 +493,8 @@ impl<S: Clone> State for FullReplicationStorage<S> {
     type Output = StorageStateOutput<S>;
 
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some(proceed) = self.proceed_buffer.pop() {
-            return proceed;
+        if let Some(output) = self.output_buffer.pop() {
+            return Proceed::Output(output);
         }
         Proceed::Pending(None)
     }

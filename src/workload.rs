@@ -28,13 +28,13 @@ pub trait WorkloadState {
     ) -> anyhow::Result<()>;
 }
 
-pub type Latencies = Histogram<u64>;
+pub type NanoLatencies = Histogram<u64>;
 
 pub struct CloseLoopWorker<W: WorkloadState, C> {
     workload: W,
     client: C,
     submitted: Option<(Instant, <W::App as ServiceApp>::Op)>,
-    latencies: Latencies,
+    latencies: NanoLatencies,
 }
 
 impl<W: WorkloadState, C> CloseLoopWorker<W, C> {
@@ -48,7 +48,7 @@ impl<W: WorkloadState, C> CloseLoopWorker<W, C> {
     }
 }
 
-impl<W: WorkloadState, C> From<CloseLoopWorker<W, C>> for Latencies {
+impl<W: WorkloadState, C> From<CloseLoopWorker<W, C>> for NanoLatencies {
     fn from(val: CloseLoopWorker<W, C>) -> Self {
         val.latencies
     }
@@ -100,7 +100,7 @@ pub struct OpenLoopWorker<W: WorkloadState, C> {
     workload: W,
     client: C,
     submitted: HashMap<ClientSeq, (Instant, <W::App as ServiceApp>::Op)>,
-    latencies: Latencies,
+    latencies: NanoLatencies,
     next_submit: Option<Instant>,
     target_tput: f32,
 }
@@ -118,7 +118,7 @@ impl<W: WorkloadState, C> OpenLoopWorker<W, C> {
     }
 }
 
-impl<W: WorkloadState, C> From<OpenLoopWorker<W, C>> for Latencies {
+impl<W: WorkloadState, C> From<OpenLoopWorker<W, C>> for NanoLatencies {
     fn from(val: OpenLoopWorker<W, C>) -> Self {
         val.latencies
     }

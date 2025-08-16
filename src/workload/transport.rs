@@ -16,14 +16,14 @@ use crate::{
     transport::{BINCODE_CONFIG, PerformSend, read_loop, trace_error},
 };
 
-use super::Latencies;
+use super::NanoLatencies;
 
-pub async fn run_worker<S: State<Output = anyhow::Result<()>> + Into<Latencies>>(
+pub async fn run_worker<S: State<Output = anyhow::Result<()>> + Into<NanoLatencies>>(
     mut worker: S,
     client_id: ClientId,
     addrs: Vec<SocketAddr>,
     cancel: CancellationToken,
-) -> anyhow::Result<Latencies>
+) -> anyhow::Result<NanoLatencies>
 where
     S::Message: Decode<()>,
     [Connection]: PerformSend<S::Send>,

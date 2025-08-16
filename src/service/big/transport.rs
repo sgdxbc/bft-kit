@@ -41,6 +41,7 @@ pub async fn run_service<
     replica_index: ReplicaIndex,
     addrs: Vec<SocketAddr>,
     cancel: CancellationToken,
+    send_reply: bool,
 ) -> anyhow::Result<()>
 where
     Service<A, R, S>: ServiceState<
@@ -55,6 +56,8 @@ where
     Reply<A::Res, R::Metadata>: Encode,
     HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>:
         PerformSend<R::Send> + PerformSend<S::Send>,
+    R::Message: std::fmt::Debug,
+    S::Message: std::fmt::Debug,
 {
     let mut endpoint = Endpoint::server(server_config(), addrs[replica_index as usize])?;
     endpoint.set_default_client_config(client_config());
@@ -170,6 +173,7 @@ where
         start.elapsed(),
         &connection_tables,
         &write_tracker,
+        send_reply,
     )?;
     loop {
         let tick = async {
@@ -221,11 +225,13 @@ where
             Event::ReplicationMessage(bytes) => {
                 let (message, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                 anyhow::ensure!(len == bytes.len());
+                tracing::trace!(%replica_index, ?message);
                 service.receive(Message::Intermediate(ServiceMessage::Replication(message)))
             }
             Event::StorageMessage(bytes) => {
                 let (message, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                 anyhow::ensure!(len == bytes.len());
+                tracing::trace!(%replica_index, ?message);
                 service.receive(Message::Intermediate(ServiceMessage::Storage(message)))
             }
             Event::Tick => {}
@@ -235,6 +241,7 @@ where
             start.elapsed(),
             &connection_tables,
             &write_tracker,
+            send_reply,
         )?
     }
 
@@ -255,6 +262,14 @@ where
         connection.close(0u32.into(), b"service shutting down");
         task.await.unwrap() // not cancelled anywhere and propagate panics
     }
+
+    if !send_reply {
+        println!(
+            "Replica {replica_index}\n  {} ops, 50th {:?}",
+            service.execute_latencies.len(),
+            Duration::from_nanos(service.execute_latencies.value_at_quantile(0.5))
+        )
+    }
     Ok(())
 }
 
@@ -267,6 +282,7 @@ fn service_proceed<
     since_start: Duration,
     connection_tables: &ConnectionTables,
     write_tracker: &TaskTracker,
+    send_reply: bool,
 ) -> anyhow::Result<Option<Duration>>
 where
     Service<A, R, S>: ServiceState<A, ServiceSend = ServiceSend<R, S>, Metadata = R::Metadata>,
@@ -277,6 +293,7 @@ where
     loop {
         match service.proceed(since_start) {
             Proceed::Pending(tick_after) => break Ok(tick_after),
+            Proceed::Send(Send::Reply(..)) if !send_reply => {}
             Proceed::Send(Send::Reply(client_id, reply)) => {
                 let Some((connection, _)) = connection_tables.client.get(&client_id) else {
                     tracing::warn!(%client_id, "client connection not found");
