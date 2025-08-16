@@ -65,7 +65,7 @@ impl WorkloadState for Workload {
 
     fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
         let mut rng = rand::rng();
-        let k = format!("k{}", (0..10).choose(&mut rng).unwrap());
+        let k = format!("k{:04}", (0..10_000).choose(&mut rng).unwrap());
 
         Some(vec![if rng.random_ratio(50, 100) {
             let v = rng

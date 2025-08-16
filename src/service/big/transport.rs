@@ -327,15 +327,13 @@ where
         send_tracker: &TaskTracker,
     ) -> anyhow::Result<()> {
         let bytes = bincode::encode_to_vec(message, BINCODE_CONFIG)?;
+        let label = "storage connection write";
         match dest {
             Dest::One(index) => {
                 let Some(connection) = self.get(index) else {
                     anyhow::bail!("unknown replica index {index}");
                 };
-                send_tracker.spawn(trace_error(
-                    "replica connection write",
-                    run_write(connection.clone(), bytes),
-                ));
+                send_tracker.spawn(trace_error(label, run_write(connection.clone(), bytes)));
             }
             Dest::Multi(indices) => {
                 for index in indices {
@@ -343,7 +341,7 @@ where
                         anyhow::bail!("unknown replica index {index}");
                     };
                     send_tracker.spawn(trace_error(
-                        "replica connection write",
+                        label,
                         run_write(connection.clone(), bytes.clone()),
                     ));
                 }
@@ -351,7 +349,7 @@ where
             Dest::All => {
                 for connection in self.get_all() {
                     send_tracker.spawn(trace_error(
-                        "replica connection write",
+                        label,
                         run_write(connection.clone(), bytes.clone()),
                     ));
                 }
