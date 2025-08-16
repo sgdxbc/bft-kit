@@ -533,9 +533,9 @@ mod parse {
     impl Extract for ShardedStorageConfig {
         fn extract(settings: &Settings) -> anyhow::Result<Self> {
             Ok(Self {
-                num_shard: settings.get("num_shard")?,
-                num_node: settings.get("num_node")?,
-                num_active_copy: settings.get("num_active_copy")?,
+                num_shard: settings.get("big.num-shard")?,
+                num_node: settings.get("big.num-node")?,
+                num_active_copy: settings.get("big.num-active-copy")?,
             })
         }
     }

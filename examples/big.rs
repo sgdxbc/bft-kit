@@ -26,19 +26,19 @@ async fn main() -> anyhow::Result<()> {
     let mut settings = Settings::new();
     settings.parse(
         "
-num_node 4
-num_shard 100
-num_active_copy 1
+big.num-node            4
+big.num-shard           100
+big.num-active-copy     1
 ",
     );
-    let addrs = (0..settings.get("num_node")?)
+    let addrs = (0..settings.get("big.num-node")?)
         .map(|i| ([127, 0, 0, 1], 5000 + i).into())
         .collect::<Vec<_>>();
 
     let mut service_tasks = JoinSet::new();
     let cancel = CancellationToken::new();
-    for index in 0..settings.get("num_node")? {
-        let app = DataShardingSchema::<Kv>::new(settings.get("num_shard")?);
+    for index in 0..settings.get("big.num-node")? {
+        let app = DataShardingSchema::<Kv>::new(settings.get("big.num-shard")?);
         let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
         let service = Service::new(app, Replica::new(Workload), storage);
         service_tasks.spawn(run_service(

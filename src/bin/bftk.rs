@@ -1,12 +1,17 @@
 use std::{env::args, fs::File, sync::Arc, time::Duration};
 
-use anyhow::Context;
 use bft_kit::{
     app::null::Null,
     init_logging_file,
     parse::Settings,
-    replication::{ReplicaIndex, unreplicated},
-    service::unsharded::{Service, transport::run_service},
+    replication::{ReplicaIndex, in_memory, unreplicated},
+    service::{
+        big::{
+            self, ShardedStorage,
+            app::{DataShardingSchema, Kv},
+        },
+        unsharded,
+    },
     set_affinity_block_on,
     workload::{CloseLoopWorker, NanoLatencies, OpenLoopWorker, transport::run_worker},
 };
@@ -17,28 +22,28 @@ use tokio_util::sync::CancellationToken;
 fn main() -> anyhow::Result<()> {
     init_logging_file(File::create("/tmp/bftk-log")?);
     set_affinity_block_on(async {
+        let mut settings = Settings::new();
+        for name in ["addr", "task"] {
+            settings.parse(&read_to_string(format!("bftk-configs/{name}.conf")).await?);
+            if let Ok(s) = read_to_string(format!("bftk-configs/{name}.override.conf")).await {
+                settings.parse(&s)
+            }
+        }
         match args().nth(1).as_deref() {
-            Some("workload") => workload().await,
+            Some("workload") => workload(settings).await,
             Some("service") => {
                 let index = args()
                     .nth(2)
                     .ok_or(anyhow::format_err!("missing index"))?
                     .parse()?;
-                service(index).await
+                service(index, settings).await
             }
             _ => anyhow::bail!("unknown command"),
         }
     })
 }
 
-async fn workload() -> anyhow::Result<()> {
-    let mut settings = Settings::new();
-    for name in ["addr", "client", "protocol", "workload"] {
-        settings.parse(&read_to_string(format!("bftk-configs/{name}.conf")).await?);
-        if let Ok(s) = read_to_string(format!("bftk-configs/{name}.override.conf")).await {
-            settings.parse(&s)
-        }
-    }
+async fn workload(settings: Settings) -> anyhow::Result<()> {
     let settings = Arc::new(settings);
 
     let cancel = CancellationToken::new();
@@ -83,29 +88,24 @@ async fn worker(
         let worker = CloseLoopWorker::new(Null, client);
         run_worker(worker, client_id, settings.get_values("addr")?, cancel).await
     } else {
-        let target_tput = settings.get("workload.open-loop.target-tput")?;
+        let target_tput = settings.get("open-loop.target-tput")?;
         let worker = OpenLoopWorker::new(Null, client, target_tput);
         run_worker(worker, client_id, settings.get_values("addr")?, cancel).await
     }
 }
 
-async fn service(index: ReplicaIndex) -> anyhow::Result<()> {
-    let mut settings = Settings::new();
-    for name in ["addr", "protocol"] {
-        settings.parse(
-            &read_to_string(format!("bftk-configs/{name}.conf"))
-                .await
-                .context(name)?,
-        );
-        if let Ok(s) = read_to_string(format!("bftk-configs/{name}.override.conf")).await {
-            settings.parse(&s)
-        }
-    }
-
-    let service = Service::new(Null, unreplicated::Replica::new());
+async fn service(index: ReplicaIndex, settings: Settings) -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
-
-    let service_task = run_service(service, index, settings.get_values("addr")?, cancel.clone());
+    let service_task = {
+        let cancel = cancel.clone();
+        async {
+            match &*settings.get::<String>("protocol")? {
+                "unsharded" => service_unsharded(index, settings, cancel).await,
+                "big" => service_big(index, settings, cancel).await,
+                _ => anyhow::bail!("unknown protocol"),
+            }
+        }
+    };
     let cancel_task = async move {
         ctrl_c().await?;
         cancel.cancel();
@@ -113,4 +113,66 @@ async fn service(index: ReplicaIndex) -> anyhow::Result<()> {
     };
     try_join!(service_task, cancel_task)?;
     Ok(())
+}
+
+async fn service_unsharded(
+    index: ReplicaIndex,
+    settings: Settings,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    let service = unsharded::Service::new(Null, unreplicated::Replica::new());
+    unsharded::transport::run_service(service, index, settings.get_values("addr")?, cancel).await
+}
+
+async fn service_big(
+    index: ReplicaIndex,
+    settings: Settings,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    let app = DataShardingSchema::<Kv>::new(settings.get("num_shard")?);
+    let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
+    let service = big::Service::new(app, in_memory::Replica::new(Workload), storage);
+    big::transport::run_service(service, index, settings.get_values("addr")?, cancel, false).await
+}
+
+struct Workload;
+
+mod workload {
+    use bft_kit::{
+        service::{
+            ServiceApp,
+            big::app::{DataShardingSchema, Kv, KvOp},
+        },
+        workload::WorkloadState,
+    };
+    use rand::{Rng as _, seq::IteratorRandom};
+    use rand_distr::Alphanumeric;
+
+    impl WorkloadState for super::Workload {
+        type App = DataShardingSchema<Kv>;
+
+        fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
+            let mut rng = rand::rng();
+            let k = format!("k{:04}", (0..10_000).choose(&mut rng).unwrap());
+
+            Some(vec![if rng.random_ratio(50, 100) {
+                let v = rng
+                    .sample_iter(Alphanumeric)
+                    .take(10)
+                    .map(char::from)
+                    .collect();
+                KvOp::Put(k, v)
+            } else {
+                KvOp::Get(k)
+            }])
+        }
+
+        fn validate(
+            &self,
+            _op: <Self::App as ServiceApp>::Op,
+            _res: <Self::App as ServiceApp>::Res,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
 }
