@@ -1,4 +1,10 @@
-use std::{collections::HashMap, future::pending, net::SocketAddr, sync::Mutex, time::Duration};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    future::pending,
+    net::SocketAddr,
+    sync::Mutex,
+    time::Duration,
+};
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, Endpoint, Incoming};
@@ -20,6 +26,12 @@ use crate::{
 
 use super::*;
 
+struct ConnectionTables {
+    client: HashMap<ClientId, (Connection, JoinHandle<()>)>,
+    replica: HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
+    storage: HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
+}
+
 pub async fn run_service<
     A: DataShardingApp,
     R: ReplicationState<Request<A::Op>>,
@@ -34,32 +46,50 @@ where
     Service<A, R, S>: ServiceState<
             A,
             ServiceSend = ServiceSend<R, S>,
-            ServiceMessage = ServiceMessage<R, S>,
+            ServiceMessage = ServiceMessage<R::Message, S::Message>,
             Metadata = R::Metadata,
         >,
-    ServiceMessage<R, S>: Decode<()>,
     Request<A::Op>: Decode<()>,
+    R::Message: Decode<()>,
+    S::Message: Decode<()>,
     Reply<A::Res, R::Metadata>: Encode,
-    HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<ServiceSend<R, S>>,
+    HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>:
+        PerformSend<R::Send> + PerformSend<S::Send>,
 {
     let mut endpoint = Endpoint::server(server_config(), addrs[replica_index as usize])?;
     endpoint.set_default_client_config(client_config());
 
-    let connections = Mutex::new(HashMap::new());
+    let connections = Mutex::new((HashMap::new(), HashMap::new()));
     let active = async {
         for (index, &addr) in addrs.iter().enumerate().skip(replica_index as usize + 1) {
-            let connection = endpoint.connect(addr, "server.example")?.await?;
-            connection
+            let replica_connection = endpoint.connect(addr, "server.example")?.await?;
+            replica_connection
                 .open_uni()
                 .await?
                 .write_all(&replica_index.to_le_bytes())
                 .await?;
-            connections.lock().unwrap().insert(index as _, connection);
+            connections
+                .lock()
+                .unwrap()
+                .0
+                .insert(index as _, replica_connection);
+
+            let storage_connection = endpoint.connect(addr, "server.example")?.await?;
+            storage_connection
+                .open_uni()
+                .await?
+                .write_all(&replica_index.to_le_bytes())
+                .await?;
+            connections
+                .lock()
+                .unwrap()
+                .1
+                .insert(index as _, storage_connection);
         }
         anyhow::Ok(())
     };
     let passive = async {
-        for _ in 0..replica_index {
+        for _ in 0..replica_index * 2 {
             let connection = endpoint
                 .accept()
                 .await
@@ -71,29 +101,35 @@ where
                 .await?
                 .read_exact(&mut index)
                 .await?;
-            connections
-                .lock()
-                .unwrap()
-                .insert(ReplicaIndex::from_le_bytes(index), connection);
+            let index = ReplicaIndex::from_le_bytes(index);
+            let (replica_connections, storage_connections) = &mut *connections.lock().unwrap();
+            if let Entry::Vacant(entry) = replica_connections.entry(index) {
+                entry.insert(connection);
+            } else {
+                storage_connections.insert(index, connection);
+            }
         }
         anyhow::Ok(())
     };
     try_join!(active, passive)?;
-    let connections = connections.into_inner().unwrap();
-    anyhow::ensure!(connections.len() == addrs.len() - 1);
+    let (replica_connections, storage_connections) = connections.into_inner().unwrap();
+    anyhow::ensure!(replica_connections.len() == addrs.len() - 1);
     tracing::info!("replica interconnections established");
+    anyhow::ensure!(storage_connections.len() == addrs.len() - 1);
+    tracing::info!("storage interconnections established");
 
     enum Event {
         Accept(Box<Incoming>),
         Message(Vec<u8>),
         Closed(ClientId),
         ReplicationMessage(Vec<u8>),
+        StorageMessage(Vec<u8>),
         Tick,
     }
     let (event_sender, mut event_receiver) = mpsc::channel(1000);
 
     let mut replica_table = HashMap::new();
-    for (index, connection) in connections {
+    for (index, connection) in replica_connections {
         let task = spawn(trace_error(
             "replica connection read",
             read_loop(
@@ -106,15 +142,33 @@ where
         replica_table.insert(index, (connection, task));
     }
 
-    let mut client_table = HashMap::new();
+    let mut storage_table = HashMap::new();
+    for (index, connection) in storage_connections {
+        let task = spawn(trace_error(
+            "storage connection read",
+            read_loop(
+                connection.clone(),
+                event_sender.clone(),
+                Event::StorageMessage,
+                None,
+            ),
+        ));
+        storage_table.insert(index, (connection, task));
+    }
+
+    let mut connection_tables = ConnectionTables {
+        client: Default::default(),
+        replica: replica_table,
+        storage: storage_table,
+    };
+
     let write_tracker = TaskTracker::new();
 
     let start = Instant::now();
     let mut tick_after = service_proceed(
         &mut service,
         start.elapsed(),
-        &client_table,
-        &replica_table,
+        &connection_tables,
         &write_tracker,
     )?;
     loop {
@@ -150,11 +204,13 @@ where
                         Event::Closed(client_id),
                     ),
                 ));
-                client_table.insert(client_id, (connection, task));
+                connection_tables
+                    .client
+                    .insert(client_id, (connection, task));
                 continue;
             }
             Event::Closed(client_id) => {
-                client_table.remove(&client_id);
+                connection_tables.client.remove(&client_id);
                 continue;
             }
             Event::Message(bytes) => {
@@ -165,29 +221,37 @@ where
             Event::ReplicationMessage(bytes) => {
                 let (message, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                 anyhow::ensure!(len == bytes.len());
-                service.receive(Message::Intermediate(message))
+                service.receive(Message::Intermediate(ServiceMessage::Replication(message)))
+            }
+            Event::StorageMessage(bytes) => {
+                let (message, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
+                anyhow::ensure!(len == bytes.len());
+                service.receive(Message::Intermediate(ServiceMessage::Storage(message)))
             }
             Event::Tick => {}
         }
         tick_after = service_proceed(
             &mut service,
             start.elapsed(),
-            &client_table,
-            &replica_table,
+            &connection_tables,
             &write_tracker,
         )?
     }
 
     write_tracker.close();
     write_tracker.wait().await;
-    if !client_table.is_empty() {
+    if !connection_tables.client.is_empty() {
         tracing::warn!("shut down with open client connections")
     }
-    for (connection, task) in client_table.into_values() {
+    for (connection, task) in connection_tables.client.into_values() {
         connection.close(0u32.into(), b"service shutting down");
         task.await.unwrap() // not cancelled anywhere and propagate panics
     }
-    for (connection, task) in replica_table.into_values() {
+    for (connection, task) in connection_tables.replica.into_values() {
+        connection.close(0u32.into(), b"service shutting down");
+        task.await.unwrap() // not cancelled anywhere and propagate panics
+    }
+    for (connection, task) in connection_tables.storage.into_values() {
         connection.close(0u32.into(), b"service shutting down");
         task.await.unwrap() // not cancelled anywhere and propagate panics
     }
@@ -201,20 +265,20 @@ fn service_proceed<
 >(
     service: &mut Service<A, R, S>,
     since_start: Duration,
-    client_table: &HashMap<ClientId, (Connection, JoinHandle<()>)>,
-    replica_table: &HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
+    connection_tables: &ConnectionTables,
     write_tracker: &TaskTracker,
 ) -> anyhow::Result<Option<Duration>>
 where
     Service<A, R, S>: ServiceState<A, ServiceSend = ServiceSend<R, S>, Metadata = R::Metadata>,
     Reply<A::Res, R::Metadata>: Encode,
-    HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<ServiceSend<R, S>>,
+    HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>:
+        PerformSend<R::Send> + PerformSend<S::Send>,
 {
     loop {
         match service.proceed(since_start) {
             Proceed::Pending(tick_after) => break Ok(tick_after),
             Proceed::Send(Send::Reply(client_id, reply)) => {
-                let Some((connection, _)) = client_table.get(&client_id) else {
+                let Some((connection, _)) = connection_tables.client.get(&client_id) else {
                     tracing::warn!(%client_id, "client connection not found");
                     continue;
                 };
@@ -226,23 +290,12 @@ where
                     ),
                 ));
             }
-            Proceed::Send(Send::Intermediate(send)) => {
-                replica_table.perform(send, write_tracker)?
+            Proceed::Send(Send::Intermediate(ServiceSend::Replication(send))) => {
+                connection_tables.replica.perform(send, write_tracker)?
             }
-        }
-    }
-}
-
-impl<T, R: State, S: State> PerformSend<ServiceSend<R, S>> for T
-where
-    T: PerformSend<R::Send> + PerformSend<S::Send>,
-{
-    fn perform(&self, send: ServiceSend<R, S>, send_tracker: &TaskTracker) -> anyhow::Result<()> {
-        match send {
-            ServiceSend::Replication(send) => {
-                PerformSend::<R::Send>::perform(self, send, send_tracker)
+            Proceed::Send(Send::Intermediate(ServiceSend::Storage(send))) => {
+                connection_tables.storage.perform(send, write_tracker)?
             }
-            ServiceSend::Storage(send) => PerformSend::<S::Send>::perform(self, send, send_tracker),
         }
     }
 }

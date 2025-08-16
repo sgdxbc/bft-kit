@@ -158,8 +158,8 @@ pub mod transport {
                 ServiceMessage = R::Message,
                 Metadata = R::Metadata,
             >,
-        R::Message: Decode<()>,
         Request<A::Op>: Decode<()>,
+        R::Message: Decode<()>,
         Reply<A::Res, R::Metadata>: Encode,
         HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
     {
