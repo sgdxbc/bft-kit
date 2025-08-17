@@ -1,4 +1,5 @@
 from common import *
+import load_config
 import service_start
 import service_stop
 import workload
@@ -6,6 +7,7 @@ from time import sleep
 
 
 def task(service_hosts, workload_hosts):
+    load_config.task(service_hosts + workload_hosts)
     try:
         service_start.task(service_hosts)
         sleep(1)

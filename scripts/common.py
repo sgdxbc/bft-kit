@@ -5,6 +5,8 @@ service_port = 5000
 build_dir = "/tmp/bftk"
 deploy_dir = "/app"
 nfs = False
+terraform = False
+login_key = None
 
 
 def local(cmd):

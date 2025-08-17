@@ -4,13 +4,7 @@ from common import *
 def task(hosts):
     tasks = []
     for index, host in enumerate(hosts):
-        if not (nfs and index != 0):
-            local(f"rsync -a configs/*.conf {host}:{deploy_dir}/bftk-configs/")
-        proc = ssh(
-            host,
-            f"cd {deploy_dir} && TOKIO_WORKER_THREADS=6 ./bftk service {index}",
-            detach=True,
-        )
+        proc = ssh(host, f"cd {deploy_dir} && ./bftk service {index}", detach=True)
         tasks.append((host, proc))
     return tasks
 

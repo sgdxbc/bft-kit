@@ -8,9 +8,12 @@ def task(build_host, sync_hosts):
     remote_build.task(build_host)
     ssh(build_host, f"cp {build_dir}/target/release/bftk {deploy_dir}/")
     if not nfs:
-        # TODO sync to other hosts
-        pass
+        for host in sync_hosts:
+            ssh(build_host, f"rsync -a {deploy_dir}/bftk {host}:{deploy_dir}/")
 
 
 if __name__ == "__main__":
-    task(clusters.service[0]["host"], [item["host"] for item in clusters.service[1:]])
+    task(
+        clusters.service[0]["host"],
+        [item["host"] for item in clusters.service[1:] + clusters.workload],
+    )

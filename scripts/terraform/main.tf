@@ -11,6 +11,24 @@ provider "aws" {
   region = "ap-south-1"
 }
 
+variable "stop" {
+  description = "Stop the instances"
+  type        = bool
+  default     = false
+}
+
+variable "service_count" {
+  description = "Number of service instances"
+  type        = number
+  default     = 1
+}
+
+variable "workload_count" {
+  description = "Number of workload instances"
+  type        = number
+  default     = 1
+}
+
 data "aws_ami" "ubuntu" {
   most_recent = true
 
@@ -76,11 +94,11 @@ resource "aws_security_group" "main" {
 }
 
 resource "aws_key_pair" "main" {
-  public_key = file("~/.ssh/id_rsa.pub")
+  public_key = file("~/.ssh/aws.pub")
 }
 
-resource "aws_instance" "main" {
-  count = 1
+resource "aws_instance" "service" {
+  count = var.service_count
 
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = "c6a.large"
@@ -89,6 +107,32 @@ resource "aws_instance" "main" {
   key_name               = aws_key_pair.main.key_name
 }
 
-output "instances" {
-  value = aws_instance.main.*
+resource "aws_instance" "workload" {
+  count = var.workload_count
+
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = "c6a.large"
+  subnet_id              = resource.aws_subnet.main.id
+  vpc_security_group_ids = [resource.aws_security_group.main.id]
+  key_name               = aws_key_pair.main.key_name
+}
+
+resource "aws_ec2_instance_state" "_1" {
+  count       = var.service_count
+  instance_id = aws_instance.service[count.index].id
+  state       = var.stop ? "stopped" : "running"
+}
+
+resource "aws_ec2_instance_state" "_2" {
+  count       = var.workload_count
+  instance_id = aws_instance.workload[count.index].id
+  state       = var.stop ? "stopped" : "running"
+}
+
+output "service_instances" {
+  value = aws_instance.service.*
+}
+
+output "workload_instances" {
+  value = aws_instance.workload.*
 }
