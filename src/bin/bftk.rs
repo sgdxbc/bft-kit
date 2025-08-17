@@ -95,19 +95,25 @@ async fn worker(
 }
 
 async fn service(index: ReplicaIndex, settings: Settings) -> anyhow::Result<()> {
+    let settings = Arc::new(settings);
     let cancel = CancellationToken::new();
     let service_task = {
+        let settings = settings.clone();
         let cancel = cancel.clone();
-        async {
+        async move {
             match &*settings.get::<String>("protocol")? {
-                "unsharded" => service_unsharded(index, settings, cancel).await,
-                "big" => service_big(index, settings, cancel).await,
+                "unsharded" => service_unsharded(index, &settings, cancel).await,
+                "big" => service_big(index, &settings, cancel).await,
                 _ => anyhow::bail!("unknown protocol"),
             }
         }
     };
     let cancel_task = async move {
-        ctrl_c().await?;
+        if settings.get::<String>("protocol")? != "big" {
+            ctrl_c().await?
+        } else {
+            sleep(Duration::from_secs_f32(settings.get("workload.duration")?)).await
+        }
         cancel.cancel();
         anyhow::Ok(())
     };
@@ -117,7 +123,7 @@ async fn service(index: ReplicaIndex, settings: Settings) -> anyhow::Result<()> 
 
 async fn service_unsharded(
     index: ReplicaIndex,
-    settings: Settings,
+    settings: &Settings,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let service = unsharded::Service::new(Null, unreplicated::Replica::new());
@@ -126,7 +132,7 @@ async fn service_unsharded(
 
 async fn service_big(
     index: ReplicaIndex,
-    settings: Settings,
+    settings: &Settings,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let app = DataShardingSchema::<Kv>::new(settings.get("big.num-shard")?);

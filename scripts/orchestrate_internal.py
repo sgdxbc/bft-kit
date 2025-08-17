@@ -5,11 +5,12 @@ from time import sleep
 
 
 def task(service_hosts):
-    try:
-        service_start.task(service_hosts)
-        sleep(10)
-    finally:
-        service_stop.task(service_hosts)
+    processes = service_start.task(service_hosts)
+    for host, proc in processes:
+        if proc.wait() != 0:
+            print(f"Service on {host} failed")
+            service_stop.task(service_hosts)
+            break
 
 
 if __name__ == "__main__":
