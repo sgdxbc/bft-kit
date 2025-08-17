@@ -18,6 +18,7 @@ words:
   - feistel
   - Givre
   - hdrhistogram
+  - hostnames
   - hotstuff
   - keccak
   - libhotstuff
