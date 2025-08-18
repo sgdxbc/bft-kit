@@ -245,6 +245,7 @@ where
         )?
     }
 
+    let elapsed = start.elapsed();
     write_tracker.close();
     write_tracker.wait().await;
     if !connection_tables.client.is_empty() {
@@ -264,8 +265,9 @@ where
     }
 
     tracing::info!(
-        "Replica {replica_index}\n  {} ops, 50th {:?}",
+        "Replica {replica_index}\n  {} ops, tput {:.2} ops/sec, 50th {:?}",
         service.execute_latencies.len(),
+        service.execute_latencies.len() as f32 / elapsed.as_secs_f32(),
         Duration::from_nanos(service.execute_latencies.value_at_quantile(0.5))
     );
     Ok(())

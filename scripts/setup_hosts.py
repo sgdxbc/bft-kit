@@ -8,7 +8,7 @@ def build_task(build_host):
         build_host,
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --profile minimal -y",
     )
-    ssh(build_host, "sudo apt update && sudo apt install -y gcc")
+    ssh(build_host, "sudo apt-get update && sudo apt-get install -y gcc")
     if login_key:
         local(f"rsync -a {login_key} {build_host}:.ssh/id_ed25519")
         write_file(
