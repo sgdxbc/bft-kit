@@ -119,9 +119,7 @@ where
     try_join!(active, passive)?;
     let (replica_connections, storage_connections) = connections.into_inner().unwrap();
     anyhow::ensure!(replica_connections.len() == addrs.len() - 1);
-    tracing::info!("replica interconnections established");
     anyhow::ensure!(storage_connections.len() == addrs.len() - 1);
-    tracing::info!("storage interconnections established");
 
     enum Event {
         Accept(Box<Incoming>),
@@ -146,7 +144,6 @@ where
         ));
         replica_table.insert(index, (connection, task));
     }
-
     let mut storage_table = HashMap::new();
     for (index, connection) in storage_connections {
         let task = spawn(trace_error(
@@ -160,16 +157,18 @@ where
         ));
         storage_table.insert(index, (connection, task));
     }
-
     let mut connection_tables = ConnectionTables {
         client: Default::default(),
         replica: replica_table,
         storage: storage_table,
     };
+    tracing::info!("interconnections established");
 
     let write_tracker = TaskTracker::new();
     if let Err(err) = fs::remove_dir_all(STORAGE_DIR).await {
-        tracing::warn!(%replica_index, %err);
+        tracing::debug!(%replica_index, %err)
+    } else {
+        tracing::warn!("removed previous storage directory")
     }
     fs::create_dir(STORAGE_DIR).await?;
 
@@ -183,6 +182,7 @@ where
         send_reply,
     )
     .await?;
+    tracing::info!(%replica_index, "enter event loop");
     loop {
         let tick = async {
             if let Some(tick_after) = tick_after {

@@ -2,7 +2,7 @@ from common import *
 
 
 def task(hosts, log_path):
-    local("mkdir -p logs")
+    local("rm -r logs; mkdir logs")
     with open("logs/.gitignore", "w") as f:
         f.write("*")
     for host in hosts:
