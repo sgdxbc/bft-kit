@@ -7,7 +7,7 @@ use bft_kit::{
     replication::{ReplicaIndex, in_memory, unreplicated},
     service::{
         big::{
-            self, ShardedStorage,
+            self, FullReplicationStorage, ShardedStorage,
             app::{DataShardingSchema, Kv},
         },
         unsharded,
@@ -135,10 +135,19 @@ async fn service_big(
     settings: &Settings,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let app = DataShardingSchema::<Kv>::new(settings.get("big.num-shard")?);
-    let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
-    let service = big::Service::new(app, in_memory::Replica::new(Workload), storage);
-    big::transport::run_service(service, index, settings.get_values("addr")?, cancel, false).await
+    let num_shard = settings.get("big.num-shard")?;
+    let app = DataShardingSchema::<Kv>::new(num_shard);
+    let replica = in_memory::Replica::new(Workload);
+    let addrs = settings.get_values("addr")?;
+    if settings.get("big.sharded")? {
+        let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
+        let service = big::Service::new(app, replica, storage);
+        big::transport::run_service(service, index, addrs, cancel, false).await
+    } else {
+        let storage = FullReplicationStorage::new(num_shard, &app);
+        let service = big::Service::new(app, replica, storage);
+        big::transport::run_service(service, index, addrs, cancel, false).await
+    }
 }
 
 struct Workload;

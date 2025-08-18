@@ -2,7 +2,7 @@ from common import *
 import load_config
 import service_start
 import service_stop
-from time import sleep
+import download_logs
 
 
 def task(service_hosts):
@@ -13,6 +13,7 @@ def task(service_hosts):
             print(f"Service on {host} failed")
             service_stop.task(service_hosts)
             break
+    download_logs.task(service_hosts, "/tmp/bftk-log")
 
 
 if __name__ == "__main__":

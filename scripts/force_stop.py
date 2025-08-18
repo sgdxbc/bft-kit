@@ -1,5 +1,4 @@
 from common import *
-from time import sleep
 
 
 def task(hosts):

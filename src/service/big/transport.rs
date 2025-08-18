@@ -11,7 +11,7 @@ use quinn::{Connection, Endpoint, Incoming};
 use tokio::{
     select, spawn,
     sync::mpsc,
-    task::JoinHandle,
+    task::{JoinHandle, yield_now},
     time::{Instant, sleep},
     try_join,
 };
@@ -173,8 +173,10 @@ where
         start.elapsed(),
         &connection_tables,
         &write_tracker,
+        &cancel,
         send_reply,
-    )?;
+    )
+    .await?;
     loop {
         let tick = async {
             if let Some(tick_after) = tick_after {
@@ -241,8 +243,10 @@ where
             start.elapsed(),
             &connection_tables,
             &write_tracker,
+            &cancel,
             send_reply,
-        )?
+        )
+        .await?
     }
 
     let elapsed = start.elapsed();
@@ -273,7 +277,7 @@ where
     Ok(())
 }
 
-fn service_proceed<
+async fn service_proceed<
     A: DataShardingApp,
     R: ReplicationState<Request<A::Op>>,
     S: StorageState<A::Shard>,
@@ -282,6 +286,7 @@ fn service_proceed<
     since_start: Duration,
     connection_tables: &ConnectionTables,
     write_tracker: &TaskTracker,
+    cancel: &CancellationToken,
     send_reply: bool,
 ) -> anyhow::Result<Option<Duration>>
 where
@@ -291,6 +296,9 @@ where
         PerformSend<R::Send> + PerformSend<S::Send>,
 {
     loop {
+        if cancel.is_cancelled() {
+            break Ok(None); // consider better returned value
+        }
         match service.proceed(since_start) {
             Proceed::Pending(tick_after) => break Ok(tick_after),
             Proceed::Send(Send::Reply(..)) if !send_reply => {}
@@ -314,6 +322,7 @@ where
                 connection_tables.storage.perform(send, write_tracker)?
             }
         }
+        yield_now().await
     }
 }
 
