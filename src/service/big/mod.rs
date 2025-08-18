@@ -78,7 +78,7 @@ pub struct Service<
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     replicated: VecDeque<Replicated<A, R>>,
     fetched_shards: HashMap<ShardIndex, A::Shard>,
-    fetching_indices: HashSet<ShardIndex>,
+    fetch_indices: HashSet<ShardIndex>,
     num_skip: StateVersion,
 
     submit_buffer: Vec<Request<A::Op>>,
@@ -111,7 +111,7 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A:
             replies: Default::default(),
             replicated: Default::default(),
             fetched_shards: Default::default(),
-            fetching_indices: Default::default(),
+            fetch_indices: Default::default(),
             num_skip: 0,
             submit_buffer: Default::default(),
             send_buffer: Default::default(),
@@ -186,27 +186,32 @@ where
                 return self.proceed(since_start);
             }
 
-            match executing.execute.proceed(&mut self.fetched_shards) {
-                DataShardingExecuteOutput::RequireAccess(required_indices) => {
-                    for shard_index in required_indices {
-                        assert!(!self.fetched_shards.contains_key(&shard_index));
-                        if self.fetching_indices.insert(shard_index) {
+            if self.fetched_shards.len() == self.fetch_indices.len() {
+                match executing.execute.proceed(&mut self.fetched_shards) {
+                    DataShardingExecuteOutput::RequireAccess(required_indices) => {
+                        for shard_index in required_indices {
+                            assert!(!self.fetched_shards.contains_key(&shard_index));
+                            let inserted = self.fetch_indices.insert(shard_index);
+                            assert!(inserted);
                             self.storage.fetch(shard_index)
                         }
                     }
-                }
-                DataShardingExecuteOutput::Complete(res) => {
-                    self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
-                    self.storage.bump(take(&mut self.fetched_shards));
-                    let reply = Reply {
-                        client_seq: executing.client_seq,
-                        res,
-                        metadata: metadata.clone(),
-                    };
-                    self.replies.insert(executing.client_id, reply.clone());
-                    let proceed = Proceed::Send(Send::Reply(executing.client_id, reply));
-                    executing_buffer.pop_front();
-                    return proceed;
+                    DataShardingExecuteOutput::Complete(res) => {
+                        self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
+
+                        self.storage.bump(take(&mut self.fetched_shards));
+                        self.fetch_indices.clear();
+
+                        let reply = Reply {
+                            client_seq: executing.client_seq,
+                            res,
+                            metadata: metadata.clone(),
+                        };
+                        self.replies.insert(executing.client_id, reply.clone());
+                        let proceed = Proceed::Send(Send::Reply(executing.client_id, reply));
+                        executing_buffer.pop_front();
+                        return proceed;
+                    }
                 }
             }
         }
@@ -224,7 +229,6 @@ where
             }
             Proceed::Output(StorageStateOutput::Fetched(shard_index, shard)) => {
                 self.fetched_shards.insert(shard_index, shard);
-                self.fetching_indices.remove(&shard_index);
                 return self.proceed(since_start);
             }
             Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
@@ -236,9 +240,11 @@ where
         while let Some(request) = self.submit_buffer.pop() {
             self.replication.submit(request)
         }
+        // TODO some nicer rate limiter
         if self.replicated.len() >= 10 {
             return Proceed::Pending(storage_tick_after);
         }
+
         match self.replication.proceed(since_start) {
             Proceed::Pending(tick_after) => {
                 Proceed::Pending(earliest([storage_tick_after, tick_after]))
@@ -375,9 +381,10 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
                 )));
             return;
         }
-        if !self.fetching.insert(index) {
-            return;
-        }
+
+        let inserted = self.fetching.insert(index);
+        assert!(inserted);
+
         let fetch = message::Fetch {
             version: self.version,
             shard_index: index,
