@@ -15,7 +15,8 @@ use crate::{
 };
 
 use super::{
-    ClientId, ClientSeq, Message, Reply, Request, Send, ServiceApp, ServiceIndex, ServiceState,
+    ClientId, ClientSeq, Message, Output, Reply, Request, Send, ServiceApp, ServiceIndex,
+    ServiceState,
 };
 
 pub mod app;
@@ -52,11 +53,17 @@ pub trait StorageState<S>: State<Output = StorageStateOutput<S>> {
     fn fetch(&mut self, index: ShardIndex);
     // TODO an interface for fetch shard ahead
     fn bump(&mut self, shards: HashMap<ShardIndex, S>);
+
+    fn read_ok(&mut self, key: String, value: Vec<u8>);
+    fn write_ok(&mut self, key: String);
 }
 
 pub enum StorageStateOutput<S> {
     Fetched(ShardIndex, S),
     Skipped(StateVersion), // number of versions to skip execute
+
+    Read(String),
+    Write(String, Vec<u8>),
 }
 
 pub struct Service<
@@ -135,6 +142,14 @@ where
     type ServiceSend = ServiceSend<R, S>;
     type ServiceMessage = ServiceMessage<R::Message, S::Message>;
     type Metadata = R::Metadata;
+
+    fn read_ok(&mut self, key: String, value: Vec<u8>) {
+        self.storage.read_ok(key, value)
+    }
+
+    fn write_ok(&mut self, key: String) {
+        self.storage.write_ok(key)
+    }
 }
 
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>> State
@@ -144,7 +159,7 @@ where
     Reply<A::Res, R::Metadata>: Clone,
 {
     type Send = Send<Reply<A::Res, R::Metadata>, <Self as ServiceState<A>>::ServiceSend>;
-    type Output = Never;
+    type Output = Output;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(send) = self.send_buffer.pop() {
             return Proceed::Send(send);
@@ -196,6 +211,12 @@ where
             Proceed::Pending(tick_after) => tick_after,
             Proceed::Send(send) => {
                 return Proceed::Send(Send::Intermediate(ServiceSend::Storage(send)));
+            }
+            Proceed::Output(StorageStateOutput::Read(key)) => {
+                return Proceed::Output(Output::Read(key));
+            }
+            Proceed::Output(StorageStateOutput::Write(key, value)) => {
+                return Proceed::Output(Output::Write(key, value));
             }
             Proceed::Output(StorageStateOutput::Fetched(shard_index, shard)) => {
                 self.shards.insert(shard_index, shard);
@@ -389,6 +410,14 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
         self.shards.push(stored_shards);
         self.fetching.clear()
     }
+
+    fn read_ok(&mut self, _key: String, _value: Vec<u8>) {
+        unreachable!()
+    }
+
+    fn write_ok(&mut self, _key: String) {
+        unreachable!()
+    }
 }
 
 impl<S: Clone> State for ShardedStorage<S> {
@@ -485,6 +514,14 @@ impl<S: Clone> StorageState<S> for FullReplicationStorage<S> {
 
     fn bump(&mut self, shards: HashMap<ShardIndex, S>) {
         self.shards.extend(shards)
+    }
+
+    fn read_ok(&mut self, _key: String, _value: Vec<u8>) {
+        todo!()
+    }
+
+    fn write_ok(&mut self, _key: String) {
+        todo!()
     }
 }
 

@@ -4,13 +4,12 @@ use std::{
 };
 
 use crate::{
-    Never,
     app::AppState,
     replication::ReplicationState,
     state::{Proceed, State},
 };
 
-use super::{ClientId, Message, Reply, Request, Send, ServiceApp, ServiceState};
+use super::{ClientId, Message, Output, Reply, Request, Send, ServiceApp, ServiceState};
 
 pub struct Service<A: AppState, R: ReplicationState<Request<A::Op>>> {
     app: A,
@@ -50,6 +49,14 @@ where
     type ServiceSend = R::Send;
     type ServiceMessage = R::Message;
     type Metadata = R::Metadata;
+
+    fn read_ok(&mut self, _key: String, _value: Vec<u8>) {
+        unreachable!()
+    }
+
+    fn write_ok(&mut self, _key: String) {
+        unreachable!()
+    }
 }
 
 impl<A: AppState, R: ReplicationState<Request<A::Op>>> State for Service<A, R>
@@ -59,7 +66,7 @@ where
     // ServiceMessage<R, A>: std::fmt::Debug,
 {
     type Send = Send<Reply<A::Res, R::Metadata>, R::Send>;
-    type Output = Never;
+    type Output = Output;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(send) = self.send_buffer.pop() {
             return Proceed::Send(send);
@@ -346,6 +353,7 @@ pub mod transport {
                 Proceed::Send(Send::Intermediate(send)) => {
                     replica_table.perform(send, write_tracker)?
                 }
+                Proceed::Output(_) => unreachable!(),
             }
         }
     }

@@ -40,6 +40,7 @@ type ServiceMessage = super::ServiceMessage<<R as State>::Message, <S as State>:
 struct SystemState {
     services: Vec<Service<A, R>>,
     service_network: VecDeque<(ServiceIndex, ServiceMessage)>,
+    service_storage: Vec<HashMap<String, Vec<u8>>>,
     replies: Vec<(ClientId, Reply<Vec<KvRes>, ()>)>,
 }
 
@@ -56,6 +57,7 @@ fn idle_pending() {
     let mut state = SystemState {
         services: vec![service],
         service_network: Default::default(),
+        service_storage: Default::default(),
         replies: Default::default(),
     };
     let proceed = state.services[0].proceed(Duration::ZERO);
@@ -94,6 +96,14 @@ impl SystemState {
                         self.service_network
                             .push_back((index as _, ServiceMessage::Storage(message.clone())))
                     }
+                }
+                Proceed::Output(Output::Read(key)) => {
+                    let value = self.service_storage[index as usize][&key].clone();
+                    self.services[index as usize].read_ok(key, value)
+                }
+                Proceed::Output(Output::Write(key, value)) => {
+                    self.service_storage[index as usize].insert(key.clone(), value);
+                    self.services[index as usize].write_ok(key)
                 }
             }
         }
@@ -143,6 +153,7 @@ fn one_service() {
     let mut state = SystemState {
         services: vec![service],
         service_network: Default::default(),
+        service_storage: Default::default(),
         replies: Default::default(),
     };
     state.services[0].receive(Message::Request(request(
@@ -174,6 +185,7 @@ impl SystemState {
                 })
                 .collect(),
             service_network: Default::default(),
+            service_storage: Default::default(),
             replies: Default::default(),
         }
     }

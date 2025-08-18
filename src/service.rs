@@ -1,6 +1,6 @@
 use bincode::{Decode, Encode};
 
-use crate::{Never, state::State};
+use crate::state::State;
 
 pub mod big;
 pub mod unsharded;
@@ -8,13 +8,16 @@ pub mod unsharded;
 pub trait ServiceState<A: ServiceApp>:
     State<
         Send = Send<Reply<A::Res, Self::Metadata>, Self::ServiceSend>,
-        Output = Never,
+        Output = Output,
         Message = Message<Request<A::Op>, Self::ServiceMessage>,
     >
 {
     type ServiceSend;
     type ServiceMessage;
     type Metadata;
+
+    fn read_ok(&mut self, key: String, value: Vec<u8>);
+    fn write_ok(&mut self, key: String);
 }
 
 pub trait ServiceApp {
@@ -33,6 +36,11 @@ pub enum Dest {
     One(ServiceIndex),
     Multi(Vec<ServiceIndex>),
     All,
+}
+
+pub enum Output {
+    Read(String),
+    Write(String, Vec<u8>),
 }
 
 #[derive(Debug)]

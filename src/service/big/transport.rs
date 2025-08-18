@@ -9,7 +9,7 @@ use std::{
 use bincode::{Decode, Encode};
 use quinn::{Connection, Endpoint, Incoming};
 use tokio::{
-    select, spawn,
+    fs, select, spawn,
     sync::mpsc,
     task::{JoinHandle, yield_now},
     time::{Instant, sleep},
@@ -31,6 +31,8 @@ struct ConnectionTables {
     replica: HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
     storage: HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
 }
+
+const STORAGE_DIR: &'static str = "/tmp/bftk-storage";
 
 pub async fn run_service<
     A: DataShardingApp,
@@ -166,6 +168,10 @@ where
     };
 
     let write_tracker = TaskTracker::new();
+    if let Err(err) = fs::remove_dir_all(STORAGE_DIR).await {
+        tracing::warn!(%replica_index, %err);
+    }
+    fs::create_dir(STORAGE_DIR).await?;
 
     let start = Instant::now();
     let mut tick_after = service_proceed(
@@ -268,12 +274,22 @@ where
         task.await.unwrap() // not cancelled anywhere and propagate panics
     }
 
-    tracing::info!(
-        "Replica {replica_index}\n  {} ops, tput {:.2} ops/sec, 50th {:?}",
+    let latency_stat = format!(
+        "{} ops, tput {:.2} ops/sec, 50th {:?}",
         service.execute_latencies.len(),
         service.execute_latencies.len() as f32 / elapsed.as_secs_f32(),
         Duration::from_nanos(service.execute_latencies.value_at_quantile(0.5))
     );
+    let mut total_size = 0;
+    let mut read_dir = fs::read_dir(STORAGE_DIR).await?;
+    while let Some(entry) = read_dir.next_entry().await? {
+        let metadata = entry.metadata().await?;
+        if metadata.is_file() {
+            total_size += metadata.len()
+        }
+    }
+    fs::remove_dir_all(STORAGE_DIR).await?;
+    tracing::info!("Replica {replica_index}\n  {latency_stat}\n  storage size {total_size}");
     Ok(())
 }
 
@@ -320,6 +336,15 @@ where
             }
             Proceed::Send(Send::Intermediate(ServiceSend::Storage(send))) => {
                 connection_tables.storage.perform(send, write_tracker)?
+            }
+            // TODO concurrent to main proceed loop for better performance
+            Proceed::Output(Output::Read(key)) => {
+                let value = fs::read(format!("{STORAGE_DIR}/{key}")).await?;
+                service.read_ok(key, value)
+            }
+            Proceed::Output(Output::Write(key, value)) => {
+                fs::write(format!("{STORAGE_DIR}/{key}"), value).await?;
+                service.write_ok(key)
             }
         }
         yield_now().await
