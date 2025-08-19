@@ -562,59 +562,50 @@ impl<S: Clone> State for ShardedStorage<S> {
 }
 
 pub struct FullReplicationStorage<S> {
-    output_buffer: VecDeque<StorageStateOutput<S>>,
+    shards: Vec<S>,
+    output_buffer: Vec<StorageStateOutput<S>>,
 }
 
-impl<S: Encode> FullReplicationStorage<S> {
+impl<S: Clone> FullReplicationStorage<S> {
     pub fn new(num_shard: ShardIndex, app: &impl DataShardingApp<Shard = S>) -> Self {
         Self {
-            output_buffer: (0..num_shard)
-                .map(|shard_index| {
-                    let value =
-                        bincode::encode_to_vec(app.new_shard(shard_index), BINCODE_CONFIG).unwrap();
-                    StorageStateOutput::<S>::Write(format!("shard_{}", shard_index), value)
-                })
+            shards: (0..num_shard)
+                .map(|shard_index| app.new_shard(shard_index))
                 .collect(),
+            output_buffer: Default::default(),
         }
     }
 }
 
-impl<S: Encode + Decode<()>> StorageState<S> for FullReplicationStorage<S> {
+impl<S: Clone> StorageState<S> for FullReplicationStorage<S> {
     fn fetch(&mut self, index: ShardIndex) {
-        self.output_buffer
-            .push_back(StorageStateOutput::Read(format!("shard_{}", index)));
+        self.output_buffer.push(StorageStateOutput::Fetched(
+            index,
+            self.shards[index as usize].clone(),
+        ));
     }
 
     fn bump(&mut self, shards: HashMap<ShardIndex, S>) {
-        self.output_buffer
-            .extend(shards.into_iter().map(|(index, shard)| {
-                let value = bincode::encode_to_vec(shard, BINCODE_CONFIG).unwrap();
-                StorageStateOutput::Write(format!("shard_{}", index), value)
-            }))
+        for (index, shard) in shards {
+            self.shards[index as usize] = shard
+        }
     }
 
-    fn read_ok(&mut self, key: String, value: Vec<u8>) {
-        let index = key
-            .strip_prefix("shard_")
-            .and_then(|s| s.parse::<ShardIndex>().ok())
-            .unwrap();
-        self.output_buffer.push_back(StorageStateOutput::Fetched(
-            index,
-            bincode::decode_from_slice(&value, BINCODE_CONFIG)
-                .unwrap()
-                .0,
-        ))
+    fn read_ok(&mut self, _key: String, _value: Vec<u8>) {
+        unreachable!()
     }
 
-    fn write_ok(&mut self, _key: String) {}
+    fn write_ok(&mut self, _key: String) {
+        unreachable!()
+    }
 }
 
-impl<S: Encode + Decode<()>> State for FullReplicationStorage<S> {
+impl<S: Clone> State for FullReplicationStorage<S> {
     type Send = Never;
     type Output = StorageStateOutput<S>;
 
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some(output) = self.output_buffer.pop_front() {
+        if let Some(output) = self.output_buffer.pop() {
             return Proceed::Output(output);
         }
         Proceed::Pending(None)
