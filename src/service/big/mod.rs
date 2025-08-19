@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
     mem::take,
     time::{Duration, Instant},
 };
@@ -341,9 +341,10 @@ pub struct ShardedStorage<S> {
     replica_index: ReplicaIndex,
 
     version: StateVersion, // of shards[-1]
-    shards: Vec<HashMap<ShardIndex, S>>,
+    stored_shards: Vec<HashMap<ShardIndex, S>>,
     fetching: HashSet<ShardIndex>,
-    fetched_table: HashMap<ShardIndex, S>,
+    fetched_shards: HashMap<ShardIndex, (StateVersion, S)>,
+    last_versions: Vec<StateVersion>, // [shard index -> version]
     reordering_fetch_table: HashMap<StateVersion, HashMap<ShardIndex, HashSet<ReplicaIndex>>>,
 
     proceed_buffer: Vec<Proceed<ShardedStorageSend<S>, StorageStateOutput<S>>>,
@@ -382,15 +383,16 @@ impl<S> ShardedStorage<S> {
             }
         }
         Self {
-            config,
             replica_index,
             // stored_indices,
             version: 0,
-            shards: vec![shards],
+            stored_shards: vec![shards],
             fetching: Default::default(),
-            fetched_table: Default::default(),
+            fetched_shards: Default::default(),
+            last_versions: vec![0; config.num_shard as _],
             reordering_fetch_table: Default::default(),
             proceed_buffer: Default::default(),
+            config,
         }
     }
 }
@@ -414,7 +416,7 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
     fn fetch(&mut self, index: ShardIndex) {
         // tracing::trace!(%self.replica_index, shard_index = %index);
 
-        if let Some(shard) = self.shards.last().unwrap().get(&index) {
+        if let Some(shard) = self.stored_shards.last().unwrap().get(&index) {
             self.proceed_buffer
                 .push(Proceed::Output(StorageStateOutput::Fetched(
                     index,
@@ -427,7 +429,7 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
         assert!(inserted);
 
         let fetch = message::Fetch {
-            version: self.version,
+            version: Some(self.version),
             shard_index: index,
             service_index: self.replica_index,
         };
@@ -436,16 +438,36 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
             .push(Proceed::Send((dest, ShardedStorageMessage::Fetch(fetch))))
     }
 
-    fn bump(&mut self, mut shards: HashMap<ShardIndex, S>) {
+    fn bump(&mut self, shards: HashMap<ShardIndex, S>) {
         tracing::trace!(%self.replica_index, %self.version, "bumping");
-        let mut stored_shards = self.shards.last().unwrap().clone();
-        for (shard_index, shard) in &mut stored_shards {
-            if let Some(new_shard) = shards.remove(shard_index) {
-                *shard = new_shard;
+
+        if !self.fetching.is_empty() {
+            tracing::warn!(%self.replica_index, "bump with ongoing fetches");
+            self.fetching.clear()
+        }
+
+        let last_stored_shards = self.stored_shards.last().unwrap();
+        let stored_shards = last_stored_shards
+            .keys()
+            .map(|&index| {
+                let shard = shards.get(&index).unwrap_or(&last_stored_shards[&index]);
+                (index, shard.clone())
+            })
+            .collect();
+        self.stored_shards.push(stored_shards);
+        self.version += 1;
+
+        for &index in shards.keys() {
+            self.last_versions[index as usize] = self.version;
+            if let Entry::Occupied(entry) = self.fetched_shards.entry(index) {
+                let (version, _) = entry.get();
+                if *version < self.version {
+                    entry.remove();
+                }
             }
         }
 
-        self.version += 1;
+        let stored_shards = self.stored_shards.last().unwrap();
         if let Some(fetches) = self.reordering_fetch_table.remove(&self.version) {
             for (shard_index, service_indices) in fetches {
                 let fetch_ok = message::FetchOk {
@@ -459,9 +481,6 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
                 )))
             }
         }
-
-        self.shards.push(stored_shards);
-        self.fetching.clear()
     }
 
     fn read_ok(&mut self, _key: String, _value: Vec<u8>) {
@@ -481,12 +500,12 @@ impl<S: Clone> State for ShardedStorage<S> {
         if let Some(proceed) = self.proceed_buffer.pop() {
             return proceed;
         }
-        if let Some(&index) = self.fetched_table.keys().next() {
-            self.fetching.remove(&index);
-            return Proceed::Output(StorageStateOutput::Fetched(
-                index,
-                self.fetched_table.remove(&index).unwrap(),
-            ));
+        for &index in &self.fetching {
+            if let Some((version, shard)) = self.fetched_shards.get(&index) {
+                assert!(*version >= self.last_versions[index as usize]);
+                self.fetching.remove(&index);
+                return Proceed::Output(StorageStateOutput::Fetched(index, shard.clone()));
+            }
         }
         Proceed::Pending(None)
     }
@@ -495,9 +514,10 @@ impl<S: Clone> State for ShardedStorage<S> {
     fn receive(&mut self, message: Self::Message) {
         match message {
             ShardedStorageMessage::Fetch(fetch) => {
-                if fetch.version > self.version {
+                let version = fetch.version.unwrap_or(self.version);
+                if version > self.version {
                     self.reordering_fetch_table
-                        .entry(fetch.version)
+                        .entry(version)
                         .or_default()
                         .entry(fetch.shard_index)
                         .or_default()
@@ -507,16 +527,16 @@ impl<S: Clone> State for ShardedStorage<S> {
 
                 // TODO reply with bump certificate >= fetch.version if available
 
-                let first_version = self.version - (self.shards.len() - 1) as StateVersion;
-                assert!(fetch.version >= first_version);
+                let first_version = self.version - (self.stored_shards.len() - 1) as StateVersion;
+                assert!(version >= first_version);
                 let Some(shard) =
-                    self.shards[(fetch.version - first_version) as usize].get(&fetch.shard_index)
+                    self.stored_shards[(version - first_version) as usize].get(&fetch.shard_index)
                 else {
                     // should not happen (except faulty fetching)
                     return;
                 };
                 let fetch_ok = message::FetchOk {
-                    version: fetch.version,
+                    version,
                     shard_index: fetch.shard_index,
                     shard: shard.clone(),
                 };
@@ -526,16 +546,16 @@ impl<S: Clone> State for ShardedStorage<S> {
                 )))
             }
             ShardedStorageMessage::FetchOk(fetch_ok) => {
-                if fetch_ok.version > self.version {
-                    // currently not happen
+                if fetch_ok.version < self.last_versions[fetch_ok.shard_index as usize] {
                     return;
                 }
-                if fetch_ok.version < self.version || !self.fetching.contains(&fetch_ok.shard_index)
+                if let Some(&(version, _)) = self.fetched_shards.get(&fetch_ok.shard_index)
+                    && fetch_ok.version <= version
                 {
                     return;
                 }
-                self.fetched_table
-                    .insert(fetch_ok.shard_index, fetch_ok.shard);
+                self.fetched_shards
+                    .insert(fetch_ok.shard_index, (fetch_ok.version, fetch_ok.shard));
             }
         }
     }
@@ -613,7 +633,7 @@ pub mod message {
 
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct Fetch {
-        pub version: StateVersion,
+        pub version: Option<StateVersion>, // None for the last version available
         pub shard_index: ShardIndex,
         pub service_index: ServiceIndex,
     }
