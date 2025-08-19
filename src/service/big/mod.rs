@@ -52,7 +52,8 @@ pub enum DataShardingExecuteOutput<R> {
 
 pub trait StorageState<S>: State<Output = StorageStateOutput<S>> {
     fn fetch(&mut self, index: ShardIndex);
-    // TODO an interface for fetch shard ahead
+    #[allow(unused_variables)]
+    fn fetch_ahead(&mut self, index: ShardIndex, version_ahead: StateVersion) {}
     fn bump(&mut self, shards: HashMap<ShardIndex, S>);
 
     fn read_ok(&mut self, key: String, value: Vec<u8>);
@@ -261,8 +262,14 @@ where
         while let Some(request) = self.submit_buffer.pop() {
             self.replication.submit(request)
         }
-        // TODO some nicer rate limiter
-        if self.replicated.len() >= 10 {
+        if self
+            .replicated
+            .iter()
+            .map(|(buffer, _)| buffer.len())
+            .sum::<usize>()
+            >= 100
+        // TODO configurable
+        {
             return Proceed::Pending(storage_tick_after);
         }
         match self.replication.proceed(since_start) {
@@ -275,10 +282,24 @@ where
             Proceed::Output(replicated) => {
                 let mut executing_buffer = VecDeque::new();
                 let start = Instant::now();
-                for request in replicated.logs {
+                let logs_version_ahead = self
+                    .replicated
+                    .iter()
+                    .map(|(buffer, _)| buffer.len())
+                    .sum::<usize>();
+                for (i, request) in replicated.logs.into_iter().enumerate() {
                     // may query ahead here as an optimization
+                    let mut execute = self.app.new_execute(request.op);
+                    if let DataShardingExecuteOutput::RequireAccess(required_indices) =
+                        execute.proceed(&mut Default::default())
+                    {
+                        for index in required_indices {
+                            self.storage
+                                .fetch_ahead(index, (logs_version_ahead + i) as _)
+                        }
+                    }
                     executing_buffer.push_back(Executing {
-                        execute: self.app.new_execute(request.op),
+                        execute,
                         client_id: request.client_id,
                         client_seq: request.client_seq,
                         start,
