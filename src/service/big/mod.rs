@@ -5,6 +5,7 @@ use std::{
 };
 
 use bincode::{Decode, Encode};
+use lru::LruCache;
 use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
 
 use crate::{
@@ -71,20 +72,23 @@ pub struct Service<
     R: ReplicationState<Request<A::Op>>,
     S: State = ShardedStorage<<A as DataShardingApp>::Shard>,
 > {
+    // generic sub states
     app: A,
     replication: R,
     storage: S,
-
+    // essential state data
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     replicated: VecDeque<Replicated<A, R>>,
     fetched_shards: HashMap<ShardIndex, A::Shard>,
     fetch_indices: HashSet<ShardIndex>,
     num_skip: StateVersion,
-
+    // additional data for optimization
+    shard_cache: LruCache<ShardIndex, A::Shard>,
+    // cross interface buffers
     submit_buffer: Vec<Request<A::Op>>,
     #[allow(clippy::type_complexity)] // this matches <Self as State>::Send
     send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<R, S>>>,
-
+    // stats
     execute_latencies: NanoLatencies,
 }
 
@@ -113,6 +117,7 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A:
             fetched_shards: Default::default(),
             fetch_indices: Default::default(),
             num_skip: 0,
+            shard_cache: LruCache::new(10.try_into().unwrap()), //
             submit_buffer: Default::default(),
             send_buffer: Default::default(),
             execute_latencies: NanoLatencies::new(3).unwrap(),
@@ -138,6 +143,7 @@ pub enum ServiceMessage<RM, SM> {
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>>
     ServiceState<A> for Service<A, R, S>
 where
+    A::Shard: Clone,
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
 {
@@ -157,6 +163,7 @@ where
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>> State
     for Service<A, R, S>
 where
+    A::Shard: Clone,
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
 {
@@ -191,14 +198,24 @@ where
                     DataShardingExecuteOutput::RequireAccess(required_indices) => {
                         for shard_index in required_indices {
                             assert!(!self.fetched_shards.contains_key(&shard_index));
+                            if let Some(shard) = self.shard_cache.get(&shard_index) {
+                                self.fetched_shards.insert(shard_index, shard.clone());
+                            } else {
+                                self.storage.fetch(shard_index)
+                            }
                             let inserted = self.fetch_indices.insert(shard_index);
-                            assert!(inserted);
-                            self.storage.fetch(shard_index)
+                            assert!(inserted)
+                        }
+                        if self.fetched_shards.len() == self.fetch_indices.len() {
+                            return self.proceed(since_start);
                         }
                     }
                     DataShardingExecuteOutput::Complete(res) => {
                         self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
 
+                        for (&shard_index, shard) in &self.fetched_shards {
+                            self.shard_cache.put(shard_index, shard.clone());
+                        }
                         self.storage.bump(take(&mut self.fetched_shards));
                         self.fetch_indices.clear();
 
@@ -216,24 +233,28 @@ where
             }
         }
 
-        let storage_tick_after = match self.storage.proceed(since_start) {
-            Proceed::Pending(tick_after) => tick_after,
-            Proceed::Send(send) => {
-                return Proceed::Send(Send::Intermediate(ServiceSend::Storage(send)));
-            }
-            Proceed::Output(StorageStateOutput::Read(key)) => {
-                return Proceed::Output(Output::Read(key));
-            }
-            Proceed::Output(StorageStateOutput::Write(key, value)) => {
-                return Proceed::Output(Output::Write(key, value));
-            }
-            Proceed::Output(StorageStateOutput::Fetched(shard_index, shard)) => {
-                self.fetched_shards.insert(shard_index, shard);
-                return self.proceed(since_start);
-            }
-            Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
-                self.num_skip += num_skipped;
-                return self.proceed(since_start);
+        let storage_tick_after = loop {
+            match self.storage.proceed(since_start) {
+                Proceed::Pending(tick_after) => break tick_after,
+                Proceed::Send(send) => {
+                    return Proceed::Send(Send::Intermediate(ServiceSend::Storage(send)));
+                }
+                Proceed::Output(StorageStateOutput::Read(key)) => {
+                    return Proceed::Output(Output::Read(key));
+                }
+                Proceed::Output(StorageStateOutput::Write(key, value)) => {
+                    return Proceed::Output(Output::Write(key, value));
+                }
+                Proceed::Output(StorageStateOutput::Fetched(shard_index, shard)) => {
+                    self.fetched_shards.insert(shard_index, shard);
+                    if self.fetched_shards.len() == self.fetch_indices.len() {
+                        return self.proceed(since_start);
+                    }
+                }
+                Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
+                    self.num_skip += num_skipped;
+                    return self.proceed(since_start);
+                }
             }
         };
 
@@ -244,7 +265,6 @@ where
         if self.replicated.len() >= 10 {
             return Proceed::Pending(storage_tick_after);
         }
-
         match self.replication.proceed(since_start) {
             Proceed::Pending(tick_after) => {
                 Proceed::Pending(earliest([storage_tick_after, tick_after]))
@@ -390,11 +410,9 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
             shard_index: index,
             service_index: self.replica_index,
         };
-        let recipient = Dest::Multi(self.config.node_indices_of(index));
-        self.proceed_buffer.push(Proceed::Send((
-            recipient,
-            ShardedStorageMessage::Fetch(fetch),
-        )))
+        let dest = Dest::Multi(self.config.node_indices_of(index));
+        self.proceed_buffer
+            .push(Proceed::Send((dest, ShardedStorageMessage::Fetch(fetch))))
     }
 
     fn bump(&mut self, mut shards: HashMap<ShardIndex, S>) {

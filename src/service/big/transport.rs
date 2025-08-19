@@ -32,7 +32,7 @@ struct ConnectionTables {
     storage: HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
 }
 
-const STORAGE_DIR: &'static str = "/tmp/bftk-storage";
+const STORAGE_DIR: &str = "/tmp/bftk-storage";
 
 pub async fn run_service<
     A: DataShardingApp,

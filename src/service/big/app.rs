@@ -6,13 +6,17 @@ use std::{
 
 use bincode::{Decode, Encode};
 use derive_where::derive_where;
+use tokio_util::bytes::Bytes;
 
 use crate::{
     app::utxo::{UtxoError, UtxoId, UtxoOp, UtxoOpInput},
     service::ServiceApp,
 };
 
-use super::{DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState, ShardIndex};
+use super::{
+    BINCODE_CONFIG, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState,
+    ShardIndex,
+};
 
 #[derive_where(Debug, Clone)]
 pub struct DataShardingSchema<A> {
@@ -226,5 +230,66 @@ impl StaticDispatch for DataShardingSchema<Utxo> {
             );
         }
         Ok(())
+    }
+}
+
+pub struct BytesShard<A>(pub A);
+
+impl<A: ServiceApp> ServiceApp for BytesShard<A> {
+    type Op = A::Op;
+    type Res = A::Res;
+}
+
+pub struct BytesShardExecute<E>(E);
+
+impl<A: DataShardingApp> DataShardingApp for BytesShard<A>
+where
+    A::Shard: Encode + Decode<()>,
+{
+    type Shard = Bytes;
+    fn new_shard(&self, index: ShardIndex) -> Self::Shard {
+        bincode::encode_to_vec(self.0.new_shard(index), BINCODE_CONFIG)
+            .unwrap()
+            .into()
+    }
+    type Execute = BytesShardExecute<A::Execute>;
+    fn new_execute(&self, op: Self::Op) -> Self::Execute {
+        BytesShardExecute(self.0.new_execute(op))
+    }
+}
+
+impl<E: DataShardingExecuteState<A>, A: DataShardingApp> DataShardingExecuteState<BytesShard<A>>
+    for BytesShardExecute<E>
+where
+    A::Shard: Encode + Decode<()>,
+{
+    fn proceed(
+        &mut self,
+        shards: &mut HashMap<ShardIndex, <BytesShard<A> as DataShardingApp>::Shard>,
+    ) -> DataShardingExecuteOutput<<BytesShard<A> as ServiceApp>::Res> {
+        let mut decoded_shards = shards
+            .iter()
+            .map(|(&index, bytes)| {
+                (
+                    index,
+                    bincode::decode_from_slice(bytes, BINCODE_CONFIG).unwrap().0,
+                )
+            })
+            .collect();
+        let res = match self.0.proceed(&mut decoded_shards) {
+            DataShardingExecuteOutput::Complete(res) => res,
+            DataShardingExecuteOutput::RequireAccess(indices) => {
+                return DataShardingExecuteOutput::RequireAccess(indices);
+            }
+        };
+        for (shard_index, shard) in decoded_shards {
+            shards.insert(
+                shard_index,
+                bincode::encode_to_vec(shard, BINCODE_CONFIG)
+                    .unwrap()
+                    .into(),
+            );
+        }
+        DataShardingExecuteOutput::Complete(res)
     }
 }
