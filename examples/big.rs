@@ -46,6 +46,7 @@ big.num-active-copy     1
             index,
             addrs.clone(),
             cancel.clone(),
+            format!("/tmp/big-storage-{index}"),
             false,
         ));
     }
@@ -65,18 +66,13 @@ impl WorkloadState for Workload {
 
     fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
         let mut rng = rand::rng();
-        let k = format!("k{:04}", (0..10_000).choose(&mut rng).unwrap());
-
-        Some(vec![if rng.random_ratio(50, 100) {
-            let v = rng
-                .sample_iter(Alphanumeric)
-                .take(10)
-                .map(char::from)
-                .collect();
-            KvOp::Put(k, v)
-        } else {
-            KvOp::Get(k)
-        }])
+        let k = format!("k{:04}", (0..1_000).choose(&mut rng).unwrap());
+        let v = rng
+            .sample_iter(Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        Some(vec![KvOp::Put(k, v)])
     }
 
     fn validate(

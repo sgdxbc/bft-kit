@@ -32,8 +32,6 @@ struct ConnectionTables {
     storage: HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
 }
 
-const STORAGE_DIR: &str = "/tmp/bftk-storage";
-
 pub async fn run_service<
     A: DataShardingApp,
     R: ReplicationState<Request<A::Op>>,
@@ -43,6 +41,7 @@ pub async fn run_service<
     replica_index: ReplicaIndex,
     addrs: Vec<SocketAddr>,
     cancel: CancellationToken,
+    storage_dir: impl AsRef<str>,
     send_reply: bool,
 ) -> anyhow::Result<()>
 where
@@ -165,12 +164,14 @@ where
     tracing::info!("interconnections established");
 
     let write_tracker = TaskTracker::new();
-    if let Err(err) = fs::remove_dir_all(STORAGE_DIR).await {
+
+    let storage_dir = storage_dir.as_ref();
+    if let Err(err) = fs::remove_dir_all(storage_dir).await {
         tracing::debug!(%replica_index, %err)
     } else {
         tracing::warn!("removed previous storage directory")
     }
-    fs::create_dir(STORAGE_DIR).await?;
+    fs::create_dir(storage_dir).await?;
 
     let start = Instant::now();
     let mut tick_after = service_proceed(
@@ -179,6 +180,7 @@ where
         &connection_tables,
         &write_tracker,
         &cancel,
+        storage_dir,
         send_reply,
     )
     .await?;
@@ -250,6 +252,7 @@ where
             &connection_tables,
             &write_tracker,
             &cancel,
+            storage_dir,
             send_reply,
         )
         .await?
@@ -281,14 +284,14 @@ where
         Duration::from_nanos(service.execute_latencies.value_at_quantile(0.5))
     );
     let mut total_size = 0;
-    let mut read_dir = fs::read_dir(STORAGE_DIR).await?;
+    let mut read_dir = fs::read_dir(storage_dir).await?;
     while let Some(entry) = read_dir.next_entry().await? {
         let metadata = entry.metadata().await?;
         if metadata.is_file() {
             total_size += metadata.len()
         }
     }
-    fs::remove_dir_all(STORAGE_DIR).await?;
+    fs::remove_dir_all(storage_dir).await?;
     tracing::info!("Replica {replica_index}\n  {latency_stat}\n  storage size {total_size}");
     Ok(())
 }
@@ -303,6 +306,7 @@ async fn service_proceed<
     connection_tables: &ConnectionTables,
     write_tracker: &TaskTracker,
     cancel: &CancellationToken,
+    storage_dir: &str,
     send_reply: bool,
 ) -> anyhow::Result<Option<Duration>>
 where
@@ -339,11 +343,11 @@ where
             }
             // TODO concurrent to main proceed loop for better performance
             Proceed::Output(Output::Read(key)) => {
-                let value = fs::read(format!("{STORAGE_DIR}/{key}")).await?;
+                let value = fs::read(format!("{storage_dir}/{key}")).await?;
                 service.read_ok(key, value)
             }
             Proceed::Output(Output::Write(key, value)) => {
-                fs::write(format!("{STORAGE_DIR}/{key}"), value).await?;
+                fs::write(format!("{storage_dir}/{key}"), value).await?;
                 service.write_ok(key)
             }
         }

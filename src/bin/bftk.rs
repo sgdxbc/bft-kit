@@ -130,6 +130,8 @@ async fn service_unsharded(
     unsharded::transport::run_service(service, index, settings.get_values("addr")?, cancel).await
 }
 
+const STORAGE_DIR: &str = "/tmp/bftk-storage";
+
 async fn service_big(
     index: ReplicaIndex,
     settings: &Settings,
@@ -142,11 +144,11 @@ async fn service_big(
     if settings.get("big.sharded")? {
         let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
         let service = big::Service::new(app, replica, storage);
-        big::transport::run_service(service, index, addrs, cancel, false).await
+        big::transport::run_service(service, index, addrs, cancel, STORAGE_DIR, false).await
     } else {
         let storage = FullReplicationStorage::new(num_shard, &app);
         let service = big::Service::new(app, replica, storage);
-        big::transport::run_service(service, index, addrs, cancel, false).await
+        big::transport::run_service(service, index, addrs, cancel, STORAGE_DIR, false).await
     }
 }
 
@@ -168,18 +170,13 @@ mod workload {
 
         fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
             let mut rng = rand::rng();
-            let k = format!("k{:04}", (0..10_000).choose(&mut rng).unwrap());
-
-            Some(vec![if rng.random_ratio(50, 100) {
-                let v = rng
-                    .sample_iter(Alphanumeric)
-                    .take(10)
-                    .map(char::from)
-                    .collect();
-                KvOp::Put(k, v)
-            } else {
-                KvOp::Get(k)
-            }])
+            let k = format!("k{:04}", (0..1_000).choose(&mut rng).unwrap());
+            let v = rng
+                .sample_iter(Alphanumeric)
+                .take(10)
+                .map(char::from)
+                .collect();
+            Some(vec![KvOp::Put(k, v)])
         }
 
         fn validate(
