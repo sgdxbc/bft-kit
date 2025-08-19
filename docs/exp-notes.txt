@@ -9,11 +9,13 @@ Choose open loop if can only choose it. No canonical "reply". Send happens at pr
 
 QUIC vs TCP
 ===========
-QUIC (quinn) adds noticeable overhead, but seems sensible for point to point secure.
+QUIC (quinn) adds noticeable overhead, but seems sensible for bringing point to point secure.
 
-QUIC allows connect before listen. Handy for trying things out quickly by hand.
+QUIC allows connect before listen. Simplifying interconnecting routine.
 
 QUIC support (encourage maybe?) ephemeral single message (unidirectional) stream. Not only potentially better performance (despite out of order message delivery which does not matter for distributed protocols) but also easier to program. TCP stream reader either explicitly framing or relying on self-delimited encoding schemas.
+
+QUIC allows overloading same 4-tuple by multiple connections.
 
 
 Arch & analyzing protocol parallelize-ability

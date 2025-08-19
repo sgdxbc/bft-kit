@@ -15,7 +15,7 @@ use bft_kit::{
     set_affinity_block_on,
     workload::{CloseLoopWorker, NanoLatencies, OpenLoopWorker, transport::run_worker},
 };
-use rand::random;
+use rand::{SeedableRng as _, random, rngs::StdRng};
 use tokio::{fs::read_to_string, signal::ctrl_c, task::JoinSet, time::sleep, try_join};
 use tokio_util::sync::CancellationToken;
 
@@ -139,7 +139,10 @@ async fn service_big(
 ) -> anyhow::Result<()> {
     let num_shard = settings.get("big.num-shard")?;
     let app = DataShardingSchema::<Kv>::new(num_shard);
-    let replica = in_memory::Replica::new(Workload, settings.get("in-memory.batch-size")?);
+    let replica = in_memory::Replica::new(
+        Workload(StdRng::seed_from_u64(117418)),
+        settings.get("in-memory.batch-size")?,
+    );
     let addrs = settings.get_values("addr")?;
     if settings.get("big.sharded")? {
         let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
@@ -152,7 +155,7 @@ async fn service_big(
     }
 }
 
-struct Workload;
+struct Workload(StdRng);
 
 mod workload {
     use bft_kit::{
@@ -169,9 +172,8 @@ mod workload {
         type App = DataShardingSchema<Kv>;
 
         fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
-            let mut rng = rand::rng();
-            let k = format!("k{:04}", (0..1_000).choose(&mut rng).unwrap());
-            let v = rng
+            let k = format!("k{:04}", (0..1_000).choose(&mut self.0).unwrap());
+            let v = (&mut self.0)
                 .sample_iter(Alphanumeric)
                 .take(10)
                 .map(char::from)

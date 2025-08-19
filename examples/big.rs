@@ -14,7 +14,7 @@ use bft_kit::{
     },
     workload::WorkloadState,
 };
-use rand::{Rng, seq::IteratorRandom};
+use rand::{Rng, SeedableRng, rngs::StdRng, seq::IteratorRandom};
 use rand_distr::Alphanumeric;
 use tokio::{task::JoinSet, time::sleep};
 use tokio_util::sync::CancellationToken;
@@ -40,7 +40,11 @@ big.num-active-copy     1
     for index in 0..settings.get("big.num-node")? {
         let app = DataShardingSchema::<Kv>::new(settings.get("big.num-shard")?);
         let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
-        let service = Service::new(app, Replica::new(Workload, 1), storage);
+        let service = Service::new(
+            app,
+            Replica::new(Workload(StdRng::seed_from_u64(117418)), 1),
+            storage,
+        );
         service_tasks.spawn(run_service(
             service,
             index,
@@ -59,15 +63,14 @@ big.num-active-copy     1
     Ok(())
 }
 
-struct Workload;
+struct Workload(StdRng);
 
 impl WorkloadState for Workload {
     type App = DataShardingSchema<Kv>;
 
     fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
-        let mut rng = rand::rng();
-        let k = format!("k{:04}", (0..1_000).choose(&mut rng).unwrap());
-        let v = rng
+        let k = format!("k{:04}", (0..1_000).choose(&mut self.0).unwrap());
+        let v = (&mut self.0)
             .sample_iter(Alphanumeric)
             .take(10)
             .map(char::from)
