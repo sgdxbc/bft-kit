@@ -40,7 +40,7 @@ big.num-active-copy     1
     for index in 0..settings.get("big.num-node")? {
         let app = DataShardingSchema::<Kv>::new(settings.get("big.num-shard")?);
         let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
-        let service = Service::new(app, Replica::new(Workload), storage);
+        let service = Service::new(app, Replica::new(Workload, 1), storage);
         service_tasks.spawn(run_service(
             service,
             index,

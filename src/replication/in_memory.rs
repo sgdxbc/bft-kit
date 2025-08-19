@@ -11,12 +11,17 @@ use super::{Replicated, ReplicationState};
 
 pub struct Replica<W> {
     workload: W,
+    batch_size: usize,
     seq: ClientSeq,
 }
 
 impl<W> Replica<W> {
-    pub fn new(workload: W) -> Self {
-        Self { workload, seq: 0 }
+    pub fn new(workload: W, batch_size: usize) -> Self {
+        Self {
+            workload,
+            batch_size,
+            seq: 0,
+        }
     }
 }
 
@@ -36,20 +41,22 @@ impl<W: WorkloadState> State for Replica<W> {
     >;
 
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        match self.workload.next_op() {
-            Some(op) => {
-                self.seq += 1;
-                let request = Request {
-                    op,
-                    client_id: 0,
-                    client_seq: self.seq,
-                };
-                Proceed::Output(Replicated {
-                    logs: vec![request],
-                    metadata: (),
-                })
-            }
-            None => Proceed::Pending(None),
+        let mut logs = Vec::new();
+        for _ in 0..self.batch_size {
+            let Some(op) = self.workload.next_op() else {
+                break;
+            };
+            self.seq += 1;
+            logs.push(Request {
+                op,
+                client_id: 0,
+                client_seq: self.seq,
+            })
+        }
+        if logs.is_empty() {
+            Proceed::Pending(None)
+        } else {
+            Proceed::Output(Replicated { logs, metadata: () })
         }
     }
 

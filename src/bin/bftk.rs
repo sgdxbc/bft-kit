@@ -137,7 +137,7 @@ async fn service_big(
 ) -> anyhow::Result<()> {
     let num_shard = settings.get("big.num-shard")?;
     let app = DataShardingSchema::<Kv>::new(num_shard);
-    let replica = in_memory::Replica::new(Workload);
+    let replica = in_memory::Replica::new(Workload, settings.get("in-memory.batch-size")?);
     let addrs = settings.get_values("addr")?;
     if settings.get("big.sharded")? {
         let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
