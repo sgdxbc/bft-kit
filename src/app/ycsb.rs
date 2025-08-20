@@ -7,9 +7,10 @@ pub enum YcsbOp {
 
 pub enum YcsbRes {
     Ok,
-    GetResult(String),
-    ScanResult(Vec<(String, String)>),
+    Err(String),
+    Get(String),
     NotFound,
+    Scan(Vec<(String, String)>),
 }
 
 // TODO workload

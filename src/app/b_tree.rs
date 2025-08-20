@@ -45,10 +45,10 @@ impl AppState for BTree {
                 None => YcsbRes::NotFound,
             },
             YcsbOp::Get(key) => match self.store.get(&key) {
-                Some(value) => YcsbRes::GetResult(value.clone()),
+                Some(value) => YcsbRes::Get(value.clone()),
                 None => YcsbRes::NotFound,
             },
-            YcsbOp::Scan(prefix, limit) => YcsbRes::ScanResult(
+            YcsbOp::Scan(prefix, limit) => YcsbRes::Scan(
                 self.store
                     .range(prefix..)
                     .take(limit)

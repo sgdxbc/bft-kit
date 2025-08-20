@@ -8,6 +8,7 @@ use crate::{
 
 pub mod b_tree;
 pub mod null;
+pub mod rocksdb;
 pub mod utxo;
 pub mod ycsb;
 
