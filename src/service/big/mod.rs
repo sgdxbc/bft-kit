@@ -442,19 +442,19 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
             .push(Proceed::Send((dest, ShardedStorageMessage::Fetch(fetch))))
     }
 
-    fn fetch_ahead(&mut self, index: ShardIndex, _version_ahead: StateVersion) {
-        // if self.stored_shards.last().unwrap().contains_key(&index) {
-        //     return;
-        // }
-        // let fetch = message::Fetch {
-        //     version: None,
-        //     shard_index: index,
-        //     replica_index: self.replica_index,
-        // };
-        // let dest = Dest::Multi(self.config.node_indices_of(index));
-        // self.proceed_buffer
-        //     .push(Proceed::Send((dest, ShardedStorageMessage::Fetch(fetch))))
-    }
+    // fn fetch_ahead(&mut self, index: ShardIndex, _version_ahead: StateVersion) {
+    //     if self.stored_shards.last().unwrap().contains_key(&index) {
+    //         return;
+    //     }
+    //     let fetch = message::Fetch {
+    //         version: None,
+    //         shard_index: index,
+    //         replica_index: self.replica_index,
+    //     };
+    //     let dest = Dest::Multi(self.config.node_indices_of(index));
+    //     self.proceed_buffer
+    //         .push(Proceed::Send((dest, ShardedStorageMessage::Fetch(fetch))))
+    // }
 
     fn bump(&mut self, mut shards: HashMap<ShardIndex, S>) {
         tracing::trace!(%self.replica_index, %self.version, "bumping");

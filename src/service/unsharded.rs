@@ -4,12 +4,13 @@ use std::{
 };
 
 use crate::{
+    Never,
     app::AppState,
     replication::ReplicationState,
     state::{Proceed, State},
 };
 
-use super::{ClientId, Message, Output, Reply, Request, Send, ServiceApp, ServiceState};
+use super::{ClientId, Message, Reply, Request, Send, ServiceApp, ServiceState};
 
 pub struct Service<A: AppState, R: ReplicationState<Request<A::Op>>> {
     app: A,
@@ -66,7 +67,7 @@ where
     // ServiceMessage<R, A>: std::fmt::Debug,
 {
     type Send = Send<Reply<A::Res, R::Metadata>, R::Send>;
-    type Output = Output;
+    type Output = Never;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(send) = self.send_buffer.pop() {
             return Proceed::Send(send);
@@ -162,6 +163,7 @@ pub mod transport {
         Service<A, R>: ServiceState<
                 A,
                 ServiceSend = R::Send,
+                Output = Never,
                 ServiceMessage = R::Message,
                 Metadata = R::Metadata,
             >,
@@ -330,7 +332,8 @@ pub mod transport {
         write_tracker: &TaskTracker,
     ) -> anyhow::Result<Option<Duration>>
     where
-        Service<A, R>: ServiceState<A, ServiceSend = R::Send, Metadata = R::Metadata>,
+        Service<A, R>:
+            ServiceState<A, ServiceSend = R::Send, Output = Never, Metadata = R::Metadata>,
         Reply<A::Res, R::Metadata>: Encode,
         HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
     {
@@ -353,7 +356,6 @@ pub mod transport {
                 Proceed::Send(Send::Intermediate(send)) => {
                     replica_table.perform(send, write_tracker)?
                 }
-                Proceed::Output(_) => unreachable!(),
             }
         }
     }

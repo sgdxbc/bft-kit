@@ -342,14 +342,7 @@ where
                 connection_tables.storage.perform(send, write_tracker)?
             }
             // TODO concurrent to main proceed loop for better performance
-            Proceed::Output(Output::Read(key)) => {
-                let value = fs::read(format!("{storage_dir}/{key}")).await?;
-                service.read_ok(key, value)
-            }
-            Proceed::Output(Output::Write(key, value)) => {
-                fs::write(format!("{storage_dir}/{key}"), value).await?;
-                service.write_ok(key)
-            }
+            Proceed::Output(_) => todo!(),
         }
         yield_now().await
     }

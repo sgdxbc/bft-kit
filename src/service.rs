@@ -8,7 +8,6 @@ pub mod unsharded;
 pub trait ServiceState<A: ServiceApp>:
     State<
         Send = Send<Reply<A::Res, Self::Metadata>, Self::ServiceSend>,
-        Output = Output,
         Message = Message<Request<A::Op>, Self::ServiceMessage>,
     >
 {
