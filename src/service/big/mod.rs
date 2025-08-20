@@ -588,7 +588,7 @@ impl<S: Encode + Decode<()>> FullReplicationStorage<S> {
             output_buffer: (0..num_shard)
                 .map(|index| {
                     let bytes =
-                        bincode::encode_to_vec(&app.new_shard(index), BINCODE_CONFIG).unwrap();
+                        bincode::encode_to_vec(app.new_shard(index), BINCODE_CONFIG).unwrap();
                     StorageStateOutput::Write(index.to_string(), bytes)
                 })
                 .collect(),

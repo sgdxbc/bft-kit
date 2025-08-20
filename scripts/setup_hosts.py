@@ -6,9 +6,9 @@ import clusters
 def build_task(build_host):
     ssh(
         build_host,
-        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --profile minimal -y",
+        "/bin/bash -l -c 'which cargo' || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --profile minimal -y",
     )
-    ssh(build_host, "sudo apt-get update && sudo apt-get install -y gcc")
+    ssh(build_host, "/bin/bash -l -c 'which cc' || (sudo apt-get update && sudo apt-get install -y clang)")
     if login_key:
         local(f"rsync -a {login_key} {build_host}:.ssh/id_ed25519")
         write_file(
