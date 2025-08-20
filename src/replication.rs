@@ -1,6 +1,6 @@
 use crate::state::State;
 
-pub mod in_memory;
+pub mod replay;
 pub mod transport;
 pub mod unreplicated;
 

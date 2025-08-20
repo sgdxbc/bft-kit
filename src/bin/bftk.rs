@@ -4,7 +4,7 @@ use bft_kit::{
     app::{null::Null, ycsb::YcsbWorkload},
     init_logging_file,
     parse::Configs,
-    replication::{ReplicaIndex, in_memory, unreplicated},
+    replication::{ReplicaIndex, replay, unreplicated},
     service::{
         big::{
             self, FullReplicationStorage, ShardedStorage,
@@ -104,7 +104,7 @@ async fn service(index: ReplicaIndex, configs: Configs) -> anyhow::Result<()> {
         async move {
             match &*configs.get::<String>("protocol")? {
                 "unsharded" => service_unsharded(index, &configs, cancel).await,
-                "big" => service_big(index, &configs, cancel).await,
+                // "big" => service_big(index, &configs, cancel).await,
                 _ => anyhow::bail!("unknown protocol"),
             }
         }
@@ -131,27 +131,27 @@ async fn service_unsharded(
     unsharded::transport::run_service(service, index, configs.get_values("addr")?, cancel).await
 }
 
-async fn service_big(
-    index: ReplicaIndex,
-    configs: &Configs,
-    cancel: CancellationToken,
-) -> anyhow::Result<()> {
-    let num_shard = configs.get("big.num-shard")?;
-    let app = DataShardingSchema::<Kv>::new(num_shard);
-    let workload = AdaptKv(YcsbWorkload::new(
-        configs.extract()?,
-        StdRng::seed_from_u64(117418),
-    ));
-    let replica = in_memory::Replica::new(workload, configs.get("in-memory.batch-size")?);
-    let addrs = configs.get_values("addr")?;
-    let service_config = configs.extract()?;
-    if configs.get("big.sharded")? {
-        let storage = ShardedStorage::new(configs.extract()?, index, [index].into(), &app);
-        let service = big::Service::new(app, replica, storage, service_config);
-        big::transport::run_service(service, index, addrs, cancel, false).await
-    } else {
-        let storage = FullReplicationStorage::new(num_shard, &app);
-        let service = big::Service::new(app, replica, storage, service_config);
-        big::transport::run_service(service, index, addrs, cancel, false).await
-    }
-}
+// async fn service_big(
+//     index: ReplicaIndex,
+//     configs: &Configs,
+//     cancel: CancellationToken,
+// ) -> anyhow::Result<()> {
+//     let num_shard = configs.get("big.num-shard")?;
+//     let app = DataShardingSchema::<Kv>::new(num_shard);
+//     let workload = AdaptKv(YcsbWorkload::new(
+//         configs.extract()?,
+//         StdRng::seed_from_u64(117418),
+//     ));
+//     let replica = replay::Replica::new(workload, configs.get("in-memory.batch-size")?);
+//     let addrs = configs.get_values("addr")?;
+//     let service_config = configs.extract()?;
+//     if configs.get("big.sharded")? {
+//         let storage = ShardedStorage::new(configs.extract()?, index, [index].into(), &app);
+//         let service = big::Service::new(app, replica, storage, service_config);
+//         big::transport::run_service(service, index, addrs, cancel, false).await
+//     } else {
+//         let storage = FullReplicationStorage::new(num_shard, &app);
+//         let service = big::Service::new(app, replica, storage, service_config);
+//         big::transport::run_service(service, index, addrs, cancel, false).await
+//     }
+// }
