@@ -6,17 +6,13 @@ use std::{
 
 use bincode::{Decode, Encode};
 use derive_where::derive_where;
-use tokio_util::bytes::Bytes;
 
 use crate::{
     app::utxo::{UtxoError, UtxoId, UtxoOp, UtxoOpInput},
     service::ServiceApp,
 };
 
-use super::{
-    BINCODE_CONFIG, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState,
-    ShardIndex,
-};
+use super::{DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState, ShardIndex};
 
 #[derive_where(Debug, Clone)]
 pub struct DataShardingSchema<A> {
@@ -167,6 +163,51 @@ impl StaticDispatch for DataShardingSchema<Kv> {
     }
 }
 
+pub mod ycsb {
+    use crate::{
+        app::ycsb::{Ycsb, YcsbOp, YcsbRes},
+        workload::WorkloadState,
+    };
+
+    use super::{DataShardingSchema, Kv, KvOp, KvRes};
+
+    pub struct AdaptKv<W>(pub W);
+
+    impl<W: WorkloadState<App = Ycsb>> WorkloadState for AdaptKv<W> {
+        type App = DataShardingSchema<Kv>;
+        type Metadata = W::Metadata;
+
+        fn next_op(
+            &mut self,
+        ) -> Option<(
+            <Self::App as crate::service::ServiceApp>::Op,
+            Self::Metadata,
+        )> {
+            let (op, metadata) = self.0.next_op()?;
+            let op = match op {
+                YcsbOp::Insert(key, value) | YcsbOp::Update(key, value) => KvOp::Put(key, value),
+                YcsbOp::Get(key) => KvOp::Get(key),
+                _ => unimplemented!(),
+            };
+            Some((vec![op], metadata))
+        }
+
+        fn complete(
+            &mut self,
+            metadata: Self::Metadata,
+            mut res: <Self::App as crate::service::ServiceApp>::Res,
+        ) -> anyhow::Result<()> {
+            anyhow::ensure!(res.len() == 1);
+            let res = match res.remove(0) {
+                KvRes::Put => YcsbRes::Ok,
+                KvRes::Get(Some(value)) => YcsbRes::Get(value),
+                KvRes::Get(None) => YcsbRes::NotFound,
+            };
+            self.0.complete(metadata, res)
+        }
+    }
+}
+
 pub struct Utxo;
 
 impl ServiceApp for DataShardingSchema<Utxo> {
@@ -230,66 +271,5 @@ impl StaticDispatch for DataShardingSchema<Utxo> {
             );
         }
         Ok(())
-    }
-}
-
-pub struct BytesShard<A>(pub A);
-
-impl<A: ServiceApp> ServiceApp for BytesShard<A> {
-    type Op = A::Op;
-    type Res = A::Res;
-}
-
-pub struct BytesShardExecute<E>(E);
-
-impl<A: DataShardingApp> DataShardingApp for BytesShard<A>
-where
-    A::Shard: Encode + Decode<()>,
-{
-    type Shard = Bytes;
-    fn new_shard(&self, index: ShardIndex) -> Self::Shard {
-        bincode::encode_to_vec(self.0.new_shard(index), BINCODE_CONFIG)
-            .unwrap()
-            .into()
-    }
-    type Execute = BytesShardExecute<A::Execute>;
-    fn new_execute(&self, op: Self::Op) -> Self::Execute {
-        BytesShardExecute(self.0.new_execute(op))
-    }
-}
-
-impl<E: DataShardingExecuteState<A>, A: DataShardingApp> DataShardingExecuteState<BytesShard<A>>
-    for BytesShardExecute<E>
-where
-    A::Shard: Encode + Decode<()>,
-{
-    fn proceed(
-        &mut self,
-        shards: &mut HashMap<ShardIndex, <BytesShard<A> as DataShardingApp>::Shard>,
-    ) -> DataShardingExecuteOutput<<BytesShard<A> as ServiceApp>::Res> {
-        let mut decoded_shards = shards
-            .iter()
-            .map(|(&index, bytes)| {
-                (
-                    index,
-                    bincode::decode_from_slice(bytes, BINCODE_CONFIG).unwrap().0,
-                )
-            })
-            .collect();
-        let res = match self.0.proceed(&mut decoded_shards) {
-            DataShardingExecuteOutput::Complete(res) => res,
-            DataShardingExecuteOutput::RequireAccess(indices) => {
-                return DataShardingExecuteOutput::RequireAccess(indices);
-            }
-        };
-        for (shard_index, shard) in decoded_shards {
-            shards.insert(
-                shard_index,
-                bincode::encode_to_vec(shard, BINCODE_CONFIG)
-                    .unwrap()
-                    .into(),
-            );
-        }
-        DataShardingExecuteOutput::Complete(res)
     }
 }

@@ -1,22 +1,17 @@
 use std::time::Duration;
 
 use bft_kit::{
+    app::ycsb::YcsbWorkload,
     init_logging,
     parse::Configs,
     replication::in_memory::Replica,
-    service::{
-        ServiceApp,
-        big::{
-            Service,
-            // Service, ShardedStorage,
-            app::{DataShardingSchema, Kv, KvOp},
-            transport::run_service,
-        },
+    service::big::{
+        Service,
+        app::{DataShardingSchema, Kv, ycsb::AdaptKv},
+        transport::run_service,
     },
-    workload::WorkloadState,
 };
-use rand::{Rng, SeedableRng, rngs::StdRng, seq::IteratorRandom};
-use rand_distr::Alphanumeric;
+use rand::{SeedableRng, rngs::StdRng};
 use tokio::{task::JoinSet, time::sleep};
 use tokio_util::sync::CancellationToken;
 
@@ -31,6 +26,9 @@ big.num-node            4
 big.num-shard           100
 big.num-active-copy     1
 big.num-cached-shard    0
+
+ycsb.num-key            100
+ycsb.value-len          10
 ",
     );
     let addrs = (0..configs.get("big.num-node")?)
@@ -44,12 +42,11 @@ big.num-cached-shard    0
         // let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
         let storage =
             bft_kit::service::big::FullReplicationStorage::new(configs.get("big.num-shard")?, &app);
-        let service = Service::new(
-            app,
-            Replica::new(Workload(StdRng::seed_from_u64(117418)), 1),
-            storage,
+        let workload = AdaptKv(YcsbWorkload::new(
             configs.extract()?,
-        );
+            StdRng::seed_from_u64(117418),
+        ));
+        let service = Service::new(app, Replica::new(workload, 1), storage, configs.extract()?);
         service_tasks.spawn(run_service(
             service,
             index,
@@ -65,21 +62,4 @@ big.num-cached-shard    0
         result??;
     }
     Ok(())
-}
-
-struct Workload(StdRng);
-
-impl WorkloadState for Workload {
-    type App = DataShardingSchema<Kv>;
-    type Metadata = ();
-
-    fn next_op(&mut self) -> Option<(<Self::App as ServiceApp>::Op, Self::Metadata)> {
-        let k = format!("k{:04}", (0..1_000).choose(&mut self.0).unwrap());
-        let v = (&mut self.0)
-            .sample_iter(Alphanumeric)
-            .take(10)
-            .map(char::from)
-            .collect();
-        Some((vec![KvOp::Put(k, v)], ()))
-    }
 }

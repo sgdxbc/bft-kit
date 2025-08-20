@@ -1,14 +1,14 @@
 use std::{env::args, fs::File, sync::Arc, time::Duration};
 
 use bft_kit::{
-    app::null::Null,
+    app::{null::Null, ycsb::YcsbWorkload},
     init_logging_file,
     parse::Configs,
     replication::{ReplicaIndex, in_memory, unreplicated},
     service::{
         big::{
             self, FullReplicationStorage, ShardedStorage,
-            app::{DataShardingSchema, Kv},
+            app::{DataShardingSchema, Kv, ycsb::AdaptKv},
         },
         unsharded,
     },
@@ -138,10 +138,11 @@ async fn service_big(
 ) -> anyhow::Result<()> {
     let num_shard = configs.get("big.num-shard")?;
     let app = DataShardingSchema::<Kv>::new(num_shard);
-    let replica = in_memory::Replica::new(
-        Workload(StdRng::seed_from_u64(117418)),
-        configs.get("in-memory.batch-size")?,
-    );
+    let workload = AdaptKv(YcsbWorkload::new(
+        configs.extract()?,
+        StdRng::seed_from_u64(117418),
+    ));
+    let replica = in_memory::Replica::new(workload, configs.get("in-memory.batch-size")?);
     let addrs = configs.get_values("addr")?;
     let service_config = configs.extract()?;
     if configs.get("big.sharded")? {
@@ -152,34 +153,5 @@ async fn service_big(
         let storage = FullReplicationStorage::new(num_shard, &app);
         let service = big::Service::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
-    }
-}
-
-struct Workload(StdRng);
-
-mod workload_impl {
-    use bft_kit::{
-        service::{
-            ServiceApp,
-            big::app::{DataShardingSchema, Kv, KvOp},
-        },
-        workload::WorkloadState,
-    };
-    use rand::{Rng as _, seq::IteratorRandom};
-    use rand_distr::Alphanumeric;
-
-    impl WorkloadState for super::Workload {
-        type App = DataShardingSchema<Kv>;
-        type Metadata = ();
-
-        fn next_op(&mut self) -> Option<(<Self::App as ServiceApp>::Op, Self::Metadata)> {
-            let k = format!("k{:04}", (0..1_000).choose(&mut self.0).unwrap());
-            let v = (&mut self.0)
-                .sample_iter(Alphanumeric)
-                .take(10)
-                .map(char::from)
-                .collect();
-            Some((vec![KvOp::Put(k, v)], ()))
-        }
     }
 }

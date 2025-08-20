@@ -30,7 +30,7 @@ pub enum YcsbRes {
     Scan(Vec<(String, String)>),
 }
 
-pub struct Workload {
+pub struct YcsbWorkload {
     config: WorkloadConfig,
     rng: StdRng,
     latencies: NanoLatencies,
@@ -41,7 +41,23 @@ pub struct WorkloadConfig {
     value_len: usize,
 }
 
-impl WorkloadState for Workload {
+impl YcsbWorkload {
+    pub fn new(config: WorkloadConfig, rng: StdRng) -> Self {
+        Self {
+            config,
+            rng,
+            latencies: NanoLatencies::new(3).unwrap(),
+        }
+    }
+}
+
+impl From<YcsbWorkload> for NanoLatencies {
+    fn from(workload: YcsbWorkload) -> Self {
+        workload.latencies
+    }
+}
+
+impl WorkloadState for YcsbWorkload {
     type App = Ycsb;
     type Metadata = Instant;
 
@@ -81,8 +97,8 @@ mod parse {
     impl Extract for WorkloadConfig {
         fn extract(configs: &crate::parse::Configs) -> anyhow::Result<Self> {
             Ok(Self {
-                num_key: configs.get("ycsb.num_key")?,
-                value_len: configs.get("ycsb.value_len")?,
+                num_key: configs.get("ycsb.num-key")?,
+                value_len: configs.get("ycsb.value-len")?,
             })
         }
     }

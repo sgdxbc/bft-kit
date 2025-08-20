@@ -25,9 +25,7 @@ impl<W> Replica<W> {
     }
 }
 
-impl<W: WorkloadState<Metadata = ()>> ReplicationState<Request<<W::App as ServiceApp>::Op>>
-    for Replica<W>
-{
+impl<W: WorkloadState> ReplicationState<Request<<W::App as ServiceApp>::Op>> for Replica<W> {
     type Metadata = ();
 
     fn submit(&mut self, _request: Request<<W::App as ServiceApp>::Op>) {
@@ -35,7 +33,7 @@ impl<W: WorkloadState<Metadata = ()>> ReplicationState<Request<<W::App as Servic
     }
 }
 
-impl<W: WorkloadState<Metadata = ()>> State for Replica<W> {
+impl<W: WorkloadState> State for Replica<W> {
     type Send = Never;
     type Output = Replicated<
         Request<<W::App as ServiceApp>::Op>,
@@ -45,7 +43,7 @@ impl<W: WorkloadState<Metadata = ()>> State for Replica<W> {
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         let mut logs = Vec::new();
         for _ in 0..self.batch_size {
-            let Some((op, ())) = self.workload.next_op() else {
+            let Some((op, _metadata)) = self.workload.next_op() else {
                 break;
             };
             self.seq += 1;
