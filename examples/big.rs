@@ -7,7 +7,8 @@ use bft_kit::{
     service::{
         ServiceApp,
         big::{
-            Service, ShardedStorage,
+            // Service, ShardedStorage,
+            Service,
             app::{DataShardingSchema, Kv, KvOp},
             transport::run_service,
         },
@@ -39,7 +40,11 @@ big.num-active-copy     1
     let cancel = CancellationToken::new();
     for index in 0..settings.get("big.num-node")? {
         let app = DataShardingSchema::<Kv>::new(settings.get("big.num-shard")?);
-        let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
+        // let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
+        let storage = bft_kit::service::big::FullReplicationStorage::new(
+            settings.get("big.num-shard")?,
+            &app,
+        );
         let service = Service::new(
             app,
             Replica::new(Workload(StdRng::seed_from_u64(117418)), 1),
@@ -50,7 +55,6 @@ big.num-active-copy     1
             index,
             addrs.clone(),
             cancel.clone(),
-            format!("/tmp/big-storage-{index}"),
             false,
         ));
     }

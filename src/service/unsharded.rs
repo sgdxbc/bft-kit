@@ -215,8 +215,8 @@ pub mod transport {
 
         enum Event {
             Accept(Box<Incoming>),
-            Message(Vec<u8>),
             Closed(ClientId),
+            Message(Vec<u8>),
             ReplicationMessage(Vec<u8>),
             Tick,
         }

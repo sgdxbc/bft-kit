@@ -8,10 +8,11 @@ use std::{
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, Endpoint, Incoming};
+use rocksdb::{DB, properties::TOTAL_SST_FILES_SIZE};
 use tokio::{
-    fs, select, spawn,
+    select, spawn,
     sync::mpsc,
-    task::{JoinHandle, yield_now},
+    task::{JoinHandle, spawn_blocking, yield_now},
     time::{Instant, sleep},
     try_join,
 };
@@ -32,6 +33,17 @@ struct ConnectionTables {
     storage: HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
 }
 
+enum Event {
+    Accept(Box<Incoming>),
+    Closed(ClientId),
+    Message(Vec<u8>),
+    ReplicationMessage(Vec<u8>),
+    StorageMessage(Vec<u8>),
+    StoreRead(String, Vec<u8>),
+    StoreWrite(String),
+    Tick,
+}
+
 pub async fn run_service<
     A: DataShardingApp,
     R: ReplicationState<Request<A::Op>>,
@@ -41,7 +53,6 @@ pub async fn run_service<
     replica_index: ReplicaIndex,
     addrs: Vec<SocketAddr>,
     cancel: CancellationToken,
-    storage_dir: impl AsRef<str>,
     send_reply: bool,
 ) -> anyhow::Result<()>
 where
@@ -120,14 +131,6 @@ where
     anyhow::ensure!(replica_connections.len() == addrs.len() - 1);
     anyhow::ensure!(storage_connections.len() == addrs.len() - 1);
 
-    enum Event {
-        Accept(Box<Incoming>),
-        Message(Vec<u8>),
-        Closed(ClientId),
-        ReplicationMessage(Vec<u8>),
-        StorageMessage(Vec<u8>),
-        Tick,
-    }
     let (event_sender, mut event_receiver) = mpsc::channel(1000);
 
     let mut replica_table = HashMap::new();
@@ -163,16 +166,13 @@ where
     };
     tracing::info!("interconnections established");
 
+    let (store_command_sender, store_command_receiver) = mpsc::channel(100);
+    let store_task = spawn_blocking({
+        let event_sender = event_sender.clone();
+        move || store_task(store_command_receiver, event_sender)
+    });
+
     let write_tracker = TaskTracker::new();
-
-    let storage_dir = storage_dir.as_ref();
-    if let Err(err) = fs::remove_dir_all(storage_dir).await {
-        tracing::debug!(%replica_index, %err)
-    } else {
-        tracing::warn!("removed previous storage directory")
-    }
-    fs::create_dir(storage_dir).await?;
-
     let start = Instant::now();
     let mut tick_after = service_proceed(
         &mut service,
@@ -180,7 +180,6 @@ where
         &connection_tables,
         &write_tracker,
         &cancel,
-        storage_dir,
         send_reply,
     )
     .await?;
@@ -244,6 +243,8 @@ where
                 tracing::trace!(%replica_index, ?message);
                 service.receive(Message::Intermediate(ServiceMessage::Storage(message)))
             }
+            Event::StoreRead(key, value) => service.read_ok(key, value),
+            Event::StoreWrite(key) => service.write_ok(key),
             Event::Tick => {}
         }
         tick_after = service_proceed(
@@ -252,27 +253,29 @@ where
             &connection_tables,
             &write_tracker,
             &cancel,
-            storage_dir,
             send_reply,
         )
         .await?
     }
 
     let elapsed = start.elapsed();
+    drop(store_command_sender);
+    store_task.await??;
+
     write_tracker.close();
     write_tracker.wait().await;
     if !connection_tables.client.is_empty() {
-        tracing::warn!("shut down with open client connections")
+        tracing::warn!(
+            "shut down with {} open client connections",
+            connection_tables.client.len()
+        )
     }
-    for (connection, task) in connection_tables.client.into_values() {
-        connection.close(0u32.into(), b"service shutting down");
-        task.await.unwrap() // not cancelled anywhere and propagate panics
-    }
-    for (connection, task) in connection_tables.replica.into_values() {
-        connection.close(0u32.into(), b"service shutting down");
-        task.await.unwrap() // not cancelled anywhere and propagate panics
-    }
-    for (connection, task) in connection_tables.storage.into_values() {
+    for (connection, task) in connection_tables
+        .client
+        .into_values()
+        .chain(connection_tables.replica.into_values())
+        .chain(connection_tables.storage.into_values())
+    {
         connection.close(0u32.into(), b"service shutting down");
         task.await.unwrap() // not cancelled anywhere and propagate panics
     }
@@ -283,16 +286,7 @@ where
         service.execute_latencies.len() as f32 / elapsed.as_secs_f32(),
         Duration::from_nanos(service.execute_latencies.value_at_quantile(0.5))
     );
-    let mut total_size = 0;
-    let mut read_dir = fs::read_dir(storage_dir).await?;
-    while let Some(entry) = read_dir.next_entry().await? {
-        let metadata = entry.metadata().await?;
-        if metadata.is_file() {
-            total_size += metadata.len()
-        }
-    }
-    fs::remove_dir_all(storage_dir).await?;
-    tracing::info!("Replica {replica_index}\n  {latency_stat}\n  storage size {total_size}");
+    tracing::info!(%replica_index, "\n  {latency_stat}");
     Ok(())
 }
 
@@ -306,7 +300,6 @@ async fn service_proceed<
     connection_tables: &ConnectionTables,
     write_tracker: &TaskTracker,
     cancel: &CancellationToken,
-    storage_dir: &str,
     send_reply: bool,
 ) -> anyhow::Result<Option<Duration>>
 where
@@ -388,4 +381,35 @@ where
         }
         Ok(())
     }
+}
+
+type StoreCommand = Output;
+
+fn store_task(
+    mut command_receiver: mpsc::Receiver<StoreCommand>,
+    event_sender: mpsc::Sender<Event>,
+) -> anyhow::Result<()> {
+    let temp_dir = tempfile::Builder::new().prefix("big-storage").tempdir()?;
+    let db = DB::open_default(temp_dir.path())?;
+    while let Some(command) = command_receiver.blocking_recv() {
+        match command {
+            StoreCommand::Read(key) => {
+                let Some(value) = db.get(&key)? else {
+                    tracing::warn!(%key, "key not found");
+                    continue;
+                };
+                event_sender.blocking_send(Event::StoreRead(key, value))
+            }
+            StoreCommand::Write(key, value) => {
+                db.put(&key, value)?;
+                event_sender.blocking_send(Event::StoreWrite(key))
+            }
+        }
+        .map_err(|_| anyhow::format_err!("store read event channel closed, stopping"))?
+    }
+    let total_size = db.property_int_value(TOTAL_SST_FILES_SIZE)?;
+    tracing::info!(?total_size, "total SST files size");
+    drop(db);
+    temp_dir.close()?;
+    Ok(())
 }
