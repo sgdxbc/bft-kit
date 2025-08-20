@@ -73,6 +73,7 @@ pub struct Service<
     R: ReplicationState<Request<A::Op>>,
     S: State = ShardedStorage<<A as DataShardingApp>::Shard>,
 > {
+    // config: ServiceConfig,
     // generic sub states
     app: A,
     replication: R,
@@ -84,13 +85,17 @@ pub struct Service<
     fetch_indices: HashSet<ShardIndex>,
     num_skip: StateVersion,
     // additional data for optimization
-    shard_cache: LruCache<ShardIndex, A::Shard>,
+    shard_cache: Option<LruCache<ShardIndex, A::Shard>>,
     // cross interface buffers
     submit_buffer: Vec<Request<A::Op>>,
     #[allow(clippy::type_complexity)] // this matches <Self as State>::Send
     send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<R, S>>>,
     // stats
     execute_latencies: NanoLatencies,
+}
+
+pub struct ServiceConfig {
+    num_cached_shard: usize,
 }
 
 type Replicated<A, R> = (
@@ -108,7 +113,7 @@ struct Executing<A: DataShardingApp> {
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>>
     Service<A, R, S>
 {
-    pub fn new(app: A, replication: R, storage: S) -> Self {
+    pub fn new(app: A, replication: R, storage: S, config: ServiceConfig) -> Self {
         Self {
             app,
             replication,
@@ -118,10 +123,11 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A:
             fetched_shards: Default::default(),
             fetch_indices: Default::default(),
             num_skip: 0,
-            shard_cache: LruCache::new(20.try_into().unwrap()), //
+            shard_cache: config.num_cached_shard.try_into().ok().map(LruCache::new),
             submit_buffer: Default::default(),
             send_buffer: Default::default(),
             execute_latencies: NanoLatencies::new(3).unwrap(),
+            // config,
         }
     }
 }
@@ -199,7 +205,11 @@ where
                     DataShardingExecuteOutput::RequireAccess(required_indices) => {
                         for shard_index in required_indices {
                             assert!(!self.fetched_shards.contains_key(&shard_index));
-                            if let Some(shard) = self.shard_cache.get(&shard_index) {
+                            if let Some(shard) = self
+                                .shard_cache
+                                .as_mut()
+                                .and_then(|shard_cache| shard_cache.get(&shard_index))
+                            {
                                 self.fetched_shards.insert(shard_index, shard.clone());
                             } else {
                                 self.storage.fetch(shard_index)
@@ -214,8 +224,10 @@ where
                     DataShardingExecuteOutput::Complete(res) => {
                         self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
 
-                        for (&shard_index, shard) in &self.fetched_shards {
-                            self.shard_cache.put(shard_index, shard.clone());
+                        if let Some(shard_cache) = &mut self.shard_cache {
+                            for (&shard_index, shard) in &self.fetched_shards {
+                                shard_cache.put(shard_index, shard.clone());
+                            }
                         }
                         self.storage.bump(take(&mut self.fetched_shards));
                         self.fetch_indices.clear();
@@ -660,7 +672,15 @@ pub mod message {
 mod parse {
     use crate::parse::{Extract, Settings};
 
-    use super::ShardedStorageConfig;
+    use super::{ServiceConfig, ShardedStorageConfig};
+
+    impl Extract for ServiceConfig {
+        fn extract(settings: &Settings) -> anyhow::Result<Self> {
+            Ok(Self {
+                num_cached_shard: settings.get("big.num-cached-shard")?,
+            })
+        }
+    }
 
     impl Extract for ShardedStorageConfig {
         fn extract(settings: &Settings) -> anyhow::Result<Self> {

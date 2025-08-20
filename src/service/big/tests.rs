@@ -53,7 +53,14 @@ fn idle_pending() {
         num_active_copy: 1,
     };
     let storage = ShardedStorage::new(storage_config, 0, [0].into(), &app);
-    let service = Service::new(app, Replica::new(), storage);
+    let service = Service::new(
+        app,
+        Replica::new(),
+        storage,
+        ServiceConfig {
+            num_cached_shard: 0,
+        },
+    );
     let mut state = SystemState {
         services: vec![service],
         service_network: Default::default(),
@@ -149,7 +156,14 @@ fn one_service() {
         num_active_copy: 1,
     };
     let storage = ShardedStorage::new(storage_config, 0, [0].into(), &app);
-    let service = Service::new(app, Replica::new(), storage);
+    let service = Service::new(
+        app,
+        Replica::new(),
+        storage,
+        ServiceConfig {
+            num_cached_shard: 0,
+        },
+    );
     let mut state = SystemState {
         services: vec![service],
         service_network: Default::default(),
@@ -181,7 +195,14 @@ impl SystemState {
                         num_active_copy: 1,
                     };
                     let storage = ShardedStorage::new(storage_config, index, [index].into(), &app);
-                    Service::new(app, Replica::new(), storage)
+                    Service::new(
+                        app,
+                        Replica::new(),
+                        storage,
+                        ServiceConfig {
+                            num_cached_shard: 0,
+                        },
+                    )
                 })
                 .collect(),
             service_network: Default::default(),

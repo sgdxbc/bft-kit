@@ -142,13 +142,14 @@ async fn service_big(
         settings.get("in-memory.batch-size")?,
     );
     let addrs = settings.get_values("addr")?;
+    let service_config = settings.extract()?;
     if settings.get("big.sharded")? {
         let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
-        let service = big::Service::new(app, replica, storage);
+        let service = big::Service::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
     } else {
         let storage = FullReplicationStorage::new(num_shard, &app);
-        let service = big::Service::new(app, replica, storage);
+        let service = big::Service::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
     }
 }

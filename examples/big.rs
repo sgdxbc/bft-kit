@@ -30,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
 big.num-node            4
 big.num-shard           100
 big.num-active-copy     1
+big.num-cached-shard    0
 ",
     );
     let addrs = (0..settings.get("big.num-node")?)
@@ -49,6 +50,7 @@ big.num-active-copy     1
             app,
             Replica::new(Workload(StdRng::seed_from_u64(117418)), 1),
             storage,
+            settings.extract()?,
         );
         service_tasks.spawn(run_service(
             service,
