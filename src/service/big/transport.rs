@@ -59,6 +59,7 @@ where
     Service<A, R, S>: ServiceState<
             A,
             ServiceSend = ServiceSend<R, S>,
+            Output = Output,
             ServiceMessage = ServiceMessage<R::Message, S::Message>,
             Metadata = R::Metadata,
         >,
@@ -178,6 +179,7 @@ where
         &mut service,
         start.elapsed(),
         &connection_tables,
+        &store_command_sender,
         &write_tracker,
         &cancel,
         send_reply,
@@ -251,6 +253,7 @@ where
             &mut service,
             start.elapsed(),
             &connection_tables,
+            &store_command_sender,
             &write_tracker,
             &cancel,
             send_reply,
@@ -298,12 +301,14 @@ async fn service_proceed<
     service: &mut Service<A, R, S>,
     since_start: Duration,
     connection_tables: &ConnectionTables,
+    store_command_sender: &mpsc::Sender<StoreCommand>,
     write_tracker: &TaskTracker,
     cancel: &CancellationToken,
     send_reply: bool,
 ) -> anyhow::Result<Option<Duration>>
 where
-    Service<A, R, S>: ServiceState<A, ServiceSend = ServiceSend<R, S>, Metadata = R::Metadata>,
+    Service<A, R, S>:
+        ServiceState<A, ServiceSend = ServiceSend<R, S>, Output = Output, Metadata = R::Metadata>,
     Reply<A::Res, R::Metadata>: Encode,
     HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>:
         PerformSend<R::Send> + PerformSend<S::Send>,
@@ -334,8 +339,12 @@ where
             Proceed::Send(Send::Intermediate(ServiceSend::Storage(send))) => {
                 connection_tables.storage.perform(send, write_tracker)?
             }
-            // TODO concurrent to main proceed loop for better performance
-            Proceed::Output(_) => todo!(),
+            Proceed::Output(output) => {
+                if store_command_sender.capacity() == 0 {
+                    tracing::warn!("store command sender congested");
+                }
+                store_command_sender.send(output).await?
+            }
         }
         yield_now().await
     }

@@ -579,45 +579,48 @@ impl<S: Clone> ShardedStorage<S> {
 }
 
 pub struct FullReplicationStorage<S> {
-    shards: Vec<S>,
     output_buffer: Vec<StorageStateOutput<S>>,
 }
 
-impl<S: Clone> FullReplicationStorage<S> {
+impl<S: Encode + Decode<()>> FullReplicationStorage<S> {
     pub fn new(num_shard: ShardIndex, app: &impl DataShardingApp<Shard = S>) -> Self {
         Self {
-            shards: (0..num_shard)
-                .map(|shard_index| app.new_shard(shard_index))
+            output_buffer: (0..num_shard)
+                .map(|index| {
+                    let bytes =
+                        bincode::encode_to_vec(&app.new_shard(index), BINCODE_CONFIG).unwrap();
+                    StorageStateOutput::Write(index.to_string(), bytes)
+                })
                 .collect(),
-            output_buffer: Default::default(),
         }
     }
 }
 
-impl<S: Clone> StorageState<S> for FullReplicationStorage<S> {
+impl<S: Encode + Decode<()>> StorageState<S> for FullReplicationStorage<S> {
     fn fetch(&mut self, index: ShardIndex) {
-        self.output_buffer.push(StorageStateOutput::Fetched(
-            index,
-            self.shards[index as usize].clone(),
-        ));
+        self.output_buffer
+            .push(StorageStateOutput::Read(index.to_string()))
     }
 
     fn bump(&mut self, shards: HashMap<ShardIndex, S>) {
         for (index, shard) in shards {
-            self.shards[index as usize] = shard
+            let bytes = bincode::encode_to_vec(&shard, BINCODE_CONFIG).unwrap();
+            self.output_buffer
+                .push(StorageStateOutput::Write(index.to_string(), bytes))
         }
     }
 
-    fn read_ok(&mut self, _key: String, _value: Vec<u8>) {
-        unreachable!()
+    fn read_ok(&mut self, key: String, value: Vec<u8>) {
+        let (shard, len) = bincode::decode_from_slice(&value, BINCODE_CONFIG).unwrap();
+        assert_eq!(len, value.len());
+        self.output_buffer
+            .push(StorageStateOutput::Fetched(key.parse().unwrap(), shard))
     }
 
-    fn write_ok(&mut self, _key: String) {
-        unreachable!()
-    }
+    fn write_ok(&mut self, _key: String) {}
 }
 
-impl<S: Clone> State for FullReplicationStorage<S> {
+impl<S> State for FullReplicationStorage<S> {
     type Send = Never;
     type Output = StorageStateOutput<S>;
 
