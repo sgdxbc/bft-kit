@@ -6,6 +6,7 @@ use crate::{
     state::{Proceed, State},
 };
 
+pub mod b_tree;
 pub mod null;
 pub mod utxo;
 pub mod ycsb;
