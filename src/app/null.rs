@@ -10,7 +10,8 @@ impl ServiceApp for Null {
 }
 
 impl AppState for Null {
-    fn execute(&mut self, (): Self::Op) -> Self::Res {}
+    type App = Self;
+    fn execute(&mut self, (): <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res {}
 }
 
 impl WorkloadState for Null {

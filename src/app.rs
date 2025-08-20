@@ -12,26 +12,29 @@ pub mod rocksdb;
 pub mod utxo;
 pub mod ycsb;
 
-pub trait AppState: ServiceApp {
-    fn execute(&mut self, op: Self::Op) -> Self::Res;
+pub trait AppState {
+    type App: ServiceApp;
+    fn execute(&mut self, op: <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res;
 }
 
 pub struct Batched<A>(A);
 
-impl<A: AppState> ServiceApp for Batched<A> {
+impl<A: ServiceApp> ServiceApp for Batched<A> {
     type Op = Vec<A::Op>;
     type Res = Vec<A::Res>;
 }
 
 impl<A: AppState> AppState for Batched<A> {
-    fn execute(&mut self, ops: Self::Op) -> Self::Res {
+    type App = Batched<A::App>;
+
+    fn execute(&mut self, ops: <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res {
         ops.into_iter().map(|op| self.0.execute(op)).collect()
     }
 }
 
 pub struct Buffered<A: AppState> {
     app: A,
-    ops: VecDeque<A::Op>,
+    ops: VecDeque<<A::App as ServiceApp>::Op>,
 }
 
 impl<A: AppState> From<A> for Buffered<A> {
@@ -45,7 +48,7 @@ impl<A: AppState> From<A> for Buffered<A> {
 
 impl<A: AppState> State for Buffered<A> {
     type Send = Never;
-    type Output = A::Res;
+    type Output = <A::App as ServiceApp>::Res;
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         match self.ops.pop_front() {
             Some(op) => Proceed::Output(self.app.execute(op)),
@@ -53,7 +56,7 @@ impl<A: AppState> State for Buffered<A> {
         }
     }
 
-    type Message = A::Op;
+    type Message = <A::App as ServiceApp>::Op;
     fn receive(&mut self, op: Self::Message) {
         self.ops.push_back(op);
     }

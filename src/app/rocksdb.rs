@@ -4,18 +4,15 @@ use crate::service::ServiceApp;
 
 use super::{
     AppState,
-    ycsb::{YcsbOp, YcsbRes},
+    ycsb::{Ycsb, YcsbOp, YcsbRes},
 };
 
 pub struct Rocksdb(pub DB);
 
-impl ServiceApp for Rocksdb {
-    type Op = YcsbOp;
-    type Res = YcsbRes;
-}
-
 impl AppState for Rocksdb {
-    fn execute(&mut self, op: Self::Op) -> Self::Res {
+    type App = Ycsb;
+
+    fn execute(&mut self, op: <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res {
         Self::execute(self, op).unwrap_or_else(|err| YcsbRes::Err(err.to_string()))
     }
 }

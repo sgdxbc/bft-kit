@@ -108,7 +108,9 @@ impl ServiceApp for Utxo {
 }
 
 impl AppState for Utxo {
-    fn execute(&mut self, op: Self::Op) -> Self::Res {
+    type App = Self;
+
+    fn execute(&mut self, op: <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res {
         if matches!(op.input, UtxoOpInput::Spend(_)) && self.total_input(&op)? < op.total_output() {
             return Err(UtxoError::InsufficientFunds);
         }

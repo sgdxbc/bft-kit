@@ -2,15 +2,14 @@ use std::{collections::BTreeMap, mem::take, time::Duration};
 
 use crate::{
     Never,
-    app::AppState,
-    service::{ClientId, ClientSeq, Reply, Request},
+    service::{ClientId, ClientSeq, Reply, Request, ServiceApp},
     state::{Proceed, State},
     workload::ClientState,
 };
 
 use super::{Dest, Replicated, ReplicationState};
 
-pub struct Client<A: AppState> {
+pub struct Client<A: ServiceApp> {
     id: ClientId,
     config: ClientConfig,
 
@@ -26,13 +25,13 @@ pub struct ClientConfig {
     // resend interval
 }
 
-struct SubmitData<A: AppState> {
+struct SubmitData<A: ServiceApp> {
     #[allow(unused)]
     op: A::Op,
     timeout_at: Duration,
 }
 
-impl<A: AppState> Client<A> {
+impl<A: ServiceApp> Client<A> {
     pub fn new(id: ClientId, config: ClientConfig) -> Self {
         Self {
             id,
@@ -45,7 +44,7 @@ impl<A: AppState> Client<A> {
     }
 }
 
-impl<A: AppState> ClientState<A> for Client<A>
+impl<A: ServiceApp> ClientState<A> for Client<A>
 where
     A::Op: Clone,
 {
@@ -56,7 +55,7 @@ where
     }
 }
 
-impl<A: AppState> State for Client<A>
+impl<A: ServiceApp> State for Client<A>
 where
     A::Op: Clone,
 {

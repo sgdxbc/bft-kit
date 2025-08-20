@@ -4,7 +4,7 @@ use crate::service::ServiceApp;
 
 use super::{
     AppState,
-    ycsb::{YcsbOp, YcsbRes},
+    ycsb::{Ycsb, YcsbOp, YcsbRes},
 };
 
 pub struct BTree {
@@ -25,13 +25,10 @@ impl Default for BTree {
     }
 }
 
-impl ServiceApp for BTree {
-    type Op = YcsbOp;
-    type Res = YcsbRes;
-}
-
 impl AppState for BTree {
-    fn execute(&mut self, op: Self::Op) -> Self::Res {
+    type App = Ycsb;
+
+    fn execute(&mut self, op: <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res {
         match op {
             YcsbOp::Insert(key, value) => {
                 self.store.insert(key, value);
