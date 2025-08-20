@@ -16,4 +16,4 @@ if __name__ == "__main__":
     import clusters
     from sys import argv
 
-    task([item["host"] for item in clusters.workload + clusters.service], argv[1])
+    task([item["host"] for item in clusters.workers + clusters.service], argv[1])

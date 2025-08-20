@@ -12,4 +12,4 @@ def task(hosts):
 if __name__ == "__main__":
     import clusters
 
-    task([item["host"] for item in clusters.workload + clusters.service])
+    task([item["host"] for item in clusters.workers + clusters.service])

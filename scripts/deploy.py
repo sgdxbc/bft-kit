@@ -15,5 +15,5 @@ def task(build_host, sync_hosts):
 if __name__ == "__main__":
     task(
         clusters.service[0]["host"],
-        [item["host"] for item in clusters.service[1:] + clusters.workload],
+        [item["host"] for item in clusters.service[1:] + clusters.workers],
     )

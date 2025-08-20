@@ -5,7 +5,7 @@ from common import *
 def task(hosts):
     processes = []
     for host in hosts:
-        p = ssh(host, f"cd {deploy_dir} && ./bftk workload", detach=True)
+        p = ssh(host, f"cd {deploy_dir} && ./bftk workers", detach=True)
         processes.append(p)
     running = True
     while running:
@@ -21,4 +21,4 @@ def task(hosts):
 if __name__ == "__main__":
     import clusters
 
-    task([item["host"] for item in clusters.workload])
+    task([item["host"] for item in clusters.workers])

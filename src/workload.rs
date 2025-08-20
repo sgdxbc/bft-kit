@@ -18,14 +18,18 @@ pub trait ClientState<A: ServiceApp>: State<Output = (ClientSeq, A::Res)> {
 
 pub trait WorkloadState {
     type App: ServiceApp;
+    type Metadata;
 
-    fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op>;
+    fn next_op(&mut self) -> Option<(<Self::App as ServiceApp>::Op, Self::Metadata)>;
 
-    fn validate(
-        &self,
-        op: <Self::App as ServiceApp>::Op,
+    #[allow(unused_variables)]
+    fn complete(
+        &mut self,
+        metadata: Self::Metadata,
         res: <Self::App as ServiceApp>::Res,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub type NanoLatencies = Histogram<u64>;
@@ -33,8 +37,7 @@ pub type NanoLatencies = Histogram<u64>;
 pub struct CloseLoopWorker<W: WorkloadState, C> {
     workload: W,
     client: C,
-    submitted: Option<(Instant, <W::App as ServiceApp>::Op)>,
-    latencies: NanoLatencies,
+    submitted: Option<W::Metadata>,
 }
 
 impl<W: WorkloadState, C> CloseLoopWorker<W, C> {
@@ -43,31 +46,21 @@ impl<W: WorkloadState, C> CloseLoopWorker<W, C> {
             workload,
             client,
             submitted: None,
-            latencies: Histogram::new(3).unwrap(),
         }
     }
 }
 
-impl<W: WorkloadState, C> From<CloseLoopWorker<W, C>> for NanoLatencies {
-    fn from(val: CloseLoopWorker<W, C>) -> Self {
-        val.latencies
-    }
-}
-
-impl<C: ClientState<W::App>, W: WorkloadState> State for CloseLoopWorker<W, C>
-where
-    <W::App as ServiceApp>::Op: Clone,
-{
+impl<C: ClientState<W::App>, W: WorkloadState> State for CloseLoopWorker<W, C> {
     type Send = C::Send;
     type Output = anyhow::Result<()>;
 
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if self.submitted.is_none() {
-            let Some(op) = self.workload.next_op() else {
+            let Some((op, metadata)) = self.workload.next_op() else {
                 return Proceed::Output(Ok(()));
             };
-            self.client.submit(op.clone());
-            self.submitted = Some((Instant::now(), op))
+            self.client.submit(op);
+            self.submitted = Some(metadata)
         }
         match self.client.proceed(since_start) {
             Proceed::Pending(tick_after) => {
@@ -78,13 +71,12 @@ where
             }
             Proceed::Send(send) => Proceed::Send(send),
             Proceed::Output((_, res)) => {
-                let Some((start, op)) = self.submitted.take() else {
+                let Some(metadata) = self.submitted.take() else {
                     unimplemented!("multiple outputs to close loop worker")
                 };
-                if let Err(err) = self.workload.validate(op, res) {
+                if let Err(err) = self.workload.complete(metadata, res) {
                     return Proceed::Output(Err(err));
                 }
-                self.latencies += start.elapsed().as_nanos() as u64;
                 self.proceed(since_start)
             }
         }
@@ -99,8 +91,7 @@ where
 pub struct OpenLoopWorker<W: WorkloadState, C> {
     workload: W,
     client: C,
-    submitted: HashMap<ClientSeq, (Instant, <W::App as ServiceApp>::Op)>,
-    latencies: NanoLatencies,
+    submitted: HashMap<ClientSeq, W::Metadata>,
     next_submit: Option<Instant>,
     target_tput: f32,
 }
@@ -111,23 +102,13 @@ impl<W: WorkloadState, C> OpenLoopWorker<W, C> {
             workload,
             client,
             submitted: Default::default(),
-            latencies: Histogram::new(3).unwrap(),
             next_submit: Some(Instant::now()),
             target_tput,
         }
     }
 }
 
-impl<W: WorkloadState, C> From<OpenLoopWorker<W, C>> for NanoLatencies {
-    fn from(val: OpenLoopWorker<W, C>) -> Self {
-        val.latencies
-    }
-}
-
-impl<W: WorkloadState, C: ClientState<W::App>> State for OpenLoopWorker<W, C>
-where
-    <W::App as ServiceApp>::Op: Clone,
-{
+impl<W: WorkloadState, C: ClientState<W::App>> State for OpenLoopWorker<W, C> {
     type Send = C::Send;
     type Output = anyhow::Result<()>;
 
@@ -135,12 +116,12 @@ where
         if let Some(next_submit) = &mut self.next_submit {
             let now = Instant::now();
             while *next_submit <= now {
-                let Some(op) = self.workload.next_op() else {
+                let Some((op, metadata)) = self.workload.next_op() else {
                     self.next_submit = None;
                     break;
                 };
-                let seq = self.client.submit(op.clone());
-                self.submitted.insert(seq, (now, op));
+                let seq = self.client.submit(op);
+                self.submitted.insert(seq, metadata);
                 // randomize interval?
                 *next_submit += Duration::from_secs_f32(1. / self.target_tput)
             }
@@ -170,13 +151,12 @@ where
             },
             Proceed::Send(send) => Proceed::Send(send),
             Proceed::Output((seq, res)) => {
-                let Some((start, op)) = self.submitted.remove(&seq) else {
+                let Some(metadata) = self.submitted.remove(&seq) else {
                     unimplemented!("output for unknown seq {seq}")
                 };
-                if let Err(err) = self.workload.validate(op, res) {
+                if let Err(err) = self.workload.complete(metadata, res) {
                     return Proceed::Output(Err(err));
                 }
-                self.latencies += start.elapsed().as_nanos() as u64;
                 self.proceed(since_start)
             }
         }
@@ -201,8 +181,9 @@ impl<W> Take<W> {
 
 impl<W: WorkloadState> WorkloadState for Take<W> {
     type App = W::App;
+    type Metadata = W::Metadata;
 
-    fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
+    fn next_op(&mut self) -> Option<(<Self::App as ServiceApp>::Op, Self::Metadata)> {
         if self.count == 0 {
             return None;
         }
@@ -210,11 +191,64 @@ impl<W: WorkloadState> WorkloadState for Take<W> {
         self.workload.next_op()
     }
 
-    fn validate(
-        &self,
-        op: <Self::App as ServiceApp>::Op,
+    fn complete(
+        &mut self,
+        metadata: Self::Metadata,
         res: <Self::App as ServiceApp>::Res,
     ) -> anyhow::Result<()> {
-        self.workload.validate(op, res)
+        self.workload.complete(metadata, res)
+    }
+}
+
+pub struct OpLatency<W> {
+    inner: W,
+    latencies: NanoLatencies,
+}
+
+impl<W> OpLatency<W> {
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            latencies: NanoLatencies::new(3).unwrap(),
+        }
+    }
+}
+
+impl<W: WorkloadState> WorkloadState for OpLatency<W> {
+    type App = W::App;
+    type Metadata = (Instant, W::Metadata);
+
+    fn next_op(&mut self) -> Option<(<Self::App as ServiceApp>::Op, Self::Metadata)> {
+        self.inner
+            .next_op()
+            .map(|(op, metadata)| (op, (Instant::now(), metadata)))
+    }
+
+    fn complete(
+        &mut self,
+        (start, metadata): Self::Metadata,
+        res: <Self::App as ServiceApp>::Res,
+    ) -> anyhow::Result<()> {
+        self.inner.complete(metadata, res)?;
+        self.latencies += start.elapsed().as_nanos() as u64;
+        Ok(())
+    }
+}
+
+impl<W> From<OpLatency<W>> for NanoLatencies {
+    fn from(worker: OpLatency<W>) -> Self {
+        worker.latencies
+    }
+}
+
+impl<W: WorkloadState + Into<NanoLatencies>, C> From<CloseLoopWorker<W, C>> for NanoLatencies {
+    fn from(worker: CloseLoopWorker<W, C>) -> Self {
+        worker.workload.into()
+    }
+}
+
+impl<W: WorkloadState + Into<NanoLatencies>, C> From<OpenLoopWorker<W, C>> for NanoLatencies {
+    fn from(worker: OpenLoopWorker<W, C>) -> Self {
+        worker.workload.into()
     }
 }

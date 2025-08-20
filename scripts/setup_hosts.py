@@ -37,4 +37,4 @@ def task(hosts):
 
 if __name__ == "__main__":
     build_task(clusters.service[0]["host"])
-    task([item["host"] for item in clusters.service + clusters.workload])
+    task([item["host"] for item in clusters.service + clusters.workers])

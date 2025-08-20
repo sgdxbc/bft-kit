@@ -13,7 +13,7 @@ use bft_kit::{
         unsharded,
     },
     set_affinity_block_on,
-    workload::{CloseLoopWorker, NanoLatencies, OpenLoopWorker, transport::run_worker},
+    workload::{self, CloseLoopWorker, NanoLatencies, OpenLoopWorker, transport::run_worker},
 };
 use rand::{SeedableRng as _, random, rngs::StdRng};
 use tokio::{fs::read_to_string, signal::ctrl_c, task::JoinSet, time::sleep, try_join};
@@ -30,7 +30,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         match args().nth(1).as_deref() {
-            Some("workload") => workload(configs).await,
+            Some("workers") => workers(configs).await,
             Some("service") => {
                 let index = args()
                     .nth(2)
@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
     })
 }
 
-async fn workload(configs: Configs) -> anyhow::Result<()> {
+async fn workers(configs: Configs) -> anyhow::Result<()> {
     let configs = Arc::new(configs);
 
     let cancel = CancellationToken::new();
@@ -84,12 +84,13 @@ async fn worker(
     cancel: CancellationToken,
 ) -> anyhow::Result<NanoLatencies> {
     let configs = configs.as_ref();
+    let workload = workload::OpLatency::new(Null);
     if configs.get("workload.close-loop")? {
-        let worker = CloseLoopWorker::new(Null, client);
+        let worker = CloseLoopWorker::new(workload, client);
         run_worker(worker, client_id, configs.get_values("addr")?, cancel).await
     } else {
         let target_tput = configs.get("open-loop.target-tput")?;
-        let worker = OpenLoopWorker::new(Null, client, target_tput);
+        let worker = OpenLoopWorker::new(workload, client, target_tput);
         run_worker(worker, client_id, configs.get_values("addr")?, cancel).await
     }
 }
@@ -156,7 +157,7 @@ async fn service_big(
 
 struct Workload(StdRng);
 
-mod workload {
+mod workload_impl {
     use bft_kit::{
         service::{
             ServiceApp,
@@ -169,23 +170,16 @@ mod workload {
 
     impl WorkloadState for super::Workload {
         type App = DataShardingSchema<Kv>;
+        type Metadata = ();
 
-        fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
+        fn next_op(&mut self) -> Option<(<Self::App as ServiceApp>::Op, Self::Metadata)> {
             let k = format!("k{:04}", (0..1_000).choose(&mut self.0).unwrap());
             let v = (&mut self.0)
                 .sample_iter(Alphanumeric)
                 .take(10)
                 .map(char::from)
                 .collect();
-            Some(vec![KvOp::Put(k, v)])
-        }
-
-        fn validate(
-            &self,
-            _op: <Self::App as ServiceApp>::Op,
-            _res: <Self::App as ServiceApp>::Res,
-        ) -> anyhow::Result<()> {
-            Ok(())
+            Some((vec![KvOp::Put(k, v)], ()))
         }
     }
 }

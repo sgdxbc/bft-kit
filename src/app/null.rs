@@ -15,16 +15,9 @@ impl AppState for Null {
 
 impl WorkloadState for Null {
     type App = Self;
+    type Metadata = ();
 
-    fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
-        Some(())
-    }
-
-    fn validate(
-        &self,
-        (): <Self::App as ServiceApp>::Op,
-        (): <Self::App as ServiceApp>::Res,
-    ) -> anyhow::Result<()> {
-        Ok(())
+    fn next_op(&mut self) -> Option<(<Self::App as ServiceApp>::Op, Self::Metadata)> {
+        Some(((), ()))
     }
 }

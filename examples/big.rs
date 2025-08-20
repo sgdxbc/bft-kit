@@ -7,8 +7,8 @@ use bft_kit::{
     service::{
         ServiceApp,
         big::{
-            // Service, ShardedStorage,
             Service,
+            // Service, ShardedStorage,
             app::{DataShardingSchema, Kv, KvOp},
             transport::run_service,
         },
@@ -71,22 +71,15 @@ struct Workload(StdRng);
 
 impl WorkloadState for Workload {
     type App = DataShardingSchema<Kv>;
+    type Metadata = ();
 
-    fn next_op(&mut self) -> Option<<Self::App as ServiceApp>::Op> {
+    fn next_op(&mut self) -> Option<(<Self::App as ServiceApp>::Op, Self::Metadata)> {
         let k = format!("k{:04}", (0..1_000).choose(&mut self.0).unwrap());
         let v = (&mut self.0)
             .sample_iter(Alphanumeric)
             .take(10)
             .map(char::from)
             .collect();
-        Some(vec![KvOp::Put(k, v)])
-    }
-
-    fn validate(
-        &self,
-        _op: <Self::App as ServiceApp>::Op,
-        _res: <Self::App as ServiceApp>::Res,
-    ) -> anyhow::Result<()> {
-        Ok(())
+        Some((vec![KvOp::Put(k, v)], ()))
     }
 }

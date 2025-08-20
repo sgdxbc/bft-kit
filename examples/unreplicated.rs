@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     let mut configs = Configs::new();
     configs.parse("client.timeout 1.");
     let client = Client::<Null>::new(0, configs.extract()?);
-    let workload = workload::Take::new(Null, 100);
+    let workload = workload::OpLatency::new(workload::Take::new(Null, 100));
     let worker = CloseLoopWorker::new(workload, client);
     let latencies = run_worker(worker, 0, addrs, CancellationToken::new()).await?;
     println!("latency: {:?}", Duration::from_nanos(latencies.min()));

@@ -21,11 +21,11 @@ def run_terraform(name):
 
 
 service = run_terraform("service")
-workload = run_terraform("workload")
+workers = run_terraform("workload")
 
 
 if __name__ == "__main__":
     from pprint import pprint as print
 
     print(service)
-    print(workload)
+    print(workers)
