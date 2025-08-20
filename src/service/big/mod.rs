@@ -670,24 +670,24 @@ pub mod message {
 }
 
 mod parse {
-    use crate::parse::{Extract, Settings};
+    use crate::parse::{Configs, Extract};
 
     use super::{ServiceConfig, ShardedStorageConfig};
 
     impl Extract for ServiceConfig {
-        fn extract(settings: &Settings) -> anyhow::Result<Self> {
+        fn extract(configs: &Configs) -> anyhow::Result<Self> {
             Ok(Self {
-                num_cached_shard: settings.get("big.num-cached-shard")?,
+                num_cached_shard: configs.get("big.num-cached-shard")?,
             })
         }
     }
 
     impl Extract for ShardedStorageConfig {
-        fn extract(settings: &Settings) -> anyhow::Result<Self> {
+        fn extract(configs: &Configs) -> anyhow::Result<Self> {
             Ok(Self {
-                num_shard: settings.get("big.num-shard")?,
-                num_node: settings.get("big.num-node")?,
-                num_active_copy: settings.get("big.num-active-copy")?,
+                num_shard: configs.get("big.num-shard")?,
+                num_node: configs.get("big.num-node")?,
+                num_active_copy: configs.get("big.num-active-copy")?,
             })
         }
     }

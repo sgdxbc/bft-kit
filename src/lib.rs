@@ -74,7 +74,8 @@ pub fn set_affinity_block_on<F: Future<Output = anyhow::Result<T>>, T>(f: F) -> 
         .enable_all()
         .on_thread_start(move || {
             let Some(core_id) = core_ids.lock().unwrap().next() else {
-                tracing::warn!("worker thread without affinity");
+                // turns out tokio spawns extra threads than the workers, at least one for io
+                // tracing::warn!("worker thread without affinity");
                 return;
             };
             if !core_affinity::set_for_current(core_id) {

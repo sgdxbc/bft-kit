@@ -8,7 +8,7 @@ use crate::{
     workload::ClientState,
 };
 
-use super::{Replicated, Dest, ReplicationState};
+use super::{Dest, Replicated, ReplicationState};
 
 pub struct Client<A: AppState> {
     id: ClientId,
@@ -153,12 +153,12 @@ impl<T> State for Replica<T> {
 mod parse {
     use std::time::Duration;
 
-    use crate::parse::{Extract, Settings};
+    use crate::parse::{Configs, Extract};
 
     impl Extract for super::ClientConfig {
-        fn extract(settings: &Settings) -> anyhow::Result<Self> {
+        fn extract(configs: &Configs) -> anyhow::Result<Self> {
             Ok(Self {
-                timeout: Duration::from_secs_f32(settings.get("client.timeout")?),
+                timeout: Duration::from_secs_f32(configs.get("client.timeout")?),
             })
         }
     }

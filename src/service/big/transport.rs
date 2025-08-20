@@ -8,7 +8,7 @@ use std::{
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, Endpoint, Incoming};
-use rocksdb::{DB, properties::TOTAL_SST_FILES_SIZE};
+use rocksdb::{DB, properties::LIVE_SST_FILES_SIZE};
 use tokio::{
     select, spawn,
     sync::mpsc,
@@ -416,8 +416,8 @@ fn store_task(
         }
         .map_err(|_| anyhow::format_err!("store read event channel closed, stopping"))?
     }
-    let total_size = db.property_int_value(TOTAL_SST_FILES_SIZE)?;
-    tracing::info!(?total_size, "total SST files size");
+    let total_size = db.property_int_value(LIVE_SST_FILES_SIZE)?;
+    tracing::info!(?total_size, "live SST files size");
     drop(db);
     temp_dir.close()?;
     Ok(())

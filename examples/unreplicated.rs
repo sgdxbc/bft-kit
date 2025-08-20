@@ -3,7 +3,7 @@ use std::time::Duration;
 use bft_kit::{
     app::null::Null,
     init_logging,
-    parse::Settings,
+    parse::Configs,
     replication::unreplicated::{Client, Replica},
     service::unsharded::{Service, transport::run_service},
     workload::{self, CloseLoopWorker, transport::run_worker},
@@ -22,9 +22,9 @@ async fn main() -> anyhow::Result<()> {
     let service = Service::new(Null, Replica::new());
     let service_task = spawn(run_service(service, 0, addrs.clone(), cancel.clone()));
 
-    let mut settings = Settings::new();
-    settings.parse("client.timeout 1.");
-    let client = Client::<Null>::new(0, settings.extract()?);
+    let mut configs = Configs::new();
+    configs.parse("client.timeout 1.");
+    let client = Client::<Null>::new(0, configs.extract()?);
     let workload = workload::Take::new(Null, 100);
     let worker = CloseLoopWorker::new(workload, client);
     let latencies = run_worker(worker, 0, addrs, CancellationToken::new()).await?;

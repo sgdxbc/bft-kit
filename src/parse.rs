@@ -2,9 +2,9 @@
 use std::{collections::HashMap, str::FromStr};
 
 #[derive(Debug, Clone, Default)]
-pub struct Settings(HashMap<String, Vec<String>>);
+pub struct Configs(HashMap<String, Vec<String>>);
 
-impl Settings {
+impl Configs {
     pub fn new() -> Self {
         Self::default()
     }
@@ -54,10 +54,10 @@ impl Settings {
 }
 
 pub trait Extract: Sized {
-    fn extract(settings: &Settings) -> anyhow::Result<Self>;
+    fn extract(configs: &Configs) -> anyhow::Result<Self>;
 }
 
-impl Settings {
+impl Configs {
     pub fn extract<T: Extract>(&self) -> anyhow::Result<T> {
         T::extract(self)
     }

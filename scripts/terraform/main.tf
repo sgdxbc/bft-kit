@@ -105,6 +105,10 @@ resource "aws_instance" "service" {
   subnet_id              = resource.aws_subnet.main.id
   vpc_security_group_ids = [resource.aws_security_group.main.id]
   key_name               = aws_key_pair.main.key_name
+
+  root_block_device {
+    volume_size = 20
+  }
 }
 
 resource "aws_instance" "workload" {

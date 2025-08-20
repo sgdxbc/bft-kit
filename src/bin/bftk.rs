@@ -3,7 +3,7 @@ use std::{env::args, fs::File, sync::Arc, time::Duration};
 use bft_kit::{
     app::null::Null,
     init_logging_file,
-    parse::Settings,
+    parse::Configs,
     replication::{ReplicaIndex, in_memory, unreplicated},
     service::{
         big::{
@@ -22,37 +22,37 @@ use tokio_util::sync::CancellationToken;
 fn main() -> anyhow::Result<()> {
     init_logging_file(File::create("/tmp/bftk-log")?);
     set_affinity_block_on(async {
-        let mut settings = Settings::new();
+        let mut configs = Configs::new();
         for name in ["addr", "task"] {
-            settings.parse(&read_to_string(format!("bftk-configs/{name}.conf")).await?);
+            configs.parse(&read_to_string(format!("bftk-configs/{name}.conf")).await?);
             if let Ok(s) = read_to_string(format!("bftk-configs/{name}.override.conf")).await {
-                settings.parse(&s)
+                configs.parse(&s)
             }
         }
         match args().nth(1).as_deref() {
-            Some("workload") => workload(settings).await,
+            Some("workload") => workload(configs).await,
             Some("service") => {
                 let index = args()
                     .nth(2)
                     .ok_or(anyhow::format_err!("missing index"))?
                     .parse()?;
-                service(index, settings).await
+                service(index, configs).await
             }
             _ => anyhow::bail!("unknown command"),
         }
     })
 }
 
-async fn workload(settings: Settings) -> anyhow::Result<()> {
-    let settings = Arc::new(settings);
+async fn workload(configs: Configs) -> anyhow::Result<()> {
+    let configs = Arc::new(configs);
 
     let cancel = CancellationToken::new();
 
     let mut worker_set = JoinSet::new();
-    for _ in 0..settings.get("workload.concurrency")? {
+    for _ in 0..configs.get("workload.concurrency")? {
         let client_id = random();
-        let client = unreplicated::Client::<Null>::new(client_id, settings.extract()?);
-        worker_set.spawn(worker(settings.clone(), client_id, client, cancel.clone()));
+        let client = unreplicated::Client::<Null>::new(client_id, configs.extract()?);
+        worker_set.spawn(worker(configs.clone(), client_id, client, cancel.clone()));
     }
 
     let worker_task = async {
@@ -62,7 +62,7 @@ async fn workload(settings: Settings) -> anyhow::Result<()> {
         }
         anyhow::Ok(latencies)
     };
-    let duration = Duration::from_secs_f32(settings.get("workload.duration")?);
+    let duration = Duration::from_secs_f32(configs.get("workload.duration")?);
     let cancel_task = async move {
         sleep(duration).await;
         cancel.cancel();
@@ -78,41 +78,41 @@ async fn workload(settings: Settings) -> anyhow::Result<()> {
 }
 
 async fn worker(
-    settings: impl AsRef<Settings>,
+    configs: impl AsRef<Configs>,
     client_id: u32,
     client: unreplicated::Client<Null>,
     cancel: CancellationToken,
 ) -> anyhow::Result<NanoLatencies> {
-    let settings = settings.as_ref();
-    if settings.get("workload.close-loop")? {
+    let configs = configs.as_ref();
+    if configs.get("workload.close-loop")? {
         let worker = CloseLoopWorker::new(Null, client);
-        run_worker(worker, client_id, settings.get_values("addr")?, cancel).await
+        run_worker(worker, client_id, configs.get_values("addr")?, cancel).await
     } else {
-        let target_tput = settings.get("open-loop.target-tput")?;
+        let target_tput = configs.get("open-loop.target-tput")?;
         let worker = OpenLoopWorker::new(Null, client, target_tput);
-        run_worker(worker, client_id, settings.get_values("addr")?, cancel).await
+        run_worker(worker, client_id, configs.get_values("addr")?, cancel).await
     }
 }
 
-async fn service(index: ReplicaIndex, settings: Settings) -> anyhow::Result<()> {
-    let settings = Arc::new(settings);
+async fn service(index: ReplicaIndex, configs: Configs) -> anyhow::Result<()> {
+    let configs = Arc::new(configs);
     let cancel = CancellationToken::new();
     let service_task = {
-        let settings = settings.clone();
+        let configs = configs.clone();
         let cancel = cancel.clone();
         async move {
-            match &*settings.get::<String>("protocol")? {
-                "unsharded" => service_unsharded(index, &settings, cancel).await,
-                "big" => service_big(index, &settings, cancel).await,
+            match &*configs.get::<String>("protocol")? {
+                "unsharded" => service_unsharded(index, &configs, cancel).await,
+                "big" => service_big(index, &configs, cancel).await,
                 _ => anyhow::bail!("unknown protocol"),
             }
         }
     };
     let cancel_task = async move {
-        if settings.get::<String>("protocol")? != "big" {
+        if configs.get::<String>("protocol")? != "big" {
             ctrl_c().await?
         } else {
-            sleep(Duration::from_secs_f32(settings.get("workload.duration")?)).await
+            sleep(Duration::from_secs_f32(configs.get("workload.duration")?)).await
         }
         cancel.cancel();
         anyhow::Ok(())
@@ -123,28 +123,28 @@ async fn service(index: ReplicaIndex, settings: Settings) -> anyhow::Result<()> 
 
 async fn service_unsharded(
     index: ReplicaIndex,
-    settings: &Settings,
+    configs: &Configs,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let service = unsharded::Service::new(Null, unreplicated::Replica::new());
-    unsharded::transport::run_service(service, index, settings.get_values("addr")?, cancel).await
+    unsharded::transport::run_service(service, index, configs.get_values("addr")?, cancel).await
 }
 
 async fn service_big(
     index: ReplicaIndex,
-    settings: &Settings,
+    configs: &Configs,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let num_shard = settings.get("big.num-shard")?;
+    let num_shard = configs.get("big.num-shard")?;
     let app = DataShardingSchema::<Kv>::new(num_shard);
     let replica = in_memory::Replica::new(
         Workload(StdRng::seed_from_u64(117418)),
-        settings.get("in-memory.batch-size")?,
+        configs.get("in-memory.batch-size")?,
     );
-    let addrs = settings.get_values("addr")?;
-    let service_config = settings.extract()?;
-    if settings.get("big.sharded")? {
-        let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
+    let addrs = configs.get_values("addr")?;
+    let service_config = configs.extract()?;
+    if configs.get("big.sharded")? {
+        let storage = ShardedStorage::new(configs.extract()?, index, [index].into(), &app);
         let service = big::Service::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
     } else {
