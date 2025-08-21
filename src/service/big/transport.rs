@@ -172,6 +172,7 @@ where
     let temp_dir = tempfile::Builder::new().prefix("big-storage").tempdir()?;
     let mut db = DB::open_default(temp_dir.path())?;
     service.init_store(&init_shard, &mut db)?;
+    tracing::info!("store initialized");
 
     let (store_command_sender, store_command_receiver) = mpsc::channel(100);
     let store_task = spawn_blocking({
@@ -192,6 +193,7 @@ where
     )
     .await?;
     tracing::info!(%replica_index, "enter event loop");
+
     loop {
         let tick = async {
             if let Some(tick_after) = tick_after {

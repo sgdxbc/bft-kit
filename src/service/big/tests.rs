@@ -45,7 +45,7 @@ struct SystemState {
 
 impl Store for HashMap<String, Bytes> {
     fn write(&mut self, key: String, value: Bytes) -> anyhow::Result<()> {
-        self.insert(key, value.into());
+        self.insert(key, value);
         Ok(())
     }
 }
