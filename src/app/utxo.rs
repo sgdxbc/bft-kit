@@ -2,12 +2,9 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use crate::{
-    crypto::{Digest, DigestHash as _, UpdateHash, verify},
-    service::ServiceApp,
-};
+use crate::crypto::{Digest, DigestHash as _, UpdateHash, verify};
 
-use super::AppState;
+use super::{AppProtocol, AppState};
 
 pub type TxId = Digest;
 pub type PublicKey = crate::crypto::PublicKey;
@@ -102,15 +99,18 @@ impl Utxo {
     }
 }
 
-impl ServiceApp for Utxo {
+impl AppProtocol for Utxo {
     type Op = UtxoOp;
     type Res = Result<(), UtxoError>;
 }
 
 impl AppState for Utxo {
-    type App = Self;
+    type Protocol = Self;
 
-    fn execute(&mut self, op: <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res {
+    fn execute(
+        &mut self,
+        op: <Self::Protocol as AppProtocol>::Op,
+    ) -> <Self::Protocol as AppProtocol>::Res {
         if matches!(op.input, UtxoOpInput::Spend(_)) && self.total_input(&op)? < op.total_output() {
             return Err(UtxoError::InsufficientFunds);
         }

@@ -1,18 +1,19 @@
 use rocksdb::{DB, Error};
 
-use crate::service::ServiceApp;
-
 use super::{
-    AppState,
+    AppProtocol, AppState,
     ycsb::{Ycsb, YcsbOp, YcsbRes},
 };
 
 pub struct Rocksdb(pub DB);
 
 impl AppState for Rocksdb {
-    type App = Ycsb;
+    type Protocol = Ycsb;
 
-    fn execute(&mut self, op: <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res {
+    fn execute(
+        &mut self,
+        op: <Self::Protocol as AppProtocol>::Op,
+    ) -> <Self::Protocol as AppProtocol>::Res {
         Self::execute(self, op).unwrap_or_else(|err| YcsbRes::Err(err.to_string()))
     }
 }

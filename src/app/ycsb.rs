@@ -3,14 +3,13 @@ use std::time::Instant;
 use rand::{Rng as _, rngs::StdRng};
 use rand_distr::Alphanumeric;
 
-use crate::{
-    service::ServiceApp,
-    workload::{NanoLatencies, WorkloadState},
-};
+use crate::workload::{NanoLatencies, WorkloadState};
+
+use super::AppProtocol;
 
 pub struct Ycsb;
 
-impl ServiceApp for Ycsb {
+impl AppProtocol for Ycsb {
     type Op = YcsbOp;
     type Res = YcsbRes;
 }
@@ -58,15 +57,10 @@ impl From<YcsbWorkload> for NanoLatencies {
 }
 
 impl WorkloadState for YcsbWorkload {
-    type App = Ycsb;
+    type Protocol = Ycsb;
     type Metadata = Instant;
 
-    fn next_op(
-        &mut self,
-    ) -> Option<(
-        <Self::App as crate::service::ServiceApp>::Op,
-        Self::Metadata,
-    )> {
+    fn next_op(&mut self) -> Option<(<Self::Protocol as AppProtocol>::Op, Self::Metadata)> {
         let k = format!("key{}", self.rng.random_range(0..self.config.num_key));
         let v = (&mut self.rng)
             .sample_iter(Alphanumeric)
@@ -79,7 +73,7 @@ impl WorkloadState for YcsbWorkload {
     fn complete(
         &mut self,
         start: Self::Metadata,
-        res: <Self::App as crate::service::ServiceApp>::Res,
+        res: <Self::Protocol as AppProtocol>::Res,
     ) -> anyhow::Result<()> {
         if let YcsbRes::Err(err) = res {
             anyhow::bail!(err)

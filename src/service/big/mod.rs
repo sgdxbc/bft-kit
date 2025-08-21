@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    ClientId, ClientSeq, Message, Output, Reply, Request, Send, ServiceApp, ServiceIndex,
+    ClientId, ClientSeq, Message, Output, Reply, Request, Send, AppProtocol, ServiceIndex,
     ServiceState,
 };
 
@@ -29,7 +29,7 @@ mod tests;
 type ShardIndex = u32;
 type StateVersion = u64;
 
-pub trait DataShardingApp: ServiceApp + Sized {
+pub trait DataShardingApp: AppProtocol + Sized {
     type Shard;
     fn new_shard(&self, index: ShardIndex) -> Self::Shard;
 
@@ -100,7 +100,7 @@ pub struct ServiceConfig {
 
 type Replicated<A, R> = (
     VecDeque<Executing<A>>,
-    <R as ReplicationState<Request<<A as ServiceApp>::Op>>>::Metadata,
+    <R as ReplicationState<Request<<A as AppProtocol>::Op>>>::Metadata,
 );
 
 struct Executing<A: DataShardingApp> {

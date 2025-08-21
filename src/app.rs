@@ -2,7 +2,6 @@ use std::{collections::VecDeque, time::Duration};
 
 use crate::{
     Never,
-    service::ServiceApp,
     state::{Proceed, State},
 };
 
@@ -12,29 +11,40 @@ pub mod rocksdb;
 pub mod utxo;
 pub mod ycsb;
 
+pub trait AppProtocol {
+    type Op;
+    type Res;
+}
+
 pub trait AppState {
-    type App: ServiceApp;
-    fn execute(&mut self, op: <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res;
+    type Protocol: AppProtocol;
+    fn execute(
+        &mut self,
+        op: <Self::Protocol as AppProtocol>::Op,
+    ) -> <Self::Protocol as AppProtocol>::Res;
 }
 
 pub struct Batched<A>(A);
 
-impl<A: ServiceApp> ServiceApp for Batched<A> {
+impl<A: AppProtocol> AppProtocol for Batched<A> {
     type Op = Vec<A::Op>;
     type Res = Vec<A::Res>;
 }
 
 impl<A: AppState> AppState for Batched<A> {
-    type App = Batched<A::App>;
+    type Protocol = Batched<A::Protocol>;
 
-    fn execute(&mut self, ops: <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res {
+    fn execute(
+        &mut self,
+        ops: <Self::Protocol as AppProtocol>::Op,
+    ) -> <Self::Protocol as AppProtocol>::Res {
         ops.into_iter().map(|op| self.0.execute(op)).collect()
     }
 }
 
 pub struct Buffered<A: AppState> {
     app: A,
-    ops: VecDeque<<A::App as ServiceApp>::Op>,
+    ops: VecDeque<<A::Protocol as AppProtocol>::Op>,
 }
 
 impl<A: AppState> From<A> for Buffered<A> {
@@ -48,7 +58,7 @@ impl<A: AppState> From<A> for Buffered<A> {
 
 impl<A: AppState> State for Buffered<A> {
     type Send = Never;
-    type Output = <A::App as ServiceApp>::Res;
+    type Output = <A::Protocol as AppProtocol>::Res;
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         match self.ops.pop_front() {
             Some(op) => Proceed::Output(self.app.execute(op)),
@@ -56,7 +66,7 @@ impl<A: AppState> State for Buffered<A> {
         }
     }
 
-    type Message = <A::App as ServiceApp>::Op;
+    type Message = <A::Protocol as AppProtocol>::Op;
     fn receive(&mut self, op: Self::Message) {
         self.ops.push_back(op);
     }

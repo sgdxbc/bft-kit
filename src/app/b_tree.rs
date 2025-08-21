@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::service::ServiceApp;
-
 use super::{
-    AppState,
+    AppProtocol, AppState,
     ycsb::{Ycsb, YcsbOp, YcsbRes},
 };
 
@@ -26,9 +24,12 @@ impl Default for BTree {
 }
 
 impl AppState for BTree {
-    type App = Ycsb;
+    type Protocol = Ycsb;
 
-    fn execute(&mut self, op: <Self::App as ServiceApp>::Op) -> <Self::App as ServiceApp>::Res {
+    fn execute(
+        &mut self,
+        op: <Self::Protocol as AppProtocol>::Op,
+    ) -> <Self::Protocol as AppProtocol>::Res {
         match op {
             YcsbOp::Insert(key, value) => {
                 self.store.insert(key, value);

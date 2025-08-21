@@ -9,7 +9,7 @@ use derive_where::derive_where;
 
 use crate::{
     app::utxo::{UtxoError, UtxoId, UtxoOp, UtxoOpInput},
-    service::ServiceApp,
+    service::AppProtocol,
 };
 
 use super::{DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState, ShardIndex};
@@ -39,7 +39,7 @@ pub struct StaticDispatchExecute<A: DataShardingApp> {
 }
 
 impl<A> DataShardingSchema<A> {
-    fn static_dispatch(&self, op: <Self as ServiceApp>::Op) -> StaticDispatchExecute<Self>
+    fn static_dispatch(&self, op: <Self as AppProtocol>::Op) -> StaticDispatchExecute<Self>
     where
         Self: DataShardingApp,
     {
@@ -74,7 +74,7 @@ impl<A: StaticDispatch> DataShardingExecuteState<A> for StaticDispatchExecute<A>
 
 pub struct Null;
 
-impl ServiceApp for DataShardingSchema<Null> {
+impl AppProtocol for DataShardingSchema<Null> {
     type Op = ();
     type Res = ();
 }
@@ -94,7 +94,7 @@ impl DataShardingExecuteState<DataShardingSchema<Null>>
     fn proceed(
         &mut self,
         _shards: &mut HashMap<ShardIndex, <DataShardingSchema<Null> as DataShardingApp>::Shard>,
-    ) -> DataShardingExecuteOutput<<DataShardingSchema<Null> as ServiceApp>::Res> {
+    ) -> DataShardingExecuteOutput<<DataShardingSchema<Null> as AppProtocol>::Res> {
         DataShardingExecuteOutput::Complete(())
     }
 }
@@ -113,7 +113,7 @@ pub enum KvRes {
     Get(Option<String>),
 }
 
-impl ServiceApp for DataShardingSchema<Kv> {
+impl AppProtocol for DataShardingSchema<Kv> {
     type Op = Vec<KvOp>;
     type Res = Vec<KvRes>;
 }
@@ -173,14 +173,14 @@ pub mod ycsb {
 
     pub struct AdaptKv<W>(pub W);
 
-    impl<W: WorkloadState<App = Ycsb>> WorkloadState for AdaptKv<W> {
-        type App = DataShardingSchema<Kv>;
+    impl<W: WorkloadState<Protocol = Ycsb>> WorkloadState for AdaptKv<W> {
+        type Protocol = DataShardingSchema<Kv>;
         type Metadata = W::Metadata;
 
         fn next_op(
             &mut self,
         ) -> Option<(
-            <Self::App as crate::service::ServiceApp>::Op,
+            <Self::Protocol as crate::service::AppProtocol>::Op,
             Self::Metadata,
         )> {
             let (op, metadata) = self.0.next_op()?;
@@ -195,7 +195,7 @@ pub mod ycsb {
         fn complete(
             &mut self,
             metadata: Self::Metadata,
-            mut res: <Self::App as crate::service::ServiceApp>::Res,
+            mut res: <Self::Protocol as crate::service::AppProtocol>::Res,
         ) -> anyhow::Result<()> {
             anyhow::ensure!(res.len() == 1);
             let res = match res.remove(0) {
@@ -210,7 +210,7 @@ pub mod ycsb {
 
 pub struct Utxo;
 
-impl ServiceApp for DataShardingSchema<Utxo> {
+impl AppProtocol for DataShardingSchema<Utxo> {
     type Op = UtxoOp;
     type Res = Result<(), UtxoError>;
 }

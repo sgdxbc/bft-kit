@@ -1,11 +1,11 @@
 use bincode::{Decode, Encode};
 
-use crate::state::State;
+use crate::{app::AppProtocol, state::State};
 
 pub mod big;
 pub mod unsharded;
 
-pub trait ServiceState<A: ServiceApp>:
+pub trait ServiceState<A: AppProtocol>:
     State<
         Send = Send<Reply<A::Res, Self::Metadata>, Self::ServiceSend>,
         Message = Message<Request<A::Op>, Self::ServiceMessage>,
@@ -17,11 +17,6 @@ pub trait ServiceState<A: ServiceApp>:
 
     fn read_ok(&mut self, key: String, value: Vec<u8>);
     fn write_ok(&mut self, key: String);
-}
-
-pub trait ServiceApp {
-    type Op;
-    type Res;
 }
 
 pub enum Send<R, S> {
