@@ -143,8 +143,7 @@ async fn service_big(
     configs: &Configs,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let num_shard = configs.get("big.num-shard")?;
-    let app = Kv(DataShardingSchema::new(num_shard));
+    let app = Kv(DataShardingSchema::new(configs.get("big.num-shard")?));
     let mut workload = AdaptKv(YcsbWorkload::new(
         configs.extract()?,
         StdRng::seed_from_u64(117418),
@@ -160,11 +159,11 @@ async fn service_big(
     let addrs = configs.get_values("addr")?;
     let service_config = configs.extract()?;
     if configs.get("big.sharded")? {
-        let storage = ShardedStorage::new(configs.extract()?, index, [index].into(), &app);
+        let storage = ShardedStorage::new(configs.extract()?, index, [index].into());
         let service = BigService::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
     } else {
-        let storage = FullReplicationStorage::new(num_shard, &app);
+        let storage = FullReplicationStorage::new();
         let service = BigService::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
     }

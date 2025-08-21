@@ -34,13 +34,13 @@ fn print_placement() {
 
 type A = Kv;
 type R = UnreplicatedReplica<Request<Vec<KvOp>>>;
-type S = ShardedStorage<<A as DataShardingApp>::Shard>;
+type S = ShardedStorage;
 type ServiceMessage = super::ServiceMessage<<R as State>::Message, <S as State>::Message>;
 
 struct SystemState {
     services: Vec<BigService<A, R>>,
     service_network: VecDeque<(ServiceIndex, ServiceMessage)>,
-    service_storage: Vec<HashMap<String, Vec<u8>>>,
+    service_storage: Vec<HashMap<String, Bytes>>,
     replies: Vec<(ClientId, Reply<Vec<KvRes>, ()>)>,
 }
 
@@ -52,7 +52,7 @@ fn idle_pending() {
         num_shard: 1,
         num_active_copy: 1,
     };
-    let storage = ShardedStorage::new(storage_config, 0, [0].into(), &app);
+    let storage = ShardedStorage::new(storage_config, 0, [0].into());
     let service = BigService::new(
         app,
         UnreplicatedReplica::new(),
@@ -155,7 +155,7 @@ fn one_service() {
         num_shard: 1,
         num_active_copy: 1,
     };
-    let storage = ShardedStorage::new(storage_config, 0, [0].into(), &app);
+    let storage = ShardedStorage::new(storage_config, 0, [0].into());
     let service = BigService::new(
         app,
         UnreplicatedReplica::new(),
@@ -194,7 +194,7 @@ impl SystemState {
                         num_shard: 100,
                         num_active_copy: 1,
                     };
-                    let storage = ShardedStorage::new(storage_config, index, [index].into(), &app);
+                    let storage = ShardedStorage::new(storage_config, index, [index].into());
                     BigService::new(
                         app,
                         UnreplicatedReplica::new(),

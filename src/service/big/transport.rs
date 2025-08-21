@@ -39,16 +39,12 @@ enum Event {
     Message(Vec<u8>),
     ReplicationMessage(Vec<u8>),
     StorageMessage(Vec<u8>),
-    StoreRead(String, Vec<u8>),
+    StoreRead(String, Bytes),
     StoreWrite(String),
     Tick,
 }
 
-pub async fn run_service<
-    A: DataShardingApp,
-    R: ReplicationState<Request<A::Op>>,
-    S: StorageState<A::Shard>,
->(
+pub async fn run_service<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState>(
     mut service: BigService<A, R, S>,
     replica_index: ReplicaIndex,
     addrs: Vec<SocketAddr>,
@@ -293,11 +289,7 @@ where
     Ok(())
 }
 
-async fn service_proceed<
-    A: DataShardingApp,
-    R: ReplicationState<Request<A::Op>>,
-    S: StorageState<A::Shard>,
->(
+async fn service_proceed<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState>(
     service: &mut BigService<A, R, S>,
     since_start: Duration,
     connection_tables: &ConnectionTables,
@@ -350,13 +342,13 @@ where
     }
 }
 
-impl<T: ReplicaTable, S> PerformSend<ShardedStorageSend<S>> for T
+impl<T: ReplicaTable> PerformSend<ShardedStorageSend> for T
 where
-    ShardedStorageMessage<S>: Encode,
+    ShardedStorageMessage: Encode,
 {
     fn perform(
         &self,
-        (dest, message): ShardedStorageSend<S>,
+        (dest, message): ShardedStorageSend,
         send_tracker: &TaskTracker,
     ) -> anyhow::Result<()> {
         let bytes = bincode::encode_to_vec(message, BINCODE_CONFIG)?;
@@ -407,7 +399,7 @@ fn store_task(
                     tracing::warn!(%key, "key not found");
                     continue;
                 };
-                event_sender.blocking_send(Event::StoreRead(key, value))
+                event_sender.blocking_send(Event::StoreRead(key, value.into()))
             }
             StoreCommand::Write(key, value) => {
                 db.put(&key, value)?;

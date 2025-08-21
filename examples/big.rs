@@ -44,8 +44,7 @@ ycsb.value-len          10
     for index in 0..configs.get("big.num-node")? {
         let app = Kv(DataShardingSchema::new(configs.get("big.num-shard")?));
         // let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
-        let storage =
-            bft_kit::service::big::FullReplicationStorage::new(configs.get("big.num-shard")?, &app);
+        let storage = bft_kit::service::big::FullReplicationStorage::new();
         let mut workload = AdaptKv(YcsbWorkload::new(
             configs.extract()?,
             StdRng::seed_from_u64(117418),

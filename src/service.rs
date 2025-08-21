@@ -1,4 +1,5 @@
 use bincode::{Decode, Encode};
+use tokio_util::bytes::Bytes;
 
 use crate::{app::AppProtocol, state::State};
 
@@ -15,7 +16,7 @@ pub trait ServiceState<A: AppProtocol>:
     type ServiceMessage;
     type Metadata;
 
-    fn read_ok(&mut self, key: String, value: Vec<u8>);
+    fn read_ok(&mut self, key: String, value: Bytes);
     fn write_ok(&mut self, key: String);
 }
 
@@ -34,7 +35,7 @@ pub enum Dest {
 
 pub enum Output {
     Read(String),
-    Write(String, Vec<u8>),
+    Write(String, Bytes),
 }
 
 #[derive(Debug)]

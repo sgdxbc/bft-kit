@@ -7,7 +7,6 @@ use std::{
 use bincode::{Decode, Encode};
 
 use crate::{
-    Never,
     app::utxo::{UtxoData, UtxoError, UtxoId, UtxoOp, UtxoOpInput},
     service::AppProtocol,
 };
@@ -20,6 +19,10 @@ pub trait DataShardingApp: AppProtocol {
     type Shard;
     type Execute: DataShardingExecuteState<App = Self>;
     fn new_execute(&self, op: Self::Op) -> Self::Execute;
+}
+
+pub trait InitDataShard<S> {
+    fn init(&self, index: ShardIndex) -> S;
 }
 
 pub trait DataShardingExecuteState {
@@ -55,7 +58,9 @@ impl DataShardingSchema {
 pub use crate::app::null::Null;
 
 impl DataShardingApp for Null {
-    type Shard = Never;
+    // more appropriately this would be Never, but that requires storage to be able
+    // to _not_ store shards it ought to store
+    type Shard = ();
     type Execute = Self;
     fn new_execute(&self, (): Self::Op) -> Self::Execute {
         Null
@@ -263,7 +268,7 @@ impl UtxoExecute {
         }
 
         for (shard_index, outputs) in &self.outputs {
-            let shard = shards.get_mut(&shard_index).unwrap();
+            let shard = shards.get_mut(shard_index).unwrap();
             for (id, output) in outputs {
                 shard.insert_output(id.clone(), output.clone())
             }

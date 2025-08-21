@@ -3,6 +3,8 @@ use std::{
     time::Duration,
 };
 
+use tokio_util::bytes::Bytes;
+
 use crate::{
     Never,
     app::AppState,
@@ -58,7 +60,7 @@ where
     type ServiceMessage = R::Message;
     type Metadata = R::Metadata;
 
-    fn read_ok(&mut self, _key: String, _value: Vec<u8>) {
+    fn read_ok(&mut self, _key: String, _value: Bytes) {
         unreachable!()
     }
 

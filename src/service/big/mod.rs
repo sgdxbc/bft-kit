@@ -4,9 +4,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bincode::{Decode, Encode};
+use bincode::{Decode, Encode, decode_from_slice};
 use lru::LruCache;
 use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
+use tokio_util::bytes::Bytes;
 
 use crate::{
     Never,
@@ -16,7 +17,8 @@ use crate::{
 };
 
 use self::app::{
-    DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState as _, ShardIndex,
+    DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState as _, InitDataShard,
+    ShardIndex,
 };
 
 use super::{
@@ -32,28 +34,28 @@ mod tests;
 
 type StateVersion = u64;
 
-pub trait StorageState<S>: State<Output = StorageStateOutput<S>> {
+pub trait StorageState: State<Output = StorageStateOutput> {
     fn fetch(&mut self, index: ShardIndex);
-    fn bump(&mut self, shards: HashMap<ShardIndex, S>);
+    fn bump(&mut self, shards: HashMap<ShardIndex, Bytes>);
     #[allow(unused_variables)]
     fn will_fetch(&mut self, index: ShardIndex, version_ahead: StateVersion) {}
 
-    fn read_ok(&mut self, key: String, value: Vec<u8>);
+    fn read_ok(&mut self, key: String, value: Bytes);
     fn write_ok(&mut self, key: String);
 }
 
-pub enum StorageStateOutput<S> {
-    Fetched(ShardIndex, S),
+pub enum StorageStateOutput {
+    Fetched(ShardIndex, Bytes),
     Skipped(StateVersion), // number of versions to skip execute
 
     Read(String),
-    Write(String, Vec<u8>),
+    Write(String, Bytes),
 }
 
 pub struct BigService<
     A: DataShardingApp,
     R: ReplicationState<Request<A::Op>>,
-    S: State = ShardedStorage<<A as DataShardingApp>::Shard>,
+    S: State = ShardedStorage,
 > {
     // config: ServiceConfig,
     // generic sub states
@@ -67,7 +69,7 @@ pub struct BigService<
     fetch_indices: HashSet<ShardIndex>,
     num_skip: StateVersion,
     // additional data for optimization
-    shard_cache: Option<LruCache<ShardIndex, A::Shard>>,
+    shard_cache: Option<LruCache<ShardIndex, Bytes>>,
     // cross interface buffers
     submit_buffer: Vec<Request<A::Op>>,
     #[allow(clippy::type_complexity)] // this matches <Self as State>::Send
@@ -92,9 +94,7 @@ struct Executing<A: DataShardingApp> {
     start: Instant,
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>>
-    BigService<A, R, S>
-{
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState> BigService<A, R, S> {
     pub fn new(app: A, replication: R, storage: S, config: ServiceConfig) -> Self {
         Self {
             app,
@@ -129,10 +129,10 @@ pub enum ServiceMessage<RM, SM> {
     Storage(SM),
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>>
-    ServiceState<A> for BigService<A, R, S>
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState> ServiceState<A>
+    for BigService<A, R, S>
 where
-    A::Shard: Clone,
+    A::Shard: Encode + Decode<()>,
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
 {
@@ -140,7 +140,7 @@ where
     type ServiceMessage = ServiceMessage<R::Message, S::Message>;
     type Metadata = R::Metadata;
 
-    fn read_ok(&mut self, key: String, value: Vec<u8>) {
+    fn read_ok(&mut self, key: String, value: Bytes) {
         self.storage.read_ok(key, value)
     }
 
@@ -149,10 +149,10 @@ where
     }
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>> State
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState> State
     for BigService<A, R, S>
 where
-    A::Shard: Clone,
+    A::Shard: Encode + Decode<()>,
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
 {
@@ -187,12 +187,14 @@ where
                     DataShardingExecuteOutput::RequireAccess(required_indices) => {
                         for shard_index in required_indices {
                             assert!(!self.fetched_shards.contains_key(&shard_index));
-                            if let Some(shard) = self
+                            if let Some(bytes) = self
                                 .shard_cache
                                 .as_mut()
                                 .and_then(|shard_cache| shard_cache.get(&shard_index))
                             {
-                                self.fetched_shards.insert(shard_index, shard.clone());
+                                let (shard, _len) =
+                                    decode_from_slice(bytes, BINCODE_CONFIG).unwrap();
+                                self.fetched_shards.insert(shard_index, shard);
                             } else {
                                 self.storage.fetch(shard_index)
                             }
@@ -206,12 +208,21 @@ where
                     DataShardingExecuteOutput::Complete(res) => {
                         self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
 
+                        let shards = take(&mut self.fetched_shards)
+                            .into_iter()
+                            .map(|(index, shard)| {
+                                let bytes = bincode::encode_to_vec(shard, BINCODE_CONFIG)
+                                    .unwrap()
+                                    .into();
+                                (index, bytes)
+                            })
+                            .collect::<HashMap<_, Bytes>>();
                         if let Some(shard_cache) = &mut self.shard_cache {
-                            for (&shard_index, shard) in &self.fetched_shards {
+                            for (&shard_index, shard) in &shards {
                                 shard_cache.put(shard_index, shard.clone());
                             }
                         }
-                        self.storage.bump(take(&mut self.fetched_shards));
+                        self.storage.bump(shards);
                         self.fetch_indices.clear();
 
                         let reply = Reply {
@@ -240,7 +251,8 @@ where
                 Proceed::Output(StorageStateOutput::Write(key, value)) => {
                     return Proceed::Output(Output::Write(key, value));
                 }
-                Proceed::Output(StorageStateOutput::Fetched(shard_index, shard)) => {
+                Proceed::Output(StorageStateOutput::Fetched(shard_index, bytes)) => {
+                    let (shard, _len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
                     self.fetched_shards.insert(shard_index, shard);
                     if self.fetched_shards.len() == self.fetch_indices.len() {
                         return self.proceed(since_start);
@@ -330,7 +342,19 @@ const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard
 
 type NodeIndex = ServiceIndex;
 
-pub struct ShardedStorage<S> {
+pub trait InitStore<S> {
+    fn init(
+        &self,
+        init_shard: &impl InitDataShard<S>,
+        store: &mut impl Store,
+    ) -> anyhow::Result<()>;
+}
+
+pub trait Store {
+    fn write(&mut self, key: String, value: Vec<u8>) -> anyhow::Result<()>;
+}
+
+pub struct ShardedStorage {
     config: ShardedStorageConfig,
     replica_index: ReplicaIndex,
     node_indices: HashSet<NodeIndex>,
@@ -338,11 +362,11 @@ pub struct ShardedStorage<S> {
     version: StateVersion, // of shards[-1]
     stored_shards: Vec<HashMap<ShardIndex, ()>>,
     fetching: HashSet<ShardIndex>,
-    fetched_shards: HashMap<ShardIndex, (StateVersion, S)>,
+    fetched_shards: HashMap<ShardIndex, (StateVersion, Bytes)>,
     last_versions: Vec<StateVersion>, // [shard index -> version]
     reordering_fetch_table: HashMap<StateVersion, HashMap<ShardIndex, HashSet<ReplicaIndex>>>,
 
-    proceed_buffer: Vec<Proceed<ShardedStorageSend<S>, StorageStateOutput<S>>>,
+    proceed_buffer: Vec<Proceed<ShardedStorageSend, StorageStateOutput>>,
 }
 
 pub struct ShardedStorageConfig {
@@ -364,24 +388,17 @@ impl ShardedStorageConfig {
     }
 }
 
-impl<S> ShardedStorage<S> {
+impl ShardedStorage {
     pub fn new(
         config: ShardedStorageConfig,
         replica_index: ReplicaIndex,
         node_indices: HashSet<NodeIndex>,
-        app: &impl DataShardingApp<Shard = S>,
     ) -> Self {
-        let mut shards = HashMap::new();
-        for shard_index in 0..config.num_shard {
-            if config.should_store(&node_indices, shard_index) {
-                shards.insert(shard_index, ());
-            }
-        }
         Self {
             replica_index,
             node_indices,
             version: 0,
-            stored_shards: vec![shards],
+            stored_shards: Default::default(),
             fetching: Default::default(),
             fetched_shards: Default::default(),
             last_versions: vec![0; config.num_shard as _],
@@ -393,9 +410,9 @@ impl<S> ShardedStorage<S> {
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
-pub enum ShardedStorageMessage<S> {
+pub enum ShardedStorageMessage {
     Fetch(message::Fetch),
-    FetchOk(message::FetchOk<S>),
+    FetchOk(message::FetchOk),
 }
 
 // should we just add a Multi variant to replication::Dest?
@@ -405,9 +422,9 @@ pub enum Dest {
     All,
 }
 
-type ShardedStorageSend<S> = (Dest, ShardedStorageMessage<S>);
+type ShardedStorageSend = (Dest, ShardedStorageMessage);
 
-impl<S: Clone> StorageState<S> for ShardedStorage<S> {
+impl StorageState for ShardedStorage {
     fn fetch(&mut self, index: ShardIndex) {
         // tracing::trace!(%self.replica_index, shard_index = %index);
 
@@ -450,7 +467,7 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
     //         .push(Proceed::Send((dest, ShardedStorageMessage::Fetch(fetch))))
     // }
 
-    fn bump(&mut self, mut shards: HashMap<ShardIndex, S>) {
+    fn bump(&mut self, mut shards: HashMap<ShardIndex, Bytes>) {
         tracing::trace!(%self.replica_index, %self.version, "bumping");
 
         if !self.fetching.is_empty() {
@@ -483,7 +500,7 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
         }
     }
 
-    fn read_ok(&mut self, _key: String, _value: Vec<u8>) {
+    fn read_ok(&mut self, _key: String, _value: Bytes) {
         unreachable!()
     }
 
@@ -492,9 +509,9 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
     }
 }
 
-impl<S: Clone> State for ShardedStorage<S> {
-    type Send = ShardedStorageSend<S>;
-    type Output = StorageStateOutput<S>;
+impl State for ShardedStorage {
+    type Send = ShardedStorageSend;
+    type Output = StorageStateOutput;
 
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(proceed) = self.proceed_buffer.pop() {
@@ -510,7 +527,7 @@ impl<S: Clone> State for ShardedStorage<S> {
         Proceed::Pending(None)
     }
 
-    type Message = ShardedStorageMessage<S>;
+    type Message = ShardedStorageMessage;
     fn receive(&mut self, message: Self::Message) {
         match message {
             ShardedStorageMessage::Fetch(fetch) => {
@@ -536,22 +553,24 @@ impl<S: Clone> State for ShardedStorage<S> {
                 {
                     return;
                 }
-                self.fetched_shards
-                    .insert(fetch_ok.shard_index, (fetch_ok.version, fetch_ok.shard));
+                self.fetched_shards.insert(
+                    fetch_ok.shard_index,
+                    (fetch_ok.version, fetch_ok.bytes.into()),
+                );
             }
         }
     }
 }
 
-impl<S: Clone> ShardedStorage<S> {
+impl ShardedStorage {
     fn reply_fetch(&mut self, version: StateVersion, shard_index: ShardIndex, dest: Dest) {
-        let Some(shard) = self.get_shard(version, shard_index) else {
+        let Some(bytes) = self.get_shard(version, shard_index) else {
             return; // fetcher will be notified by a bump quorum
         };
         let fetch_ok = message::FetchOk {
             version,
             shard_index,
-            shard: shard.clone(),
+            bytes: bytes.to_vec(),
         };
         self.proceed_buffer.push(Proceed::Send((
             dest,
@@ -559,7 +578,7 @@ impl<S: Clone> ShardedStorage<S> {
         )))
     }
 
-    fn get_shard(&mut self, version: u64, shard_index: u32) -> Option<&S> {
+    fn get_shard(&mut self, version: u64, shard_index: u32) -> Option<&Bytes> {
         // let first_version = self.version - (self.stored_shards.len() - 1) as StateVersion;
         // for version in (first_version..=version).rev() {
         //     if let Some(shard) =
@@ -572,52 +591,48 @@ impl<S: Clone> ShardedStorage<S> {
     }
 }
 
-pub struct FullReplicationStorage<S> {
-    output_buffer: Vec<StorageStateOutput<S>>,
+pub struct FullReplicationStorage {
+    output_buffer: Vec<StorageStateOutput>,
 }
 
-impl<S: Encode + Decode<()>> FullReplicationStorage<S> {
-    pub fn new(num_shard: ShardIndex, app: &impl DataShardingApp<Shard = S>) -> Self {
+impl FullReplicationStorage {
+    pub fn new() -> Self {
         Self {
-            // output_buffer: (0..num_shard)
-            //     .map(|index| {
-            //         let bytes =
-            //             bincode::encode_to_vec(app.new_shard(index), BINCODE_CONFIG).unwrap();
-            //         StorageStateOutput::Write(index.to_string(), bytes)
-            //     })
-            //     .collect(),
             output_buffer: Default::default(),
         }
     }
 }
 
-impl<S: Encode + Decode<()>> StorageState<S> for FullReplicationStorage<S> {
+impl Default for FullReplicationStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StorageState for FullReplicationStorage {
     fn fetch(&mut self, index: ShardIndex) {
         self.output_buffer
             .push(StorageStateOutput::Read(index.to_string()))
     }
 
-    fn bump(&mut self, shards: HashMap<ShardIndex, S>) {
-        for (index, shard) in shards {
-            let bytes = bincode::encode_to_vec(&shard, BINCODE_CONFIG).unwrap();
+    fn bump(&mut self, shards: HashMap<ShardIndex, Bytes>) {
+        for (index, bytes) in shards {
             self.output_buffer
                 .push(StorageStateOutput::Write(index.to_string(), bytes))
         }
     }
 
-    fn read_ok(&mut self, key: String, value: Vec<u8>) {
-        let (shard, len) = bincode::decode_from_slice(&value, BINCODE_CONFIG).unwrap();
-        assert_eq!(len, value.len());
+    fn read_ok(&mut self, key: String, value: Bytes) {
         self.output_buffer
-            .push(StorageStateOutput::Fetched(key.parse().unwrap(), shard))
+            .push(StorageStateOutput::Fetched(key.parse().unwrap(), value))
     }
 
     fn write_ok(&mut self, _key: String) {}
 }
 
-impl<S> State for FullReplicationStorage<S> {
+impl State for FullReplicationStorage {
     type Send = Never;
-    type Output = StorageStateOutput<S>;
+    type Output = StorageStateOutput;
 
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(output) = self.output_buffer.pop() {
@@ -645,10 +660,10 @@ pub mod message {
     }
 
     #[derive(Debug, Clone, Encode, Decode)]
-    pub struct FetchOk<S> {
+    pub struct FetchOk {
         pub version: StateVersion,
         pub shard_index: ShardIndex,
-        pub shard: S,
+        pub bytes: Vec<u8>, // `Bytes` does not support Encode/Decode
     }
 }
 
