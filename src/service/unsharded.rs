@@ -6,32 +6,37 @@ use std::{
 use crate::{
     Never,
     app::AppState,
-    replication::ReplicationState,
     state::{Proceed, State},
 };
 
-use super::{ClientId, Message, Reply, Request, Send, AppProtocol, ServiceState};
+use super::{AppProtocol, ClientId, Message, Send, ServiceState};
 
-pub struct Service<A: AppState, R: ReplicationState<Request<<A::Protocol as AppProtocol>::Op>>> {
+type Request<A> = super::Request<<<A as AppState>::Protocol as AppProtocol>::Op>;
+type Reply<A, R> = super::Reply<
+    <<A as AppState>::Protocol as AppProtocol>::Res,
+    <R as crate::replication::ReplicationState<Request<A>>>::Metadata,
+>;
+
+pub trait ReplicationState<A: AppState>: crate::replication::ReplicationState<Request<A>> {}
+impl<A: AppState, R: crate::replication::ReplicationState<Request<A>>> ReplicationState<A> for R {}
+
+pub struct Service<A: AppState, R: ReplicationState<A>> {
     app: A,
     replication: R,
 
-    replies: HashMap<ClientId, Reply<<A::Protocol as AppProtocol>::Res, R::Metadata>>,
+    replies: HashMap<ClientId, Reply<A, R>>,
     replicated: Option<Replicated<A, R>>,
 
-    submit_buffer: Vec<Request<<A::Protocol as AppProtocol>::Op>>,
-    #[allow(clippy::type_complexity)] // this matches <Self as State>::Send
-    send_buffer: Vec<Send<Reply<<A::Protocol as AppProtocol>::Res, R::Metadata>, R::Send>>,
+    submit_buffer: Vec<Request<A>>,
+    send_buffer: Vec<Send<Reply<A, R>, R::Send>>,
 }
 
 type Replicated<A, R> = (
-    VecDeque<Request<<<A as AppState>::Protocol as AppProtocol>::Op>>,
-    <R as ReplicationState<Request<<<A as AppState>::Protocol as AppProtocol>::Op>>>::Metadata,
+    VecDeque<Request<A>>,
+    <R as crate::replication::ReplicationState<Request<A>>>::Metadata,
 );
 
-impl<A: AppState, R: ReplicationState<Request<<<A as AppState>::Protocol as AppProtocol>::Op>>>
-    Service<A, R>
-{
+impl<A: AppState, R: ReplicationState<A>> Service<A, R> {
     pub fn new(app: A, replication: R) -> Self {
         Self {
             replication,
@@ -44,11 +49,10 @@ impl<A: AppState, R: ReplicationState<Request<<<A as AppState>::Protocol as AppP
     }
 }
 
-impl<A: AppState, R: ReplicationState<Request<<<A as AppState>::Protocol as AppProtocol>::Op>>>
-    ServiceState<A::Protocol> for Service<A, R>
+impl<A: AppState, R: ReplicationState<A>> ServiceState<A::Protocol> for Service<A, R>
 where
     R::Metadata: Clone,
-    Reply<<<A as AppState>::Protocol as AppProtocol>::Res, R::Metadata>: Clone,
+    Reply<A, R>: Clone,
 {
     type ServiceSend = R::Send;
     type ServiceMessage = R::Message;
@@ -63,14 +67,13 @@ where
     }
 }
 
-impl<A: AppState, R: ReplicationState<Request<<<A as AppState>::Protocol as AppProtocol>::Op>>> State
-    for Service<A, R>
+impl<A: AppState, R: ReplicationState<A>> State for Service<A, R>
 where
     R::Metadata: Clone,
-    Reply<<<A as AppState>::Protocol as AppProtocol>::Res, R::Metadata>: Clone,
+    Reply<A, R>: Clone,
     // ServiceMessage<R, A>: std::fmt::Debug,
 {
-    type Send = Send<Reply<<<A as AppState>::Protocol as AppProtocol>::Res, R::Metadata>, R::Send>;
+    type Send = Send<Reply<A, R>, R::Send>;
     type Output = Never;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(send) = self.send_buffer.pop() {
@@ -87,7 +90,7 @@ where
             {
                 return self.proceed(since_start);
             }
-            let reply = Reply {
+            let reply = Reply::<A, R> {
                 client_seq: request.client_seq,
                 res: self.app.execute(request.op),
                 metadata: metadata.clone(),
@@ -115,7 +118,7 @@ where
         }
     }
 
-    type Message = Message<Request<<<A as AppState>::Protocol as AppProtocol>::Op>, R::Message>;
+    type Message = Message<Request<A>, R::Message>;
     fn receive(&mut self, message: Self::Message) {
         // dbg!(&message);
         match message {
@@ -157,10 +160,7 @@ pub mod transport {
 
     use super::*;
 
-    pub async fn run_service<
-        A: AppState,
-        R: ReplicationState<Request<<A::Protocol as AppProtocol>::Op>>,
-    >(
+    pub async fn run_service<A: AppState, R: ReplicationState<A>>(
         mut service: Service<A, R>,
         replica_index: ReplicaIndex,
         addrs: Vec<SocketAddr>,
@@ -174,9 +174,9 @@ pub mod transport {
                 ServiceMessage = R::Message,
                 Metadata = R::Metadata,
             >,
-        Request<<A::Protocol as AppProtocol>::Op>: Decode<()>,
+        Request<A>: Decode<()>,
         R::Message: Decode<()>,
-        Reply<<A::Protocol as AppProtocol>::Res, R::Metadata>: Encode,
+        Reply<A, R>: Encode,
         HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
     {
         let mut endpoint = Endpoint::server(server_config(), addrs[replica_index as usize])?;
@@ -331,10 +331,7 @@ pub mod transport {
         Ok(())
     }
 
-    fn service_proceed<
-        A: AppState,
-        R: ReplicationState<Request<<<A as AppState>::Protocol as AppProtocol>::Op>>,
-    >(
+    fn service_proceed<A: AppState, R: ReplicationState<A>>(
         service: &mut Service<A, R>,
         since_start: Duration,
         client_table: &HashMap<ClientId, (Connection, JoinHandle<()>)>,
@@ -342,9 +339,8 @@ pub mod transport {
         write_tracker: &TaskTracker,
     ) -> anyhow::Result<Option<Duration>>
     where
-        Service<A, R>:
-            ServiceState<A::Protocol, ServiceSend = R::Send, Output = Never, Metadata = R::Metadata>,
-        Reply<<A::Protocol as AppProtocol>::Res, R::Metadata>: Encode,
+        Service<A, R>: ServiceState<A::Protocol, ServiceSend = R::Send, Output = Never, Metadata = R::Metadata>,
+        Reply<A, R>: Encode,
         HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
     {
         loop {
