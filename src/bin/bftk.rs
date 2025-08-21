@@ -13,7 +13,7 @@ use bft_kit::{
         Request,
         big::{
             self, BigService, FullReplicationStorage, ShardedStorage,
-            app::{DataShardingSchema, Kv, ycsb::AdaptKv},
+            app::{DataShardingSchema, DefaultShard, Kv, ycsb::AdaptKv},
         },
         unsharded::{self, UnshardedService},
     },
@@ -158,13 +158,14 @@ async fn service_big(
     let replica = ReplayReplica::new(logs, configs.get("in-memory.batch-size")?);
     let addrs = configs.get_values("addr")?;
     let service_config = configs.extract()?;
+    let init_shard = DefaultShard(configs.get("big.num-shard")?);
     if configs.get("big.sharded")? {
         let storage = ShardedStorage::new(configs.extract()?, index, [index].into());
         let service = BigService::new(app, replica, storage, service_config);
-        big::transport::run_service(service, index, addrs, cancel, false).await
+        big::transport::run_service(service, init_shard, index, addrs, cancel, false).await
     } else {
         let storage = FullReplicationStorage::new();
         let service = BigService::new(app, replica, storage, service_config);
-        big::transport::run_service(service, index, addrs, cancel, false).await
+        big::transport::run_service(service, init_shard, index, addrs, cancel, false).await
     }
 }

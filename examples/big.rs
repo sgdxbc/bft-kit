@@ -9,7 +9,7 @@ use bft_kit::{
         Request,
         big::{
             BigService,
-            app::{DataShardingSchema, Kv, ycsb::AdaptKv},
+            app::{DataShardingSchema, DefaultShard, Kv, ycsb::AdaptKv},
             transport::run_service,
         },
     },
@@ -56,6 +56,7 @@ ycsb.value-len          10
                 client_seq: index as _,
                 op,
             });
+        let init_shard = DefaultShard(configs.get("big.num-shard")?);
         let service = BigService::new(
             app,
             ReplayReplica::new(logs, 1),
@@ -64,6 +65,7 @@ ycsb.value-len          10
         );
         service_tasks.spawn(run_service(
             service,
+            init_shard,
             index,
             addrs.clone(),
             cancel.clone(),

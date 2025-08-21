@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
+    fmt::Debug,
     future::pending,
     net::SocketAddr,
     sync::Mutex,
@@ -44,8 +45,13 @@ enum Event {
     Tick,
 }
 
-pub async fn run_service<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState>(
+pub async fn run_service<
+    A: DataShardingApp,
+    R: ReplicationState<Request<A::Op>>,
+    S: StorageState + InitStore<A::Shard>,
+>(
     mut service: BigService<A, R, S>,
+    init_shard: impl InitDataShard<A::Shard>,
     replica_index: ReplicaIndex,
     addrs: Vec<SocketAddr>,
     cancel: CancellationToken,
@@ -65,8 +71,8 @@ where
     Reply<A::Res, R::Metadata>: Encode,
     HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>:
         PerformSend<R::Send> + PerformSend<S::Send>,
-    R::Message: std::fmt::Debug,
-    S::Message: std::fmt::Debug,
+    R::Message: Debug,
+    S::Message: Debug,
 {
     let mut endpoint = Endpoint::server(server_config(), addrs[replica_index as usize])?;
     endpoint.set_default_client_config(client_config());
@@ -163,10 +169,14 @@ where
     };
     tracing::info!("interconnections established");
 
+    let temp_dir = tempfile::Builder::new().prefix("big-storage").tempdir()?;
+    let mut db = DB::open_default(temp_dir.path())?;
+    service.init_store(&init_shard, &mut db)?;
+
     let (store_command_sender, store_command_receiver) = mpsc::channel(100);
     let store_task = spawn_blocking({
         let event_sender = event_sender.clone();
-        move || store_task(store_command_receiver, event_sender)
+        move || store_task(db, store_command_receiver, event_sender)
     });
 
     let write_tracker = TaskTracker::new();
@@ -260,6 +270,7 @@ where
     let elapsed = start.elapsed();
     drop(store_command_sender);
     store_task.await??;
+    temp_dir.close()?;
 
     write_tracker.close();
     write_tracker.wait().await;
@@ -387,11 +398,10 @@ where
 type StoreCommand = Output;
 
 fn store_task(
+    db: DB,
     mut command_receiver: mpsc::Receiver<StoreCommand>,
     event_sender: mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
-    let temp_dir = tempfile::Builder::new().prefix("big-storage").tempdir()?;
-    let db = DB::open_default(temp_dir.path())?;
     while let Some(command) = command_receiver.blocking_recv() {
         match command {
             StoreCommand::Read(key) => {
@@ -410,7 +420,12 @@ fn store_task(
     }
     let total_size = db.property_int_value(LIVE_SST_FILES_SIZE)?;
     tracing::info!(?total_size, "live SST files size");
-    drop(db);
-    temp_dir.close()?;
     Ok(())
+}
+
+impl Store for DB {
+    fn write(&mut self, key: String, value: Bytes) -> anyhow::Result<()> {
+        self.put(key, value)?;
+        Ok(())
+    }
 }

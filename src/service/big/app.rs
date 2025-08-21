@@ -22,7 +22,20 @@ pub trait DataShardingApp: AppProtocol {
 }
 
 pub trait InitDataShard<S> {
+    fn num_shard(&self) -> ShardIndex;
     fn init(&self, index: ShardIndex) -> S;
+}
+
+pub struct DefaultShard(pub ShardIndex);
+
+impl<S: Default> InitDataShard<S> for DefaultShard {
+    fn num_shard(&self) -> ShardIndex {
+        self.0
+    }
+
+    fn init(&self, _index: ShardIndex) -> S {
+        Default::default()
+    }
 }
 
 pub trait DataShardingExecuteState {

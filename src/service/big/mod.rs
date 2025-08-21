@@ -94,7 +94,7 @@ struct Executing<A: DataShardingApp> {
     start: Instant,
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState> BigService<A, R, S> {
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: State> BigService<A, R, S> {
     pub fn new(app: A, replication: R, storage: S, config: ServiceConfig) -> Self {
         Self {
             app,
@@ -111,6 +111,18 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState> B
             execute_latencies: NanoLatencies::new(3).unwrap(),
             // config,
         }
+    }
+}
+
+impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: State + InitStore<A::Shard>>
+    BigService<A, R, S>
+{
+    pub fn init_store(
+        &self,
+        init_shard: &impl InitDataShard<A::Shard>,
+        store: &mut impl Store,
+    ) -> anyhow::Result<()> {
+        self.storage.init(init_shard, store)
     }
 }
 
@@ -351,7 +363,7 @@ pub trait InitStore<S> {
 }
 
 pub trait Store {
-    fn write(&mut self, key: String, value: Vec<u8>) -> anyhow::Result<()>;
+    fn write(&mut self, key: String, value: Bytes) -> anyhow::Result<()>;
 }
 
 pub struct ShardedStorage {
@@ -591,6 +603,23 @@ impl ShardedStorage {
     }
 }
 
+impl<S: Encode> InitStore<S> for ShardedStorage {
+    fn init(
+        &self,
+        init_shard: &impl InitDataShard<S>,
+        store: &mut impl Store,
+    ) -> anyhow::Result<()> {
+        for index in 0..self.config.num_shard {
+            if self.config.should_store(&self.node_indices, index) {
+                let shard = init_shard.init(index);
+                let bytes = bincode::encode_to_vec(shard, BINCODE_CONFIG)?;
+                store.write(index.to_string(), bytes.into())?;
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct FullReplicationStorage {
     output_buffer: Vec<StorageStateOutput>,
 }
@@ -644,6 +673,21 @@ impl State for FullReplicationStorage {
     type Message = Never;
     fn receive(&mut self, _message: Self::Message) {
         unreachable!()
+    }
+}
+
+impl<S: Encode> InitStore<S> for FullReplicationStorage {
+    fn init(
+        &self,
+        init_shard: &impl InitDataShard<S>,
+        store: &mut impl Store,
+    ) -> anyhow::Result<()> {
+        for index in 0..init_shard.num_shard() {
+            let shard = init_shard.init(index as ShardIndex);
+            let bytes = bincode::encode_to_vec(shard, BINCODE_CONFIG)?;
+            store.write(index.to_string(), bytes.into())?;
+        }
+        Ok(())
     }
 }
 
