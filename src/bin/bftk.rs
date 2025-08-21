@@ -1,4 +1,4 @@
-use std::{env::args, fs::File, sync::Arc, time::Duration};
+use std::{env::args, fs::File, iter, sync::Arc, time::Duration};
 
 use bft_kit::{
     app::{null::Null, ycsb::YcsbWorkload},
@@ -19,7 +19,7 @@ use bft_kit::{
     },
     set_affinity_block_on,
     workload::{
-        CloseLoopWorker, NanoLatencies, OpLatency, OpenLoopWorker, WorkloadIter,
+        CloseLoopWorker, NanoLatencies, OpLatency, OpenLoopWorker, WorkloadState,
         transport::run_worker,
     },
 };
@@ -145,16 +145,17 @@ async fn service_big(
 ) -> anyhow::Result<()> {
     let num_shard = configs.get("big.num-shard")?;
     let app = Kv(DataShardingSchema::new(num_shard));
-    let logs = WorkloadIter(AdaptKv(YcsbWorkload::new(
+    let mut workload = AdaptKv(YcsbWorkload::new(
         configs.extract()?,
         StdRng::seed_from_u64(117418),
-    )))
-    .enumerate()
-    .map(|(index, (op, _))| Request {
-        client_id: 0,
-        client_seq: index as _,
-        op,
-    });
+    ));
+    let logs = iter::from_fn(|| workload.next_op())
+        .enumerate()
+        .map(|(index, (op, _))| Request {
+            client_id: 0,
+            client_seq: index as _,
+            op,
+        });
     let replica = ReplayReplica::new(logs, configs.get("in-memory.batch-size")?);
     let addrs = configs.get_values("addr")?;
     let service_config = configs.extract()?;

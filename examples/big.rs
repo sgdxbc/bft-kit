@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{iter, time::Duration};
 
 use bft_kit::{
     app::ycsb::YcsbWorkload,
@@ -13,7 +13,7 @@ use bft_kit::{
             transport::run_service,
         },
     },
-    workload::WorkloadIter,
+    workload::WorkloadState,
 };
 use rand::{SeedableRng, rngs::StdRng};
 use tokio::{task::JoinSet, time::sleep};
@@ -42,21 +42,27 @@ ycsb.value-len          10
     let mut service_tasks = JoinSet::new();
     let cancel = CancellationToken::new();
     for index in 0..configs.get("big.num-node")? {
-        let app = DataShardingSchema::<Kv>::new(configs.get("big.num-shard")?);
+        let app = Kv(DataShardingSchema::new(configs.get("big.num-shard")?));
         // let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
         let storage =
             bft_kit::service::big::FullReplicationStorage::new(configs.get("big.num-shard")?, &app);
-        let logs = WorkloadIter(AdaptKv(YcsbWorkload::new(
+        let mut workload = AdaptKv(YcsbWorkload::new(
             configs.extract()?,
             StdRng::seed_from_u64(117418),
-        )))
-        .enumerate()
-        .map(|(index, (op, _))| Request {
-            client_id: 0,
-            client_seq: index as _,
-            op,
-        });
-        let service = BigService::new(app, ReplayReplica::new(logs, 1), storage, configs.extract()?);
+        ));
+        let logs = iter::from_fn(move || workload.next_op())
+            .enumerate()
+            .map(|(index, (op, _))| Request {
+                client_id: 0,
+                client_seq: index as _,
+                op,
+            });
+        let service = BigService::new(
+            app,
+            ReplayReplica::new(logs, 1),
+            storage,
+            configs.extract()?,
+        );
         service_tasks.spawn(run_service(
             service,
             index,
