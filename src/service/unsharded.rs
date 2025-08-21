@@ -11,9 +11,9 @@ use crate::{
 
 use super::{AppProtocol, ClientId, Message, Send, ServiceState};
 
-type Request<A> = super::Request<<<A as AppState>::Protocol as AppProtocol>::Op>;
+type Request<A> = super::Request<<A as AppProtocol>::Op>;
 type Reply<A, R> = super::Reply<
-    <<A as AppState>::Protocol as AppProtocol>::Res,
+    <A as AppProtocol>::Res,
     <R as crate::replication::ReplicationState<Request<A>>>::Metadata,
 >;
 
@@ -49,7 +49,7 @@ impl<A: AppState, R: ReplicationState<A>> UnshardedService<A, R> {
     }
 }
 
-impl<A: AppState, R: ReplicationState<A>> ServiceState<A::Protocol> for UnshardedService<A, R>
+impl<A: AppState, R: ReplicationState<A>> ServiceState<A> for UnshardedService<A, R>
 where
     R::Metadata: Clone,
     Reply<A, R>: Clone,
@@ -168,7 +168,7 @@ pub mod transport {
     ) -> anyhow::Result<()>
     where
         UnshardedService<A, R>: ServiceState<
-                A::Protocol,
+                A,
                 ServiceSend = R::Send,
                 Output = Never,
                 ServiceMessage = R::Message,
@@ -339,7 +339,8 @@ pub mod transport {
         write_tracker: &TaskTracker,
     ) -> anyhow::Result<Option<Duration>>
     where
-        UnshardedService<A, R>: ServiceState<A::Protocol, ServiceSend = R::Send, Output = Never, Metadata = R::Metadata>,
+        UnshardedService<A, R>:
+            ServiceState<A, ServiceSend = R::Send, Output = Never, Metadata = R::Metadata>,
         Reply<A, R>: Encode,
         HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
     {

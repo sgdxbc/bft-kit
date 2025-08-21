@@ -105,12 +105,7 @@ impl Utxo {
 }
 
 impl AppState for Utxo {
-    type Protocol = Self;
-
-    fn execute(
-        &mut self,
-        op: <Self::Protocol as AppProtocol>::Op,
-    ) -> <Self::Protocol as AppProtocol>::Res {
+    fn execute(&mut self, op: Self::Op) -> Self::Res {
         if matches!(op.input, UtxoOpInput::Spend(_)) && self.total_input(&op)? < op.total_output() {
             return Err(UtxoError::InsufficientFunds);
         }

@@ -10,12 +10,7 @@ impl AppProtocol for Null {
 }
 
 impl AppState for Null {
-    type Protocol = Self;
-    fn execute(
-        &mut self,
-        (): <Self::Protocol as AppProtocol>::Op,
-    ) -> <Self::Protocol as AppProtocol>::Res {
-    }
+    fn execute(&mut self, (): Self::Op) -> Self::Res {}
 }
 
 impl WorkloadState for Null {

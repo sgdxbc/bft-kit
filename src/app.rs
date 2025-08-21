@@ -16,12 +16,8 @@ pub trait AppProtocol {
     type Res;
 }
 
-pub trait AppState {
-    type Protocol: AppProtocol;
-    fn execute(
-        &mut self,
-        op: <Self::Protocol as AppProtocol>::Op,
-    ) -> <Self::Protocol as AppProtocol>::Res;
+pub trait AppState: AppProtocol {
+    fn execute(&mut self, op: Self::Op) -> Self::Res;
 }
 
 pub struct Batched<A>(A);
@@ -32,19 +28,14 @@ impl<A: AppProtocol> AppProtocol for Batched<A> {
 }
 
 impl<A: AppState> AppState for Batched<A> {
-    type Protocol = Batched<A::Protocol>;
-
-    fn execute(
-        &mut self,
-        ops: <Self::Protocol as AppProtocol>::Op,
-    ) -> <Self::Protocol as AppProtocol>::Res {
+    fn execute(&mut self, ops: Self::Op) -> Self::Res {
         ops.into_iter().map(|op| self.0.execute(op)).collect()
     }
 }
 
 pub struct Buffered<A: AppState> {
     app: A,
-    ops: VecDeque<<A::Protocol as AppProtocol>::Op>,
+    ops: VecDeque<A::Op>,
 }
 
 impl<A: AppState> From<A> for Buffered<A> {
@@ -58,7 +49,7 @@ impl<A: AppState> From<A> for Buffered<A> {
 
 impl<A: AppState> State for Buffered<A> {
     type Send = Never;
-    type Output = <A::Protocol as AppProtocol>::Res;
+    type Output = A::Res;
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         match self.ops.pop_front() {
             Some(op) => Proceed::Output(self.app.execute(op)),
@@ -66,7 +57,7 @@ impl<A: AppState> State for Buffered<A> {
         }
     }
 
-    type Message = <A::Protocol as AppProtocol>::Op;
+    type Message = A::Op;
     fn receive(&mut self, op: Self::Message) {
         self.ops.push_back(op);
     }

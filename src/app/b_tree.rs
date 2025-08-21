@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::{
     AppProtocol, AppState,
-    ycsb::{Ycsb, YcsbOp, YcsbRes},
+    ycsb::{YcsbOp, YcsbRes},
 };
 
 pub struct BTree {
@@ -23,13 +23,13 @@ impl Default for BTree {
     }
 }
 
-impl AppState for BTree {
-    type Protocol = Ycsb;
+impl AppProtocol for BTree {
+    type Op = YcsbOp;
+    type Res = YcsbRes;
+}
 
-    fn execute(
-        &mut self,
-        op: <Self::Protocol as AppProtocol>::Op,
-    ) -> <Self::Protocol as AppProtocol>::Res {
+impl AppState for BTree {
+    fn execute(&mut self, op: Self::Op) -> Self::Res {
         match op {
             YcsbOp::Insert(key, value) => {
                 self.store.insert(key, value);

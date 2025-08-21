@@ -2,18 +2,18 @@ use rocksdb::{DB, Error};
 
 use super::{
     AppProtocol, AppState,
-    ycsb::{Ycsb, YcsbOp, YcsbRes},
+    ycsb::{YcsbOp, YcsbRes},
 };
 
 pub struct Rocksdb(pub DB);
 
-impl AppState for Rocksdb {
-    type Protocol = Ycsb;
+impl AppProtocol for Rocksdb {
+    type Op = YcsbOp;
+    type Res = YcsbRes;
+}
 
-    fn execute(
-        &mut self,
-        op: <Self::Protocol as AppProtocol>::Op,
-    ) -> <Self::Protocol as AppProtocol>::Res {
+impl AppState for Rocksdb {
+    fn execute(&mut self, op: Self::Op) -> Self::Res {
         Self::execute(self, op).unwrap_or_else(|err| YcsbRes::Err(err.to_string()))
     }
 }
