@@ -20,7 +20,7 @@ type Reply<A, R> = super::Reply<
 pub trait ReplicationState<A: AppState>: crate::replication::ReplicationState<Request<A>> {}
 impl<A: AppState, R: crate::replication::ReplicationState<Request<A>>> ReplicationState<A> for R {}
 
-pub struct Service<A: AppState, R: ReplicationState<A>> {
+pub struct UnshardedService<A: AppState, R: ReplicationState<A>> {
     app: A,
     replication: R,
 
@@ -36,7 +36,7 @@ type Replicated<A, R> = (
     <R as crate::replication::ReplicationState<Request<A>>>::Metadata,
 );
 
-impl<A: AppState, R: ReplicationState<A>> Service<A, R> {
+impl<A: AppState, R: ReplicationState<A>> UnshardedService<A, R> {
     pub fn new(app: A, replication: R) -> Self {
         Self {
             replication,
@@ -49,7 +49,7 @@ impl<A: AppState, R: ReplicationState<A>> Service<A, R> {
     }
 }
 
-impl<A: AppState, R: ReplicationState<A>> ServiceState<A::Protocol> for Service<A, R>
+impl<A: AppState, R: ReplicationState<A>> ServiceState<A::Protocol> for UnshardedService<A, R>
 where
     R::Metadata: Clone,
     Reply<A, R>: Clone,
@@ -67,7 +67,7 @@ where
     }
 }
 
-impl<A: AppState, R: ReplicationState<A>> State for Service<A, R>
+impl<A: AppState, R: ReplicationState<A>> State for UnshardedService<A, R>
 where
     R::Metadata: Clone,
     Reply<A, R>: Clone,
@@ -161,13 +161,13 @@ pub mod transport {
     use super::*;
 
     pub async fn run_service<A: AppState, R: ReplicationState<A>>(
-        mut service: Service<A, R>,
+        mut service: UnshardedService<A, R>,
         replica_index: ReplicaIndex,
         addrs: Vec<SocketAddr>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()>
     where
-        Service<A, R>: ServiceState<
+        UnshardedService<A, R>: ServiceState<
                 A::Protocol,
                 ServiceSend = R::Send,
                 Output = Never,
@@ -332,14 +332,14 @@ pub mod transport {
     }
 
     fn service_proceed<A: AppState, R: ReplicationState<A>>(
-        service: &mut Service<A, R>,
+        service: &mut UnshardedService<A, R>,
         since_start: Duration,
         client_table: &HashMap<ClientId, (Connection, JoinHandle<()>)>,
         replica_table: &HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
         write_tracker: &TaskTracker,
     ) -> anyhow::Result<Option<Duration>>
     where
-        Service<A, R>: ServiceState<A::Protocol, ServiceSend = R::Send, Output = Never, Metadata = R::Metadata>,
+        UnshardedService<A, R>: ServiceState<A::Protocol, ServiceSend = R::Send, Output = Never, Metadata = R::Metadata>,
         Reply<A, R>: Encode,
         HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
     {

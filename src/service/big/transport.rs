@@ -49,14 +49,14 @@ pub async fn run_service<
     R: ReplicationState<Request<A::Op>>,
     S: StorageState<A::Shard>,
 >(
-    mut service: Service<A, R, S>,
+    mut service: BigService<A, R, S>,
     replica_index: ReplicaIndex,
     addrs: Vec<SocketAddr>,
     cancel: CancellationToken,
     send_reply: bool,
 ) -> anyhow::Result<()>
 where
-    Service<A, R, S>: ServiceState<
+    BigService<A, R, S>: ServiceState<
             A,
             ServiceSend = ServiceSend<R, S>,
             Output = Output,
@@ -298,7 +298,7 @@ async fn service_proceed<
     R: ReplicationState<Request<A::Op>>,
     S: StorageState<A::Shard>,
 >(
-    service: &mut Service<A, R, S>,
+    service: &mut BigService<A, R, S>,
     since_start: Duration,
     connection_tables: &ConnectionTables,
     store_command_sender: &mpsc::Sender<StoreCommand>,
@@ -307,7 +307,7 @@ async fn service_proceed<
     send_reply: bool,
 ) -> anyhow::Result<Option<Duration>>
 where
-    Service<A, R, S>:
+    BigService<A, R, S>:
         ServiceState<A, ServiceSend = ServiceSend<R, S>, Output = Output, Metadata = R::Metadata>,
     Reply<A::Res, R::Metadata>: Encode,
     HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>:

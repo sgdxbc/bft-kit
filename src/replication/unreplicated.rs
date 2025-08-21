@@ -10,9 +10,9 @@ use crate::{
 
 use super::{Dest, Replicated, ReplicationState};
 
-pub struct Client<A: AppProtocol> {
+pub struct UnreplicatedClient<A: AppProtocol> {
     id: ClientId,
-    config: ClientConfig,
+    config: UnreplicatedClientConfig,
 
     seq: ClientSeq,
     submits: BTreeMap<ClientSeq, SubmitData<A>>,
@@ -21,7 +21,7 @@ pub struct Client<A: AppProtocol> {
     receive_buffer: Vec<Reply<A::Res, ()>>,
 }
 
-pub struct ClientConfig {
+pub struct UnreplicatedClientConfig {
     timeout: Duration,
     // resend interval
 }
@@ -32,8 +32,8 @@ struct SubmitData<A: AppProtocol> {
     timeout_at: Duration,
 }
 
-impl<A: AppProtocol> Client<A> {
-    pub fn new(id: ClientId, config: ClientConfig) -> Self {
+impl<A: AppProtocol> UnreplicatedClient<A> {
+    pub fn new(id: ClientId, config: UnreplicatedClientConfig) -> Self {
         Self {
             id,
             config,
@@ -45,7 +45,7 @@ impl<A: AppProtocol> Client<A> {
     }
 }
 
-impl<A: AppProtocol> ClientState<A> for Client<A>
+impl<A: AppProtocol> ClientState<A> for UnreplicatedClient<A>
 where
     A::Op: Clone,
 {
@@ -56,7 +56,7 @@ where
     }
 }
 
-impl<A: AppProtocol> State for Client<A>
+impl<A: AppProtocol> State for UnreplicatedClient<A>
 where
     A::Op: Clone,
 {
@@ -155,7 +155,7 @@ mod parse {
 
     use crate::parse::{Configs, Extract};
 
-    impl Extract for super::ClientConfig {
+    impl Extract for super::UnreplicatedClientConfig {
         fn extract(configs: &Configs) -> anyhow::Result<Self> {
             Ok(Self {
                 timeout: Duration::from_secs_f32(configs.get("client.timeout")?),

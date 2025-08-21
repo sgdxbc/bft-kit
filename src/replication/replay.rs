@@ -7,18 +7,18 @@ use crate::{
 
 use super::{Replicated, ReplicationState};
 
-pub struct Replica<L> {
+pub struct ReplayReplica<L> {
     logs: L,
     batch_size: usize,
 }
 
-impl<L> Replica<L> {
+impl<L> ReplayReplica<L> {
     pub fn new(logs: L, batch_size: usize) -> Self {
         Self { logs, batch_size }
     }
 }
 
-impl<L: Iterator> ReplicationState<L::Item> for Replica<L> {
+impl<L: Iterator> ReplicationState<L::Item> for ReplayReplica<L> {
     type Metadata = ();
 
     fn submit(&mut self, _request: L::Item) {
@@ -26,7 +26,7 @@ impl<L: Iterator> ReplicationState<L::Item> for Replica<L> {
     }
 }
 
-impl<L: Iterator> State for Replica<L> {
+impl<L: Iterator> State for ReplayReplica<L> {
     type Send = Never;
     type Output = Replicated<L::Item, <Self as ReplicationState<L::Item>>::Metadata>;
 

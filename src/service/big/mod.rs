@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    ClientId, ClientSeq, Message, Output, Reply, Request, Send, AppProtocol, ServiceIndex,
+    AppProtocol, ClientId, ClientSeq, Message, Output, Reply, Request, Send, ServiceIndex,
     ServiceState,
 };
 
@@ -52,9 +52,9 @@ pub enum DataShardingExecuteOutput<R> {
 
 pub trait StorageState<S>: State<Output = StorageStateOutput<S>> {
     fn fetch(&mut self, index: ShardIndex);
-    #[allow(unused_variables)]
-    fn fetch_ahead(&mut self, index: ShardIndex, version_ahead: StateVersion) {}
     fn bump(&mut self, shards: HashMap<ShardIndex, S>);
+    #[allow(unused_variables)]
+    fn will_fetch(&mut self, index: ShardIndex, version_ahead: StateVersion) {}
 
     fn read_ok(&mut self, key: String, value: Vec<u8>);
     fn write_ok(&mut self, key: String);
@@ -68,7 +68,7 @@ pub enum StorageStateOutput<S> {
     Write(String, Vec<u8>),
 }
 
-pub struct Service<
+pub struct BigService<
     A: DataShardingApp,
     R: ReplicationState<Request<A::Op>>,
     S: State = ShardedStorage<<A as DataShardingApp>::Shard>,
@@ -111,7 +111,7 @@ struct Executing<A: DataShardingApp> {
 }
 
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>>
-    Service<A, R, S>
+    BigService<A, R, S>
 {
     pub fn new(app: A, replication: R, storage: S, config: ServiceConfig) -> Self {
         Self {
@@ -148,7 +148,7 @@ pub enum ServiceMessage<RM, SM> {
 }
 
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>>
-    ServiceState<A> for Service<A, R, S>
+    ServiceState<A> for BigService<A, R, S>
 where
     A::Shard: Clone,
     R::Metadata: Clone,
@@ -168,7 +168,7 @@ where
 }
 
 impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState<A::Shard>> State
-    for Service<A, R, S>
+    for BigService<A, R, S>
 where
     A::Shard: Clone,
     R::Metadata: Clone,
@@ -307,7 +307,7 @@ where
                     {
                         for index in required_indices {
                             self.storage
-                                .fetch_ahead(index, (logs_version_ahead + i) as _)
+                                .will_fetch(index, (logs_version_ahead + i) as _)
                         }
                     }
                     executing_buffer.push_back(Executing {

@@ -4,11 +4,11 @@ use bft_kit::{
     app::ycsb::YcsbWorkload,
     init_logging,
     parse::Configs,
-    replication::replay::Replica,
+    replication::replay::ReplayReplica,
     service::{
         Request,
         big::{
-            Service,
+            BigService,
             app::{DataShardingSchema, Kv, ycsb::AdaptKv},
             transport::run_service,
         },
@@ -56,7 +56,7 @@ ycsb.value-len          10
             client_seq: index as _,
             op,
         });
-        let service = Service::new(app, Replica::new(logs, 1), storage, configs.extract()?);
+        let service = BigService::new(app, ReplayReplica::new(logs, 1), storage, configs.extract()?);
         service_tasks.spawn(run_service(
             service,
             index,

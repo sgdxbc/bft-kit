@@ -4,18 +4,19 @@ use bft_kit::{
     app::{null::Null, ycsb::YcsbWorkload},
     init_logging_file,
     parse::Configs,
-    replication::{ReplicaIndex, replay, unreplicated},
+    replication::{ReplicaIndex, replay::ReplayReplica, unreplicated},
     service::{
         Request,
         big::{
-            self, FullReplicationStorage, ShardedStorage,
+            self, BigService, FullReplicationStorage, ShardedStorage,
             app::{DataShardingSchema, Kv, ycsb::AdaptKv},
         },
-        unsharded,
+        unsharded::{self, UnshardedService},
     },
     set_affinity_block_on,
     workload::{
-        self, CloseLoopWorker, NanoLatencies, OpenLoopWorker, WorkloadIter, transport::run_worker,
+        CloseLoopWorker, NanoLatencies, OpLatency, OpenLoopWorker, WorkloadIter,
+        transport::run_worker,
     },
 };
 use rand::{SeedableRng as _, random, rngs::StdRng};
@@ -54,7 +55,7 @@ async fn workers(configs: Configs) -> anyhow::Result<()> {
     let mut worker_set = JoinSet::new();
     for _ in 0..configs.get("workload.concurrency")? {
         let client_id = random();
-        let client = unreplicated::Client::<Null>::new(client_id, configs.extract()?);
+        let client = unreplicated::UnreplicatedClient::<Null>::new(client_id, configs.extract()?);
         worker_set.spawn(worker(configs.clone(), client_id, client, cancel.clone()));
     }
 
@@ -83,11 +84,11 @@ async fn workers(configs: Configs) -> anyhow::Result<()> {
 async fn worker(
     configs: impl AsRef<Configs>,
     client_id: u32,
-    client: unreplicated::Client<Null>,
+    client: unreplicated::UnreplicatedClient<Null>,
     cancel: CancellationToken,
 ) -> anyhow::Result<NanoLatencies> {
     let configs = configs.as_ref();
-    let workload = workload::OpLatency::new(Null);
+    let workload = OpLatency::new(Null);
     if configs.get("workload.close-loop")? {
         let worker = CloseLoopWorker::new(workload, client);
         run_worker(worker, client_id, configs.get_values("addr")?, cancel).await
@@ -130,7 +131,7 @@ async fn service_unsharded(
     configs: &Configs,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let service = unsharded::Service::new(Null, unreplicated::Replica::new());
+    let service = UnshardedService::new(Null, unreplicated::Replica::new());
     unsharded::transport::run_service(service, index, configs.get_values("addr")?, cancel).await
 }
 
@@ -151,16 +152,16 @@ async fn service_big(
         client_seq: index as _,
         op,
     });
-    let replica = replay::Replica::new(logs, configs.get("in-memory.batch-size")?);
+    let replica = ReplayReplica::new(logs, configs.get("in-memory.batch-size")?);
     let addrs = configs.get_values("addr")?;
     let service_config = configs.extract()?;
     if configs.get("big.sharded")? {
         let storage = ShardedStorage::new(configs.extract()?, index, [index].into(), &app);
-        let service = big::Service::new(app, replica, storage, service_config);
+        let service = BigService::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
     } else {
         let storage = FullReplicationStorage::new(num_shard, &app);
-        let service = big::Service::new(app, replica, storage, service_config);
+        let service = BigService::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
     }
 }

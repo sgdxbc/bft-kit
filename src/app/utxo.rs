@@ -49,6 +49,19 @@ pub enum UtxoOpInput {
     Mint,
 }
 
+#[derive(Debug, Error)]
+pub enum UtxoError {
+    #[error("insufficient funds")]
+    InsufficientFunds,
+    #[error("invalid signature")]
+    InvalidSignature,
+}
+
+impl AppProtocol for Utxo {
+    type Op = UtxoOp;
+    type Res = Result<(), UtxoError>;
+}
+
 impl UtxoOp {
     pub fn tx_id(&self) -> TxId {
         self.digest()
@@ -57,14 +70,6 @@ impl UtxoOp {
     pub fn total_output(&self) -> u64 {
         self.outputs.iter().map(|o| o.amount).sum()
     }
-}
-
-#[derive(Debug, Error)]
-pub enum UtxoError {
-    #[error("insufficient funds")]
-    InsufficientFunds,
-    #[error("invalid signature")]
-    InvalidSignature,
 }
 
 impl Utxo {
@@ -97,11 +102,6 @@ impl Utxo {
             self.outputs.insert(id, output);
         }
     }
-}
-
-impl AppProtocol for Utxo {
-    type Op = UtxoOp;
-    type Res = Result<(), UtxoError>;
 }
 
 impl AppState for Utxo {

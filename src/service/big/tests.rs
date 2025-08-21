@@ -38,7 +38,7 @@ type S = ShardedStorage<<A as DataShardingApp>::Shard>;
 type ServiceMessage = super::ServiceMessage<<R as State>::Message, <S as State>::Message>;
 
 struct SystemState {
-    services: Vec<Service<A, R>>,
+    services: Vec<BigService<A, R>>,
     service_network: VecDeque<(ServiceIndex, ServiceMessage)>,
     service_storage: Vec<HashMap<String, Vec<u8>>>,
     replies: Vec<(ClientId, Reply<Vec<KvRes>, ()>)>,
@@ -53,7 +53,7 @@ fn idle_pending() {
         num_active_copy: 1,
     };
     let storage = ShardedStorage::new(storage_config, 0, [0].into(), &app);
-    let service = Service::new(
+    let service = BigService::new(
         app,
         Replica::new(),
         storage,
@@ -156,7 +156,7 @@ fn one_service() {
         num_active_copy: 1,
     };
     let storage = ShardedStorage::new(storage_config, 0, [0].into(), &app);
-    let service = Service::new(
+    let service = BigService::new(
         app,
         Replica::new(),
         storage,
@@ -195,7 +195,7 @@ impl SystemState {
                         num_active_copy: 1,
                     };
                     let storage = ShardedStorage::new(storage_config, index, [index].into(), &app);
-                    Service::new(
+                    BigService::new(
                         app,
                         Replica::new(),
                         storage,
