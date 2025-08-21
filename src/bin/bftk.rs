@@ -144,7 +144,7 @@ async fn service_big(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let num_shard = configs.get("big.num-shard")?;
-    let app = DataShardingSchema::<Kv>::new(num_shard);
+    let app = Kv(DataShardingSchema::new(num_shard));
     let logs = WorkloadIter(AdaptKv(YcsbWorkload::new(
         configs.extract()?,
         StdRng::seed_from_u64(117418),

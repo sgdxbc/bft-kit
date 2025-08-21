@@ -261,6 +261,36 @@ impl Encode for PublicKey {
     }
 }
 
+impl<C> Decode<C> for PublicKey {
+    fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+        match &*<String>::decode(decoder)? {
+            "secp256k1" => {
+                let bytes = <[u8; secp256k1::constants::PUBLIC_KEY_SIZE]>::decode(decoder)?;
+                match secp256k1::PublicKey::from_slice(&bytes) {
+                    Ok(public_key) => Ok(Self::Secp256k1(public_key)),
+                    Err(err) => Err(DecodeError::OtherString(err.to_string())),
+                }
+            }
+            "ed25519" => {
+                let bytes = Decode::decode(decoder)?;
+                match ed25519_dalek::VerifyingKey::from_bytes(&bytes) {
+                    Ok(verifying_key) => Ok(Self::Ed25519(verifying_key)),
+                    Err(err) => Err(DecodeError::OtherString(err.to_string())),
+                }
+            }
+            _ => Err(DecodeError::Other("invalid public key type")),
+        }
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for PublicKey {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, DecodeError> {
+        Decode::decode(decoder)
+    }
+}
+
 impl UpdateHash for PublicKey {
     fn update<D: sha2::Digest>(&self, state: &mut D) {
         state.update(bincode::encode_to_vec(self, bincode::config::standard()).unwrap())

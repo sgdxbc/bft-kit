@@ -15,6 +15,10 @@ use crate::{
     workload::NanoLatencies,
 };
 
+use self::app::{
+    DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState as _, ShardIndex,
+};
+
 use super::{
     AppProtocol, ClientId, ClientSeq, Message, Output, Reply, Request, Send, ServiceIndex,
     ServiceState,
@@ -26,29 +30,7 @@ pub mod transport;
 #[cfg(test)]
 mod tests;
 
-type ShardIndex = u32;
 type StateVersion = u64;
-
-pub trait DataShardingApp: AppProtocol + Sized {
-    type Shard;
-    fn new_shard(&self, index: ShardIndex) -> Self::Shard;
-
-    type Execute: DataShardingExecuteState<Self>;
-    fn new_execute(&self, op: Self::Op) -> Self::Execute;
-}
-
-pub trait DataShardingExecuteState<A: DataShardingApp> {
-    fn proceed(
-        &mut self,
-        shards: &mut HashMap<ShardIndex, A::Shard>,
-    ) -> DataShardingExecuteOutput<A::Res>;
-}
-
-#[derive(Debug)]
-pub enum DataShardingExecuteOutput<R> {
-    RequireAccess(HashSet<ShardIndex>),
-    Complete(R),
-}
 
 pub trait StorageState<S>: State<Output = StorageStateOutput<S>> {
     fn fetch(&mut self, index: ShardIndex);
@@ -354,7 +336,7 @@ pub struct ShardedStorage<S> {
     node_indices: HashSet<NodeIndex>,
 
     version: StateVersion, // of shards[-1]
-    stored_shards: Vec<HashMap<ShardIndex, S>>,
+    stored_shards: Vec<HashMap<ShardIndex, ()>>,
     fetching: HashSet<ShardIndex>,
     fetched_shards: HashMap<ShardIndex, (StateVersion, S)>,
     last_versions: Vec<StateVersion>, // [shard index -> version]
@@ -392,7 +374,7 @@ impl<S> ShardedStorage<S> {
         let mut shards = HashMap::new();
         for shard_index in 0..config.num_shard {
             if config.should_store(&node_indices, shard_index) {
-                shards.insert(shard_index, app.new_shard(shard_index));
+                shards.insert(shard_index, ());
             }
         }
         Self {
@@ -487,7 +469,7 @@ impl<S: Clone> StorageState<S> for ShardedStorage<S> {
         }
 
         shards.retain(|&index, _| self.config.should_store(&self.node_indices, index));
-        self.stored_shards.push(shards);
+        // self.stored_shards.push(shards);
         self.version += 1;
 
         if let Some(fetches) = self.reordering_fetch_table.remove(&self.version) {
@@ -578,14 +560,14 @@ impl<S: Clone> ShardedStorage<S> {
     }
 
     fn get_shard(&mut self, version: u64, shard_index: u32) -> Option<&S> {
-        let first_version = self.version - (self.stored_shards.len() - 1) as StateVersion;
-        for version in (first_version..=version).rev() {
-            if let Some(shard) =
-                self.stored_shards[(version - first_version) as usize].get(&shard_index)
-            {
-                return Some(shard);
-            }
-        }
+        // let first_version = self.version - (self.stored_shards.len() - 1) as StateVersion;
+        // for version in (first_version..=version).rev() {
+        //     if let Some(shard) =
+        //         self.stored_shards[(version - first_version) as usize].get(&shard_index)
+        //     {
+        //         return Some(shard);
+        //     }
+        // }
         None
     }
 }
@@ -597,13 +579,14 @@ pub struct FullReplicationStorage<S> {
 impl<S: Encode + Decode<()>> FullReplicationStorage<S> {
     pub fn new(num_shard: ShardIndex, app: &impl DataShardingApp<Shard = S>) -> Self {
         Self {
-            output_buffer: (0..num_shard)
-                .map(|index| {
-                    let bytes =
-                        bincode::encode_to_vec(app.new_shard(index), BINCODE_CONFIG).unwrap();
-                    StorageStateOutput::Write(index.to_string(), bytes)
-                })
-                .collect(),
+            // output_buffer: (0..num_shard)
+            //     .map(|index| {
+            //         let bytes =
+            //             bincode::encode_to_vec(app.new_shard(index), BINCODE_CONFIG).unwrap();
+            //         StorageStateOutput::Write(index.to_string(), bytes)
+            //     })
+            //     .collect(),
+            output_buffer: Default::default(),
         }
     }
 }

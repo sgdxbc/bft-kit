@@ -1,31 +1,50 @@
 use std::{
     collections::{HashMap, HashSet},
     hash::{BuildHasher as _, BuildHasherDefault, DefaultHasher, Hash},
-    marker::PhantomData,
+    mem::take,
 };
 
 use bincode::{Decode, Encode};
-use derive_where::derive_where;
 
 use crate::{
-    app::utxo::{UtxoError, UtxoId, UtxoOp, UtxoOpInput},
+    Never,
+    app::utxo::{UtxoData, UtxoError, UtxoId, UtxoOp, UtxoOpInput},
     service::AppProtocol,
 };
 
-use super::{DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState, ShardIndex};
+// if this is a sufficiently universal abstraction, can promote it to crate::app
 
-#[derive_where(Debug, Clone)]
-pub struct DataShardingSchema<A> {
-    num_shard: ShardIndex,
-    _app: PhantomData<A>,
+pub type ShardIndex = u32;
+
+pub trait DataShardingApp: AppProtocol {
+    type Shard;
+    type Execute: DataShardingExecuteState<App = Self>;
+    fn new_execute(&self, op: Self::Op) -> Self::Execute;
 }
 
-impl<A> DataShardingSchema<A> {
+pub trait DataShardingExecuteState {
+    type App: DataShardingApp;
+
+    fn proceed(
+        &mut self,
+        shards: &mut HashMap<ShardIndex, <Self::App as DataShardingApp>::Shard>,
+    ) -> DataShardingExecuteOutput<<Self::App as AppProtocol>::Res>;
+}
+
+#[derive(Debug)]
+pub enum DataShardingExecuteOutput<R> {
+    RequireAccess(HashSet<ShardIndex>),
+    Complete(R),
+}
+
+#[derive(Debug, Clone)]
+pub struct DataShardingSchema {
+    num_shard: ShardIndex,
+}
+
+impl DataShardingSchema {
     pub fn new(num_shard: ShardIndex) -> Self {
-        Self {
-            num_shard,
-            _app: PhantomData,
-        }
+        Self { num_shard }
     }
 
     fn shard_index_from_hash(&self, key: impl Hash) -> ShardIndex {
@@ -33,73 +52,28 @@ impl<A> DataShardingSchema<A> {
     }
 }
 
-pub struct StaticDispatchExecute<A: DataShardingApp> {
-    op: Option<A::Op>,
-    schema: A,
-}
+pub use crate::app::null::Null;
 
-impl<A> DataShardingSchema<A> {
-    fn static_dispatch(&self, op: <Self as AppProtocol>::Op) -> StaticDispatchExecute<Self>
-    where
-        Self: DataShardingApp,
-    {
-        StaticDispatchExecute {
-            op: Some(op),
-            schema: self.clone(),
-        }
+impl DataShardingApp for Null {
+    type Shard = Never;
+    type Execute = Self;
+    fn new_execute(&self, (): Self::Op) -> Self::Execute {
+        Null
     }
 }
 
-trait StaticDispatch: DataShardingApp {
-    fn shards_of(&self, op: &Self::Op) -> HashSet<ShardIndex>;
-    fn execute(&self, op: Self::Op, shards: &mut HashMap<ShardIndex, Self::Shard>) -> Self::Res;
-}
+impl DataShardingExecuteState for Null {
+    type App = Self;
 
-impl<A: StaticDispatch> DataShardingExecuteState<A> for StaticDispatchExecute<A> {
     fn proceed(
         &mut self,
-        shards: &mut HashMap<ShardIndex, A::Shard>,
-    ) -> DataShardingExecuteOutput<A::Res> {
-        let required_indices = &self.schema.shards_of(self.op.as_ref().unwrap())
-            - &shards.keys().cloned().collect::<HashSet<_>>();
-        if !required_indices.is_empty() {
-            DataShardingExecuteOutput::RequireAccess(required_indices)
-        } else {
-            DataShardingExecuteOutput::Complete(
-                self.schema.execute(self.op.take().unwrap(), shards),
-            )
-        }
-    }
-}
-
-pub struct Null;
-
-impl AppProtocol for DataShardingSchema<Null> {
-    type Op = ();
-    type Res = ();
-}
-
-impl DataShardingApp for DataShardingSchema<Null> {
-    type Shard = ();
-    type Execute = StaticDispatchExecute<Self>;
-    fn new_shard(&self, _index: ShardIndex) -> Self::Shard {}
-    fn new_execute(&self, op: Self::Op) -> Self::Execute {
-        self.static_dispatch(op)
-    }
-}
-
-impl DataShardingExecuteState<DataShardingSchema<Null>>
-    for StaticDispatchExecute<DataShardingSchema<Null>>
-{
-    fn proceed(
-        &mut self,
-        _shards: &mut HashMap<ShardIndex, <DataShardingSchema<Null> as DataShardingApp>::Shard>,
-    ) -> DataShardingExecuteOutput<<DataShardingSchema<Null> as AppProtocol>::Res> {
+        _shards: &mut HashMap<ShardIndex, <Self::App as DataShardingApp>::Shard>,
+    ) -> DataShardingExecuteOutput<<Self::App as AppProtocol>::Res> {
         DataShardingExecuteOutput::Complete(())
     }
 }
 
-pub struct Kv;
+pub struct Kv(pub DataShardingSchema);
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub enum KvOp {
@@ -113,53 +87,56 @@ pub enum KvRes {
     Get(Option<String>),
 }
 
-impl AppProtocol for DataShardingSchema<Kv> {
+impl AppProtocol for Kv {
     type Op = Vec<KvOp>;
     type Res = Vec<KvRes>;
 }
 
-impl DataShardingApp for DataShardingSchema<Kv> {
-    type Shard = HashMap<String, String>;
-    type Execute = StaticDispatchExecute<Self>;
-    fn new_shard(&self, _index: ShardIndex) -> Self::Shard {
-        Default::default()
-    }
-    fn new_execute(&self, op: Self::Op) -> Self::Execute {
-        self.static_dispatch(op)
-    }
-}
+pub struct KvExecute(Vec<(ShardIndex, KvOp)>);
 
-impl DataShardingSchema<Kv> {
+impl Kv {
     fn shard_of(&self, op: &KvOp) -> ShardIndex {
         match op {
-            KvOp::Put(key, _) | KvOp::Get(key) => self.shard_index_from_hash(key),
-        }
-    }
-
-    fn execute(
-        &self,
-        op: &KvOp,
-        shards: &mut HashMap<ShardIndex, HashMap<String, String>>,
-    ) -> KvRes {
-        match op {
-            KvOp::Put(key, value) => {
-                shards
-                    .get_mut(&self.shard_of(op))
-                    .unwrap()
-                    .insert(key.clone(), value.clone());
-                KvRes::Put
-            }
-            KvOp::Get(key) => KvRes::Get(shards.get(&self.shard_of(op)).unwrap().get(key).cloned()),
+            KvOp::Put(key, _) | KvOp::Get(key) => self.0.shard_index_from_hash(key),
         }
     }
 }
 
-impl StaticDispatch for DataShardingSchema<Kv> {
-    fn shards_of(&self, op: &Self::Op) -> HashSet<ShardIndex> {
-        op.iter().map(|op| self.shard_of(op)).collect()
+impl DataShardingApp for Kv {
+    type Shard = HashMap<String, String>;
+    type Execute = KvExecute;
+    fn new_execute(&self, op: Self::Op) -> Self::Execute {
+        KvExecute(op.into_iter().map(|op| (self.shard_of(&op), op)).collect())
     }
-    fn execute(&self, op: Self::Op, shards: &mut HashMap<ShardIndex, Self::Shard>) -> Self::Res {
-        op.into_iter().map(|op| self.execute(&op, shards)).collect()
+}
+
+impl DataShardingExecuteState for KvExecute {
+    type App = Kv;
+
+    fn proceed(
+        &mut self,
+        shards: &mut HashMap<ShardIndex, <Self::App as DataShardingApp>::Shard>,
+    ) -> DataShardingExecuteOutput<<Self::App as AppProtocol>::Res> {
+        let required_indices = self
+            .0
+            .iter()
+            .map(|&(index, _)| index)
+            .filter(|index| !shards.contains_key(index))
+            .collect::<HashSet<_>>();
+        if !required_indices.is_empty() {
+            return DataShardingExecuteOutput::RequireAccess(required_indices);
+        }
+        let res = take(&mut self.0)
+            .into_iter()
+            .map(|(index, op)| match op {
+                KvOp::Put(key, value) => {
+                    shards.get_mut(&index).unwrap().insert(key, value);
+                    KvRes::Put
+                }
+                KvOp::Get(key) => KvRes::Get(shards[&index].get(&key).cloned()),
+            })
+            .collect();
+        DataShardingExecuteOutput::Complete(res)
     }
 }
 
@@ -206,67 +183,90 @@ pub mod ycsb {
     }
 }
 
-pub struct Utxo;
+pub struct Utxo(pub DataShardingSchema);
 
-impl AppProtocol for DataShardingSchema<Utxo> {
+impl AppProtocol for Utxo {
     type Op = UtxoOp;
     type Res = Result<(), UtxoError>;
 }
 
-impl DataShardingApp for DataShardingSchema<Utxo> {
+pub struct UtxoExecute {
+    op: UtxoOp,
+    input_shards: HashSet<ShardIndex>,
+    outputs: HashMap<ShardIndex, Vec<(UtxoId, UtxoData)>>,
+}
+
+impl DataShardingApp for Utxo {
     type Shard = crate::app::utxo::Utxo;
-    type Execute = StaticDispatchExecute<Self>;
-    fn new_shard(&self, _index: ShardIndex) -> Self::Shard {
-        Default::default()
-    }
+    type Execute = UtxoExecute;
     fn new_execute(&self, op: Self::Op) -> Self::Execute {
-        self.static_dispatch(op)
+        let input_shards = match &op.input {
+            UtxoOpInput::Mint => Default::default(),
+            UtxoOpInput::Spend(spend) => spend
+                .iter()
+                .map(|(id, _)| self.0.shard_index_from_hash(id))
+                .collect(),
+        };
+        let mut outputs = HashMap::<_, Vec<_>>::new();
+        for (index, output) in op.outputs.iter().enumerate() {
+            let id = UtxoId(op.tx_id(), index as _);
+            let shard_index = self.0.shard_index_from_hash(&id);
+            outputs
+                .entry(shard_index)
+                .or_default()
+                .push((id, output.clone()))
+        }
+        UtxoExecute {
+            input_shards,
+            outputs,
+            op,
+        }
     }
 }
 
-impl StaticDispatch for DataShardingSchema<Utxo> {
-    // consider shard by owner?
-    fn shards_of(&self, op: &UtxoOp) -> HashSet<ShardIndex> {
-        let mut shards = HashSet::new();
-        if let UtxoOpInput::Spend(spend) = &op.input {
-            for id in spend {
-                shards.insert(self.shard_index_from_hash(id));
-            }
-        }
-        let tx_id = op.tx_id();
-        for i in 0..op.outputs.len() {
-            shards.insert(self.shard_index_from_hash(UtxoId(tx_id.clone(), i as _)));
-        }
-        shards
-    }
+impl DataShardingExecuteState for UtxoExecute {
+    type App = Utxo;
 
+    fn proceed(
+        &mut self,
+        shards: &mut HashMap<ShardIndex, <Self::App as DataShardingApp>::Shard>,
+    ) -> DataShardingExecuteOutput<<Self::App as AppProtocol>::Res> {
+        let required_indices = &(&self.input_shards
+            | &self.outputs.keys().copied().collect::<HashSet<_>>())
+            - &shards.keys().copied().collect::<HashSet<_>>();
+        if !required_indices.is_empty() {
+            DataShardingExecuteOutput::RequireAccess(required_indices)
+        } else {
+            DataShardingExecuteOutput::Complete(self.execute(shards))
+        }
+    }
+}
+
+impl UtxoExecute {
     fn execute(
-        &self,
-        op: UtxoOp,
+        &mut self,
         shards: &mut HashMap<ShardIndex, crate::app::utxo::Utxo>,
     ) -> Result<(), UtxoError> {
-        if matches!(op.input, UtxoOpInput::Spend(_))
-            && shards
-                .values()
-                .map(|shard| shard.total_input(&op))
+        if matches!(self.op.input, UtxoOpInput::Spend(_))
+            && self
+                .input_shards
+                .iter()
+                .map(|index| shards[index].total_input(&self.op))
                 .sum::<Result<u64, _>>()?
-                < op.total_output()
+                < self.op.total_output()
         {
             return Err(UtxoError::InsufficientFunds);
         }
-        let tx_id = op.tx_id();
-        let output_iter = op
-            .outputs
-            .into_iter()
-            .enumerate()
-            .map(|(index, output)| (UtxoId(tx_id.clone(), index as _), output));
-        for (&index, shard) in shards {
-            shard.remove_input(&op.input);
-            shard.insert_outputs(
-                output_iter
-                    .clone()
-                    .filter(|(id, _)| self.shard_index_from_hash(id) == index),
-            );
+
+        for index in &self.input_shards {
+            shards.get_mut(index).unwrap().remove_input(&self.op.input)
+        }
+
+        for (shard_index, outputs) in &self.outputs {
+            let shard = shards.get_mut(&shard_index).unwrap();
+            for (id, output) in outputs {
+                shard.insert_output(id.clone(), output.clone())
+            }
         }
         Ok(())
     }

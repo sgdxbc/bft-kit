@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use bincode::{Decode, Encode};
 use thiserror::Error;
 
 use crate::crypto::{Digest, DigestHash as _, UpdateHash, verify};
@@ -10,14 +11,15 @@ pub type TxId = Digest;
 pub type PublicKey = crate::crypto::PublicKey;
 pub type Sig = crate::crypto::Sig;
 
+#[derive(Debug, Encode, Decode)]
 pub struct Utxo {
     outputs: HashMap<UtxoId, UtxoData>,
 }
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Encode, Decode)]
 pub struct UtxoId(pub TxId, pub u8);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct UtxoData {
     pub owner: PublicKey,
     pub amount: u64,
@@ -45,7 +47,7 @@ pub struct UtxoOp {
 }
 
 pub enum UtxoOpInput {
-    Spend(Vec<UtxoId>),
+    Spend(Vec<(UtxoId, Sig)>),
     Mint,
 }
 
@@ -78,7 +80,7 @@ impl Utxo {
             return Ok(0);
         };
         let mut total = 0;
-        for (id, sig) in spend.iter().zip(&op.sigs) {
+        for (id, sig) in spend {
             let Some(output) = self.outputs.get(id) else {
                 continue;
             };
@@ -92,15 +94,13 @@ impl Utxo {
         let UtxoOpInput::Spend(spend) = input else {
             return;
         };
-        for input in spend {
+        for (input, _) in spend {
             self.outputs.remove(input);
         }
     }
 
-    pub fn insert_outputs(&mut self, outputs: impl Iterator<Item = (UtxoId, UtxoData)>) {
-        for (id, output) in outputs {
-            self.outputs.insert(id, output);
-        }
+    pub fn insert_output(&mut self, id: UtxoId, output: UtxoData) {
+        self.outputs.insert(id, output);
     }
 }
 
@@ -112,12 +112,9 @@ impl AppState for Utxo {
         self.remove_input(&op.input);
 
         let tx_id = op.tx_id();
-        self.insert_outputs(
-            op.outputs
-                .into_iter()
-                .enumerate()
-                .map(|(index, output)| (UtxoId(tx_id.clone(), index as _), output)),
-        );
+        for (index, output) in op.outputs.into_iter().enumerate() {
+            self.insert_output(UtxoId(tx_id.clone(), index as _), output)
+        }
         Ok(())
     }
 }
@@ -127,7 +124,7 @@ impl UpdateHash for UtxoOp {
         match &self.input {
             UtxoOpInput::Spend(inputs) => {
                 state.update(b"spend");
-                for UtxoId(tx_id, index) in inputs {
+                for (UtxoId(tx_id, index), _) in inputs {
                     state.update(tx_id);
                     state.update(index.to_le_bytes())
                 }

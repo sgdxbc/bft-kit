@@ -32,7 +32,7 @@ fn print_placement() {
     }
 }
 
-type A = DataShardingSchema<Kv>;
+type A = Kv;
 type R = UnreplicatedReplica<Request<Vec<KvOp>>>;
 type S = ShardedStorage<<A as DataShardingApp>::Shard>;
 type ServiceMessage = super::ServiceMessage<<R as State>::Message, <S as State>::Message>;
@@ -46,7 +46,7 @@ struct SystemState {
 
 #[test]
 fn idle_pending() {
-    let app = DataShardingSchema::new(1);
+    let app = Kv(DataShardingSchema::new(1));
     let storage_config = ShardedStorageConfig {
         num_node: 1,
         num_shard: 1,
@@ -149,7 +149,7 @@ fn request(seq: ClientSeq, op: KvOp) -> Request<Vec<KvOp>> {
 
 #[test]
 fn one_service() {
-    let app = DataShardingSchema::new(1);
+    let app = Kv(DataShardingSchema::new(1));
     let storage_config = ShardedStorageConfig {
         num_node: 1,
         num_shard: 1,
@@ -188,7 +188,7 @@ impl SystemState {
         Self {
             services: (0..num_service)
                 .map(|index| {
-                    let app = DataShardingSchema::new(100);
+                    let app = Kv(DataShardingSchema::new(100));
                     let storage_config = ShardedStorageConfig {
                         num_node: num_service,
                         num_shard: 100,
