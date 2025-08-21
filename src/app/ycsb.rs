@@ -7,13 +7,6 @@ use crate::workload::{NanoLatencies, WorkloadState};
 
 use super::AppProtocol;
 
-pub struct Ycsb;
-
-impl AppProtocol for Ycsb {
-    type Op = YcsbOp;
-    type Res = YcsbRes;
-}
-
 pub enum YcsbOp {
     Insert(String, String),
     Update(String, String),
@@ -56,11 +49,15 @@ impl From<YcsbWorkload> for NanoLatencies {
     }
 }
 
+impl AppProtocol for YcsbWorkload {
+    type Op = YcsbOp;
+    type Res = YcsbRes;
+}
+
 impl WorkloadState for YcsbWorkload {
-    type Protocol = Ycsb;
     type Metadata = Instant;
 
-    fn next_op(&mut self) -> Option<(<Self::Protocol as AppProtocol>::Op, Self::Metadata)> {
+    fn next_op(&mut self) -> Option<(Self::Op, Self::Metadata)> {
         let k = format!("key{}", self.rng.random_range(0..self.config.num_key));
         let v = (&mut self.rng)
             .sample_iter(Alphanumeric)
@@ -70,11 +67,7 @@ impl WorkloadState for YcsbWorkload {
         Some((YcsbOp::Update(k, v), Instant::now())) // TODO
     }
 
-    fn complete(
-        &mut self,
-        start: Self::Metadata,
-        res: <Self::Protocol as AppProtocol>::Res,
-    ) -> anyhow::Result<()> {
+    fn complete(&mut self, start: Self::Metadata, res: Self::Res) -> anyhow::Result<()> {
         if let YcsbRes::Err(err) = res {
             anyhow::bail!(err)
         }

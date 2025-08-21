@@ -165,24 +165,26 @@ impl StaticDispatch for DataShardingSchema<Kv> {
 
 pub mod ycsb {
     use crate::{
-        app::ycsb::{Ycsb, YcsbOp, YcsbRes},
+        app::{
+            AppProtocol,
+            ycsb::{YcsbOp, YcsbRes},
+        },
         workload::WorkloadState,
     };
 
-    use super::{DataShardingSchema, Kv, KvOp, KvRes};
+    use super::{KvOp, KvRes};
 
     pub struct AdaptKv<W>(pub W);
 
-    impl<W: WorkloadState<Protocol = Ycsb>> WorkloadState for AdaptKv<W> {
-        type Protocol = DataShardingSchema<Kv>;
+    impl<W> AppProtocol for AdaptKv<W> {
+        type Op = Vec<KvOp>;
+        type Res = Vec<KvRes>;
+    }
+
+    impl<W: WorkloadState<Op = YcsbOp, Res = YcsbRes>> WorkloadState for AdaptKv<W> {
         type Metadata = W::Metadata;
 
-        fn next_op(
-            &mut self,
-        ) -> Option<(
-            <Self::Protocol as crate::service::AppProtocol>::Op,
-            Self::Metadata,
-        )> {
+        fn next_op(&mut self) -> Option<(Self::Op, Self::Metadata)> {
             let (op, metadata) = self.0.next_op()?;
             let op = match op {
                 YcsbOp::Insert(key, value) | YcsbOp::Update(key, value) => KvOp::Put(key, value),
@@ -192,11 +194,7 @@ pub mod ycsb {
             Some((vec![op], metadata))
         }
 
-        fn complete(
-            &mut self,
-            metadata: Self::Metadata,
-            mut res: <Self::Protocol as crate::service::AppProtocol>::Res,
-        ) -> anyhow::Result<()> {
+        fn complete(&mut self, metadata: Self::Metadata, mut res: Self::Res) -> anyhow::Result<()> {
             anyhow::ensure!(res.len() == 1);
             let res = match res.remove(0) {
                 KvRes::Put => YcsbRes::Ok,

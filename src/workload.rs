@@ -17,18 +17,13 @@ pub trait ClientState<A: AppProtocol>: State<Output = (ClientSeq, A::Res)> {
     fn submit(&mut self, op: A::Op) -> ClientSeq;
 }
 
-pub trait WorkloadState {
-    type Protocol: AppProtocol;
+pub trait WorkloadState: AppProtocol {
     type Metadata;
 
-    fn next_op(&mut self) -> Option<(<Self::Protocol as AppProtocol>::Op, Self::Metadata)>;
+    fn next_op(&mut self) -> Option<(Self::Op, Self::Metadata)>;
 
     #[allow(unused_variables)]
-    fn complete(
-        &mut self,
-        metadata: Self::Metadata,
-        res: <Self::Protocol as AppProtocol>::Res,
-    ) -> anyhow::Result<()> {
+    fn complete(&mut self, metadata: Self::Metadata, res: Self::Res) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -51,7 +46,7 @@ impl<W: WorkloadState, C> CloseLoopWorker<W, C> {
     }
 }
 
-impl<C: ClientState<W::Protocol>, W: WorkloadState> State for CloseLoopWorker<W, C> {
+impl<C: ClientState<W>, W: WorkloadState> State for CloseLoopWorker<W, C> {
     type Send = C::Send;
     type Output = anyhow::Result<()>;
 
@@ -109,7 +104,7 @@ impl<W: WorkloadState, C> OpenLoopWorker<W, C> {
     }
 }
 
-impl<W: WorkloadState, C: ClientState<W::Protocol>> State for OpenLoopWorker<W, C> {
+impl<W: WorkloadState, C: ClientState<W>> State for OpenLoopWorker<W, C> {
     type Send = C::Send;
     type Output = anyhow::Result<()>;
 
@@ -170,11 +165,15 @@ impl<W> Take<W> {
     }
 }
 
+impl<W: AppProtocol> AppProtocol for Take<W> {
+    type Op = W::Op;
+    type Res = W::Res;
+}
+
 impl<W: WorkloadState> WorkloadState for Take<W> {
-    type Protocol = W::Protocol;
     type Metadata = W::Metadata;
 
-    fn next_op(&mut self) -> Option<(<Self::Protocol as AppProtocol>::Op, Self::Metadata)> {
+    fn next_op(&mut self) -> Option<(Self::Op, Self::Metadata)> {
         if self.count == 0 {
             return None;
         }
@@ -182,11 +181,7 @@ impl<W: WorkloadState> WorkloadState for Take<W> {
         self.workload.next_op()
     }
 
-    fn complete(
-        &mut self,
-        metadata: Self::Metadata,
-        res: <Self::Protocol as AppProtocol>::Res,
-    ) -> anyhow::Result<()> {
+    fn complete(&mut self, metadata: Self::Metadata, res: Self::Res) -> anyhow::Result<()> {
         self.workload.complete(metadata, res)
     }
 }
@@ -205,11 +200,15 @@ impl<W> OpLatency<W> {
     }
 }
 
+impl<W: AppProtocol> AppProtocol for OpLatency<W> {
+    type Op = W::Op;
+    type Res = W::Res;
+}
+
 impl<W: WorkloadState> WorkloadState for OpLatency<W> {
-    type Protocol = W::Protocol;
     type Metadata = (Instant, W::Metadata);
 
-    fn next_op(&mut self) -> Option<(<Self::Protocol as AppProtocol>::Op, Self::Metadata)> {
+    fn next_op(&mut self) -> Option<(Self::Op, Self::Metadata)> {
         self.inner
             .next_op()
             .map(|(op, metadata)| (op, (Instant::now(), metadata)))
@@ -218,7 +217,7 @@ impl<W: WorkloadState> WorkloadState for OpLatency<W> {
     fn complete(
         &mut self,
         (start, metadata): Self::Metadata,
-        res: <Self::Protocol as AppProtocol>::Res,
+        res: Self::Res,
     ) -> anyhow::Result<()> {
         self.inner.complete(metadata, res)?;
         self.latencies += start.elapsed().as_nanos() as u64;
@@ -247,7 +246,7 @@ impl<W: WorkloadState + Into<NanoLatencies>, C> From<OpenLoopWorker<W, C>> for N
 pub struct WorkloadIter<W>(pub W);
 
 impl<W: WorkloadState> Iterator for WorkloadIter<W> {
-    type Item = (<W::Protocol as AppProtocol>::Op, W::Metadata);
+    type Item = (<W as AppProtocol>::Op, W::Metadata);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next_op()

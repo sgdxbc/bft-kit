@@ -104,17 +104,17 @@ where
     }
 }
 
-pub struct Replica<T> {
+pub struct UnreplicatedReplica<T> {
     submit_buffer: Vec<T>,
 }
 
-impl<T> Default for Replica<T> {
+impl<T> Default for UnreplicatedReplica<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> Replica<T> {
+impl<T> UnreplicatedReplica<T> {
     pub fn new() -> Self {
         Self {
             submit_buffer: Default::default(),
@@ -122,7 +122,7 @@ impl<T> Replica<T> {
     }
 }
 
-impl<T> ReplicationState<T> for Replica<T> {
+impl<T> ReplicationState<T> for UnreplicatedReplica<T> {
     type Metadata = ();
 
     fn submit(&mut self, entry: T) {
@@ -130,7 +130,7 @@ impl<T> ReplicationState<T> for Replica<T> {
     }
 }
 
-impl<T> State for Replica<T> {
+impl<T> State for UnreplicatedReplica<T> {
     type Send = Never;
     type Output = Replicated<T, ()>;
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {

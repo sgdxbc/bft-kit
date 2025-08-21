@@ -14,10 +14,9 @@ impl AppState for Null {
 }
 
 impl WorkloadState for Null {
-    type Protocol = Self;
     type Metadata = ();
 
-    fn next_op(&mut self) -> Option<(<Self::Protocol as AppProtocol>::Op, Self::Metadata)> {
+    fn next_op(&mut self) -> Option<(Self::Op, Self::Metadata)> {
         Some(((), ()))
     }
 }

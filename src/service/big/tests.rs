@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use test_log::test;
 
-use crate::replication::unreplicated::Replica;
+use crate::replication::unreplicated::UnreplicatedReplica;
 
 use super::{
     app::{DataShardingSchema, Kv, KvOp, KvRes},
@@ -33,7 +33,7 @@ fn print_placement() {
 }
 
 type A = DataShardingSchema<Kv>;
-type R = Replica<Request<Vec<KvOp>>>;
+type R = UnreplicatedReplica<Request<Vec<KvOp>>>;
 type S = ShardedStorage<<A as DataShardingApp>::Shard>;
 type ServiceMessage = super::ServiceMessage<<R as State>::Message, <S as State>::Message>;
 
@@ -55,7 +55,7 @@ fn idle_pending() {
     let storage = ShardedStorage::new(storage_config, 0, [0].into(), &app);
     let service = BigService::new(
         app,
-        Replica::new(),
+        UnreplicatedReplica::new(),
         storage,
         ServiceConfig {
             num_cached_shard: 0,
@@ -158,7 +158,7 @@ fn one_service() {
     let storage = ShardedStorage::new(storage_config, 0, [0].into(), &app);
     let service = BigService::new(
         app,
-        Replica::new(),
+        UnreplicatedReplica::new(),
         storage,
         ServiceConfig {
             num_cached_shard: 0,
@@ -197,7 +197,7 @@ impl SystemState {
                     let storage = ShardedStorage::new(storage_config, index, [index].into(), &app);
                     BigService::new(
                         app,
-                        Replica::new(),
+                        UnreplicatedReplica::new(),
                         storage,
                         ServiceConfig {
                             num_cached_shard: 0,

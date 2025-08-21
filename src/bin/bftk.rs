@@ -4,7 +4,11 @@ use bft_kit::{
     app::{null::Null, ycsb::YcsbWorkload},
     init_logging_file,
     parse::Configs,
-    replication::{ReplicaIndex, replay::ReplayReplica, unreplicated},
+    replication::{
+        ReplicaIndex,
+        replay::ReplayReplica,
+        unreplicated::{UnreplicatedClient, UnreplicatedReplica},
+    },
     service::{
         Request,
         big::{
@@ -54,9 +58,7 @@ async fn workers(configs: Configs) -> anyhow::Result<()> {
 
     let mut worker_set = JoinSet::new();
     for _ in 0..configs.get("workload.concurrency")? {
-        let client_id = random();
-        let client = unreplicated::UnreplicatedClient::<Null>::new(client_id, configs.extract()?);
-        worker_set.spawn(worker(configs.clone(), client_id, client, cancel.clone()));
+        worker_set.spawn(worker(configs.clone(), cancel.clone()));
     }
 
     let worker_task = async {
@@ -83,12 +85,13 @@ async fn workers(configs: Configs) -> anyhow::Result<()> {
 
 async fn worker(
     configs: impl AsRef<Configs>,
-    client_id: u32,
-    client: unreplicated::UnreplicatedClient<Null>,
     cancel: CancellationToken,
 ) -> anyhow::Result<NanoLatencies> {
     let configs = configs.as_ref();
     let workload = OpLatency::new(Null);
+    let client_id = random();
+    let client = UnreplicatedClient::new(client_id, configs.extract()?);
+
     if configs.get("workload.close-loop")? {
         let worker = CloseLoopWorker::new(workload, client);
         run_worker(worker, client_id, configs.get_values("addr")?, cancel).await
@@ -131,7 +134,7 @@ async fn service_unsharded(
     configs: &Configs,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let service = UnshardedService::new(Null, unreplicated::Replica::new());
+    let service = UnshardedService::new(Null, UnreplicatedReplica::new());
     unsharded::transport::run_service(service, index, configs.get_values("addr")?, cancel).await
 }
 
