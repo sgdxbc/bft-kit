@@ -243,3 +243,13 @@ impl<W: WorkloadState + Into<NanoLatencies>, C> From<OpenLoopWorker<W, C>> for N
         worker.workload.into()
     }
 }
+
+pub struct WorkloadIter<W>(pub W);
+
+impl<W: WorkloadState> Iterator for WorkloadIter<W> {
+    type Item = (<W::Protocol as AppProtocol>::Op, W::Metadata);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next_op()
+    }
+}
