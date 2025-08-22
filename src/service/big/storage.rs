@@ -29,7 +29,7 @@ pub trait StorageState: State<Output = StorageStateOutput> {
 }
 
 pub enum StorageStateOutput {
-    Fetched(Key, Bytes),
+    Fetched(Key, Option<Bytes>),
     Skipped(StateVersion), // number of versions to skip execute
 
     Read(String),
@@ -38,12 +38,14 @@ pub enum StorageStateOutput {
 
 pub struct FullReplicationStorage {
     output_buffer: Vec<StorageStateOutput>,
+    keys: HashSet<Key>,
 }
 
 impl FullReplicationStorage {
     pub fn new() -> Self {
         Self {
             output_buffer: Default::default(),
+            keys: Default::default(),
         }
     }
 }
@@ -56,18 +58,26 @@ impl Default for FullReplicationStorage {
 
 impl StorageState for FullReplicationStorage {
     fn fetch(&mut self, key: Key) {
+        if !self.keys.contains(&key) {
+            self.output_buffer
+                .push(StorageStateOutput::Fetched(key, None));
+            return;
+        }
         self.output_buffer
             .push(StorageStateOutput::Read(format!("{key:x}")))
     }
     fn bump(&mut self, writes: HashMap<Key, Bytes>) {
         for (key, value) in writes {
+            self.keys.insert(key);
             self.output_buffer
                 .push(StorageStateOutput::Write(format!("{key:x}"), value))
         }
     }
     fn read_ok(&mut self, key: String, value: Bytes) {
-        self.output_buffer
-            .push(StorageStateOutput::Fetched(key.parse().unwrap(), value))
+        self.output_buffer.push(StorageStateOutput::Fetched(
+            key.parse().unwrap(),
+            Some(value),
+        ))
     }
     fn write_ok(&mut self, _key: String) {}
 }
@@ -112,6 +122,8 @@ pub struct ShardedStorageConfig {
 
 impl ShardedStorageConfig {
     fn node_indices_of(&self, key: Key) -> Vec<NodeIndex> {
+        // there should be some more efficient way to bypass rng. currently play for
+        // safe as long as it is not too slow
         (0..self.num_node).choose_multiple(&mut StdRng::from_seed(key.0), self.num_active_copy)
     }
 
@@ -159,8 +171,6 @@ type ShardedStorageSend = (Dest, ShardedStorageMessage);
 
 impl StorageState for ShardedStorage {
     fn fetch(&mut self, key: Key) {
-        // tracing::trace!(%self.replica_index, shard_index = %index);
-
         let inserted = self.fetching.insert(key);
         assert!(inserted);
 
@@ -205,7 +215,7 @@ impl StorageState for ShardedStorage {
             if self.config.should_store(&self.node_indices, key) {
                 self.proceed_buffer
                     .push(Proceed::Output(StorageStateOutput::Write(
-                        format!("{key}.{}", self.version),
+                        format!("{key:x}.{}", self.version),
                         bytes.clone(),
                     )));
                 self.key_versions.get_mut(&key).unwrap().push(self.version)
@@ -217,7 +227,7 @@ impl StorageState for ShardedStorage {
                 let query_ok = message::QueryOk {
                     version: self.version,
                     key: key.0,
-                    bytes: writes[&key].to_vec(),
+                    bytes: Some(writes[&key].to_vec()),
                 };
                 self.proceed_buffer.push(Proceed::Send((
                     Dest::Multi(service_indices.into_iter().collect()),
@@ -228,9 +238,9 @@ impl StorageState for ShardedStorage {
     }
 
     fn read_ok(&mut self, key: String, value: Bytes) {
-        let (version, shard_index) = key.split_once('.').unwrap();
+        let (key, version) = key.split_once('.').unwrap();
         let version = version.parse::<StateVersion>().unwrap();
-        let key = shard_index.parse().unwrap();
+        let key = key.parse().unwrap();
 
         if let Some(targets) = self.read_for.remove(&(version, key)) {
             for (replica_index, version) in targets {
@@ -238,12 +248,12 @@ impl StorageState for ShardedStorage {
                     assert_eq!(version, self.version); // or relax on this, just continue
                     let exists = self.fetching.remove(&key);
                     assert!(exists);
-                    Proceed::Output(StorageStateOutput::Fetched(key, value.clone()))
+                    Proceed::Output(StorageStateOutput::Fetched(key, Some(value.clone())))
                 } else {
                     let query_ok = message::QueryOk {
                         version,
                         key: key.0,
-                        bytes: value.to_vec(),
+                        bytes: Some(value.to_vec()),
                     };
                     Proceed::Send((
                         Dest::One(replica_index),
@@ -281,7 +291,7 @@ impl State for ShardedStorage {
                     self.proceed_buffer
                         .push(Proceed::Output(StorageStateOutput::Fetched(
                             key,
-                            fetch_ok.bytes.into(),
+                            fetch_ok.bytes.map(Into::into),
                         )))
                 }
             }
@@ -290,23 +300,38 @@ impl State for ShardedStorage {
 }
 
 impl ShardedStorage {
+    fn find_version(&self, key: Key, version: StateVersion) -> Option<StateVersion> {
+        let shard_versions = self.key_versions.get(&key)?;
+        match shard_versions.binary_search(&version) {
+            Err(0) => None,
+            Ok(index) => Some(shard_versions[index]),
+            Err(index) => Some(shard_versions[index - 1]),
+        }
+    }
+
     fn read_key(&mut self, replica_index: ReplicaIndex, version: StateVersion, key: Key) {
-        let shard_versions = &self.key_versions[&key];
-        let found_version = match shard_versions.binary_search(&version) {
-            Ok(index) => shard_versions[index],
-            Err(0) => {
-                // the version to read has garbage collected
-                // the remote replica will progress when it collects a bump quorum
-                assert_ne!(replica_index, self.replica_index);
-                return;
-            }
-            Err(index) => shard_versions[index - 1],
+        let Some(found_version) = self.find_version(key, version) else {
+            let proceed = if replica_index == self.replica_index {
+                Proceed::Output(StorageStateOutput::Fetched(key, None))
+            } else {
+                let query_ok = message::QueryOk {
+                    version,
+                    key: key.0,
+                    bytes: None,
+                };
+                Proceed::Send((
+                    Dest::One(replica_index),
+                    ShardedStorageMessage::QueryOk(query_ok),
+                ))
+            };
+            self.proceed_buffer.push(proceed);
+            return;
         };
         let targets = self.read_for.entry((found_version, key)).or_default();
         if targets.is_empty() {
             self.proceed_buffer
                 .push(Proceed::Output(StorageStateOutput::Read(format!(
-                    "{key}.{found_version}"
+                    "{key:x}.{found_version}"
                 ))))
         }
         // can we use entry api here?
@@ -335,6 +360,6 @@ pub mod message {
     pub struct QueryOk {
         pub version: StateVersion,
         pub key: [u8; 32],
-        pub bytes: Vec<u8>, // `Bytes` does not support Encode/Decode
+        pub bytes: Option<Vec<u8>>, // `Bytes` does not support Encode/Decode
     }
 }
