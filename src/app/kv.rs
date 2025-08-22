@@ -4,13 +4,13 @@ use super::{AppProtocol, DataShardingApp, DataShardingExecuteOutput, DataShardin
 
 pub struct Kv;
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub enum KvOp {
     Put(String, String),
     Get(String),
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub enum KvRes {
     Put,
     Get(Option<String>),
@@ -36,6 +36,7 @@ impl DataShardingApp for Kv {
 pub enum KvExecute {
     ToPut(String, String),
     ToGet(String),
+    Getting(String),
     Res(KvRes),
 }
 
@@ -47,7 +48,7 @@ impl DataShardingExecuteState for KvExecute {
         value: Option<<Self::App as DataShardingApp>::Value>,
     ) {
         match self {
-            KvExecute::ToGet(get_key) if get_key == &key => {
+            KvExecute::Getting(get_key) if get_key == &key => {
                 *self = KvExecute::Res(KvRes::Get(value));
             }
             _ => unimplemented!(),
@@ -55,13 +56,18 @@ impl DataShardingExecuteState for KvExecute {
     }
     fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App> {
         match self {
+            Self::Getting(_) => DataShardingExecuteOutput::Pending,
             Self::Res(res) => DataShardingExecuteOutput::Complete(res.clone()),
             KvExecute::ToPut(key, value) => {
                 let output = DataShardingExecuteOutput::Put(key.clone(), value.clone());
                 *self = KvExecute::Res(KvRes::Put);
                 output
             }
-            KvExecute::ToGet(key) => DataShardingExecuteOutput::Get(key.clone()),
+            KvExecute::ToGet(key) => {
+                let output = DataShardingExecuteOutput::Get(key.clone());
+                *self = KvExecute::Getting(key.clone());
+                output
+            }
         }
     }
 }

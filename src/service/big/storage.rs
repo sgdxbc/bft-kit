@@ -116,12 +116,12 @@ pub struct ShardedStorage {
 }
 
 pub struct ShardedStorageConfig {
-    num_node: NodeIndex, // virtual "storage node"
-    num_active_copy: usize,
+    pub num_node: NodeIndex, // virtual "storage node"
+    pub num_active_copy: usize,
 }
 
 impl ShardedStorageConfig {
-    fn node_indices_of(&self, key: Key) -> Vec<NodeIndex> {
+    pub fn node_indices_of(&self, key: Key) -> Vec<NodeIndex> {
         // there should be some more efficient way to bypass rng. currently play for
         // safe as long as it is not too slow
         (0..self.num_node).choose_multiple(&mut StdRng::from_seed(key.0), self.num_active_copy)
@@ -218,7 +218,7 @@ impl StorageState for ShardedStorage {
                         format!("{key:x}.{}", self.version),
                         bytes.clone(),
                     )));
-                self.key_versions.get_mut(&key).unwrap().push(self.version)
+                self.key_versions.entry(key).or_default().push(self.version)
             }
         }
 

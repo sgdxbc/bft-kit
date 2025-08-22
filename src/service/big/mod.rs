@@ -28,8 +28,8 @@ use super::{
 pub mod storage;
 pub mod transport;
 
-// #[cfg(test)]
-// mod tests;
+#[cfg(test)]
+mod tests;
 
 const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
@@ -276,19 +276,20 @@ where
             Proceed::Output(replicated) => {
                 let mut executing_buffer = VecDeque::new();
                 let start = Instant::now();
-                let logs_version_ahead = self
-                    .replicated
-                    .iter()
-                    .map(|(buffer, _)| buffer.len())
-                    .sum::<usize>();
+                // let logs_version_ahead = self
+                //     .replicated
+                //     .iter()
+                //     .map(|(buffer, _)| buffer.len())
+                //     .sum::<usize>();
                 for (i, request) in replicated.logs.into_iter().enumerate() {
-                    // may query ahead here as an optimization
-                    let mut execute = self.app.new_execute(request.op);
+                    // let mut execute = self.app.new_execute(request.op);
                     // TODO do not consume the Put (or Complete)
-                    while let DataShardingExecuteOutput::Get(key) = execute.proceed() {
-                        self.storage
-                            .will_fetch(key.digest().0.into(), (logs_version_ahead + i) as _)
-                    }
+                    // while let DataShardingExecuteOutput::Get(key) = execute.proceed() {
+                    //     self.storage
+                    //         .will_fetch(key.digest().0.into(), (logs_version_ahead + i) as _)
+                    // }
+                    let _ = i;
+                    let execute = self.app.new_execute(request.op);
                     executing_buffer.push_back(Executing {
                         execute,
                         client_id: request.client_id,
