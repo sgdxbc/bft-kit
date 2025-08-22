@@ -578,6 +578,12 @@ impl ShardedStorage {
         let shard_versions = &self.shard_versions[&shard_index];
         let found_version = match shard_versions.binary_search(&version) {
             Ok(index) => shard_versions[index],
+            Err(0) => {
+                // the version to read has garbage collected
+                // the remote replica will progress when it collects a bump quorum
+                assert_ne!(replica_index, self.replica_index);
+                return;
+            }
             Err(index) => shard_versions[index - 1],
         };
         let targets = self

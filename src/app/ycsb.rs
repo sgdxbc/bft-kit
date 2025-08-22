@@ -22,6 +22,9 @@ pub enum YcsbRes {
     Scan(Vec<(String, String)>),
 }
 
+// we don't generally implement data sharding app for YCSB because Scan is not
+// supported by current data sharding execution interfaces
+
 pub struct YcsbWorkload {
     config: WorkloadConfig,
     rng: StdRng,

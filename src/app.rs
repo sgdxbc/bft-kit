@@ -20,6 +20,30 @@ pub trait AppState: AppProtocol {
     fn execute(&mut self, op: Self::Op) -> Self::Res;
 }
 
+pub trait DataShardingApp: AppProtocol {
+    type Key;
+    type Value;
+    type ExecuteState: DataShardingExecuteState<App = Self>;
+    fn new_execute(&self, op: Self::Op) -> Self::ExecuteState;
+}
+
+pub trait DataShardingExecuteState {
+    type App: DataShardingApp;
+    fn get_ok(
+        &mut self,
+        key: <Self::App as DataShardingApp>::Key,
+        value: <Self::App as DataShardingApp>::Value,
+    );
+    fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App>;
+}
+
+pub enum DataShardingExecuteOutput<A: DataShardingApp> {
+    Get(A::Key),
+    Put(A::Key, A::Value),
+    Pending,
+    Complete(A::Res),
+}
+
 pub struct Batched<A>(A);
 
 impl<A: AppProtocol> AppProtocol for Batched<A> {
