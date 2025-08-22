@@ -1,4 +1,8 @@
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    hash::Hash,
+    time::Duration,
+};
 
 use crate::{
     Never,
@@ -84,5 +88,41 @@ impl<A: AppState> State for Buffered<A> {
     type Message = A::Op;
     fn receive(&mut self, op: Self::Message) {
         self.ops.push_back(op);
+    }
+}
+
+pub struct InMemory<A: DataShardingApp> {
+    pub app: A,
+    pub store: HashMap<A::Key, A::Value>,
+}
+
+impl<A: DataShardingApp> AppProtocol for InMemory<A> {
+    type Op = A::Op;
+    type Res = A::Res;
+}
+
+impl<A: DataShardingApp> AppState for InMemory<A>
+where
+    A::Key: Hash + Eq,
+    A::Value: Clone,
+{
+    fn execute(&mut self, op: Self::Op) -> Self::Res {
+        let mut execute = self.app.new_execute(op);
+        loop {
+            match execute.proceed() {
+                DataShardingExecuteOutput::Get(key) => {
+                    if let Some(value) = self.store.get(&key) {
+                        execute.get_ok(key, value.clone());
+                    } else {
+                        unimplemented!()
+                    }
+                }
+                DataShardingExecuteOutput::Put(key, value) => {
+                    self.store.insert(key, value);
+                }
+                DataShardingExecuteOutput::Pending => unimplemented!(),
+                DataShardingExecuteOutput::Complete(res) => break res,
+            }
+        }
     }
 }

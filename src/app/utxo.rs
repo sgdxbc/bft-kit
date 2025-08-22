@@ -6,17 +6,14 @@ use thiserror::Error;
 use crate::crypto::{Digest, DigestHash as _, UpdateHash, verify};
 
 use super::{
-    AppProtocol, AppState, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState,
+    AppProtocol, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState, InMemory,
 };
 
 pub type TxId = Digest;
 pub type PublicKey = crate::crypto::PublicKey;
 pub type Sig = crate::crypto::Sig;
 
-#[derive(Debug, Encode, Decode)]
-pub struct Utxo {
-    outputs: HashMap<UtxoId, UtxoData>,
-}
+pub type Utxo = InMemory<DataShardingUtxo>;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Encode, Decode)]
 pub struct UtxoId(pub TxId, pub u8);
@@ -30,7 +27,8 @@ pub struct UtxoData {
 impl Utxo {
     pub fn new() -> Self {
         Self {
-            outputs: Default::default(),
+            app: DataShardingUtxo,
+            store: Default::default(),
         }
     }
 }
@@ -60,11 +58,6 @@ pub enum UtxoError {
     InvalidSignature,
 }
 
-impl AppProtocol for Utxo {
-    type Op = UtxoOp;
-    type Res = Result<(), UtxoError>;
-}
-
 impl UtxoOp {
     pub fn tx_id(&self) -> TxId {
         self.digest()
@@ -72,51 +65,6 @@ impl UtxoOp {
 
     pub fn total_output(&self) -> u64 {
         self.outputs.iter().map(|o| o.amount).sum()
-    }
-}
-
-impl Utxo {
-    pub fn total_input(&self, op: &UtxoOp) -> Result<u64, UtxoError> {
-        let UtxoOpInput::Spend(spend) = &op.input else {
-            return Ok(0);
-        };
-        let mut total = 0;
-        for (id, sig) in spend {
-            let Some(output) = self.outputs.get(id) else {
-                continue;
-            };
-            verify(op, &output.owner, sig).map_err(|_| UtxoError::InvalidSignature)?;
-            total += output.amount
-        }
-        Ok(total)
-    }
-
-    pub fn remove_input(&mut self, input: &UtxoOpInput) {
-        let UtxoOpInput::Spend(spend) = input else {
-            return;
-        };
-        for (input, _) in spend {
-            self.outputs.remove(input);
-        }
-    }
-
-    pub fn insert_output(&mut self, id: UtxoId, output: UtxoData) {
-        self.outputs.insert(id, output);
-    }
-}
-
-impl AppState for Utxo {
-    fn execute(&mut self, op: Self::Op) -> Self::Res {
-        if matches!(op.input, UtxoOpInput::Spend(_)) && self.total_input(&op)? < op.total_output() {
-            return Err(UtxoError::InsufficientFunds);
-        }
-        self.remove_input(&op.input);
-
-        let tx_id = op.tx_id();
-        for (index, output) in op.outputs.into_iter().enumerate() {
-            self.insert_output(UtxoId(tx_id.clone(), index as _), output)
-        }
-        Ok(())
     }
 }
 
