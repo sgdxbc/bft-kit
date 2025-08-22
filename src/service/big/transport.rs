@@ -181,10 +181,9 @@ where
     });
 
     let write_tracker = TaskTracker::new();
-    let start = Instant::now();
     let mut tick_after = service_proceed(
         &mut service,
-        start.elapsed(),
+        Duration::ZERO,
         &connection_tables,
         &store_command_sender,
         &write_tracker,
@@ -192,8 +191,9 @@ where
         send_reply,
     )
     .await?;
-    tracing::info!(%replica_index, "enter event loop");
 
+    let start = Instant::now();
+    tracing::info!(%replica_index, "enter event loop");
     loop {
         let tick = async {
             if let Some(tick_after) = tick_after {
@@ -293,12 +293,13 @@ where
     }
 
     let latency_stat = format!(
-        "{} ops, tput {:.2} ops/sec, 50th {:?}",
+        "{} ops, tput {:.2} ops/sec, mean {:?}, 50th {:?}",
         service.execute_latencies.len(),
         service.execute_latencies.len() as f32 / elapsed.as_secs_f32(),
+        Duration::from_nanos(service.execute_latencies.mean() as _),
         Duration::from_nanos(service.execute_latencies.value_at_quantile(0.5))
     );
-    tracing::info!(%replica_index, "\n  {latency_stat}");
+    tracing::info!("replica {replica_index}\n  {latency_stat}");
     Ok(())
 }
 

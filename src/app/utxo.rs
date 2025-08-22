@@ -73,7 +73,7 @@ impl UpdateHash for UtxoOp {
         match &self.input {
             UtxoOpInput::Spend(inputs) => {
                 state.update(b"spend");
-                for (UtxoId(tx_id, index), _) in inputs {
+                for UtxoId(tx_id, index) in inputs.keys() {
                     state.update(tx_id);
                     state.update(index.to_le_bytes())
                 }
@@ -107,27 +107,19 @@ impl DataShardingApp for DataShardingUtxo {
     type Value = UtxoData;
     type ExecuteState = DataShardingUtxoExecute;
     fn new_execute(&self, op: Self::Op) -> Self::ExecuteState {
-        let proceed_buffer;
-        let num_remaining_input;
-        match &op.input {
-            UtxoOpInput::Spend(sigs) => {
-                proceed_buffer = sigs
-                    .keys()
-                    .map(|id| DataShardingExecuteOutput::Get(id.clone()))
-                    .collect();
-                num_remaining_input = sigs.len()
-            }
-            UtxoOpInput::Mint => {
-                proceed_buffer = Default::default();
-                num_remaining_input = 0
-            }
-        }
+        let get_proceeds = match &op.input {
+            UtxoOpInput::Spend(sigs) => sigs
+                .keys()
+                .map(|id| DataShardingExecuteOutput::Get(id.clone()))
+                .collect::<Vec<_>>(),
+            UtxoOpInput::Mint => Default::default(),
+        };
         Self::ExecuteState {
             op,
             spend_amount: 0,
-            num_remaining_input,
+            num_remaining_input: get_proceeds.len(),
             input_buffer: Default::default(),
-            proceed_buffer,
+            proceed_buffer: get_proceeds.into(),
         }
     }
 }

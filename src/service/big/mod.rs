@@ -286,7 +286,7 @@ where
             .map(|(buffer, _)| buffer.len())
             .sum::<usize>()
             // TODO configurable
-            >= 1000
+            > 0
         {
             return Proceed::Pending(storage_tick_after);
         }
