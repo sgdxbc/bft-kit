@@ -27,6 +27,7 @@ use super::{
 };
 
 pub mod app;
+pub mod storage;
 pub mod transport;
 
 #[cfg(test)]

@@ -27,6 +27,7 @@ core_affinity = "0.8.3"
 lru = "0.16.0"
 rocksdb = "0.24.0"
 tempfile = "3.21.0"
+primitive-types = "0.13.1"
 
 [dev-dependencies]
 criterion = "0.5.1"

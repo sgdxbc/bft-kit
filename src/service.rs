@@ -44,8 +44,9 @@ pub enum Message<R, M> {
     Intermediate(M),
 }
 
-// id is randomly assigned while index is continuously assigned
-// index is statically assigned while sequence monotonically increases
+// id/index has no special meaning if id1 > id2, while seq1 > seq2 means seq1 
+// comes later
+// index is statically assigned while id is dynamic
 
 pub type ClientId = u32;
 pub type ClientSeq = u64;
