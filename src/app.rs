@@ -10,6 +10,7 @@ use crate::{
 };
 
 pub mod b_tree;
+pub mod kv;
 pub mod null;
 pub mod rocksdb;
 pub mod utxo;
@@ -33,10 +34,10 @@ pub trait DataShardingApp: AppProtocol {
 
 pub trait DataShardingExecuteState {
     type App: DataShardingApp;
-    fn get_ok(
+    fn get_result(
         &mut self,
         key: <Self::App as DataShardingApp>::Key,
-        value: <Self::App as DataShardingApp>::Value,
+        value: Option<<Self::App as DataShardingApp>::Value>,
     );
     fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App>;
 }
@@ -111,11 +112,8 @@ where
         loop {
             match execute.proceed() {
                 DataShardingExecuteOutput::Get(key) => {
-                    if let Some(value) = self.store.get(&key) {
-                        execute.get_ok(key, value.clone());
-                    } else {
-                        unimplemented!()
-                    }
+                    let value = self.store.get(&key).cloned();
+                    execute.get_result(key, value)
                 }
                 DataShardingExecuteOutput::Put(key, value) => {
                     self.store.insert(key, value);

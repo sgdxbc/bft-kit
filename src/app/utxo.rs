@@ -15,15 +15,6 @@ pub type Sig = crate::crypto::Sig;
 
 pub type Utxo = InMemory<DataShardingUtxo>;
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Encode, Decode)]
-pub struct UtxoId(pub TxId, pub u8);
-
-#[derive(Debug, Clone, Encode, Decode)]
-pub struct UtxoData {
-    pub owner: PublicKey,
-    pub amount: u64,
-}
-
 impl Utxo {
     pub fn new() -> Self {
         Self {
@@ -37,6 +28,24 @@ impl Default for Utxo {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub struct DataShardingUtxo;
+pub struct DataShardingUtxoExecute {
+    op: UtxoOp,
+    spend_amount: u64,
+    num_remaining_input: usize,
+    input_buffer: Vec<(UtxoId, UtxoData)>,
+    proceed_buffer: VecDeque<DataShardingExecuteOutput<DataShardingUtxo>>,
+}
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Encode, Decode)]
+pub struct UtxoId(pub TxId, pub u8);
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct UtxoData {
+    pub owner: PublicKey,
+    pub amount: u64,
 }
 
 pub struct UtxoOp {
@@ -68,35 +77,6 @@ impl UtxoOp {
     }
 }
 
-impl UpdateHash for UtxoOp {
-    fn update<D: sha2::Digest>(&self, state: &mut D) {
-        match &self.input {
-            UtxoOpInput::Spend(inputs) => {
-                state.update(b"spend");
-                for UtxoId(tx_id, index) in inputs.keys() {
-                    state.update(tx_id);
-                    state.update(index.to_le_bytes())
-                }
-            }
-            UtxoOpInput::Mint => state.update(b"mint"),
-        }
-        for output in &self.outputs {
-            output.owner.update(state);
-            state.update(output.amount.to_le_bytes())
-        }
-        state.update(self.nonce.to_le_bytes())
-    }
-}
-
-pub struct DataShardingUtxo;
-pub struct DataShardingUtxoExecute {
-    op: UtxoOp,
-    spend_amount: u64,
-    num_remaining_input: usize,
-    input_buffer: Vec<(UtxoId, UtxoData)>,
-    proceed_buffer: VecDeque<DataShardingExecuteOutput<DataShardingUtxo>>,
-}
-
 impl AppProtocol for DataShardingUtxo {
     type Op = UtxoOp;
     type Res = Result<(), UtxoError>;
@@ -126,12 +106,17 @@ impl DataShardingApp for DataShardingUtxo {
 
 impl DataShardingExecuteState for DataShardingUtxoExecute {
     type App = DataShardingUtxo;
-    fn get_ok(
+    fn get_result(
         &mut self,
         key: <Self::App as DataShardingApp>::Key,
-        value: <Self::App as DataShardingApp>::Value,
+        value: Option<<Self::App as DataShardingApp>::Value>,
     ) {
-        self.input_buffer.push((key, value))
+        if let Some(value) = value {
+            self.input_buffer.push((key, value))
+        } else {
+            // or directly error?
+            self.num_remaining_input -= 1
+        }
     }
     fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App> {
         if let Some(output) = self.proceed_buffer.pop_front() {
@@ -171,5 +156,25 @@ impl DataShardingExecuteState for DataShardingUtxoExecute {
         } else {
             DataShardingExecuteOutput::Pending
         }
+    }
+}
+
+impl UpdateHash for UtxoOp {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
+        match &self.input {
+            UtxoOpInput::Spend(inputs) => {
+                state.update(b"spend");
+                for UtxoId(tx_id, index) in inputs.keys() {
+                    state.update(tx_id);
+                    state.update(index.to_le_bytes())
+                }
+            }
+            UtxoOpInput::Mint => state.update(b"mint"),
+        }
+        for output in &self.outputs {
+            output.owner.update(state);
+            state.update(output.amount.to_le_bytes())
+        }
+        state.update(self.nonce.to_le_bytes())
     }
 }

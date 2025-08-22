@@ -34,10 +34,10 @@ impl DataShardingApp for Null {
 
 impl DataShardingExecuteState for Null {
     type App = Null;
-    fn get_ok(
+    fn get_result(
         &mut self,
         _key: <Self::App as DataShardingApp>::Key,
-        _value: <Self::App as DataShardingApp>::Value,
+        _value: Option<<Self::App as DataShardingApp>::Value>,
     ) {
         unreachable!()
     }

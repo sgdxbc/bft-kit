@@ -1,0 +1,108 @@
+use super::{AppProtocol, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState};
+
+pub struct Kv;
+
+#[derive(Debug, Clone)]
+pub enum KvOp {
+    Put(String, String),
+    Get(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum KvRes {
+    Put,
+    Get(Option<String>),
+}
+
+impl AppProtocol for Kv {
+    type Op = KvOp;
+    type Res = KvRes;
+}
+
+impl DataShardingApp for Kv {
+    type Key = String;
+    type Value = String;
+    type ExecuteState = KvExecute;
+    fn new_execute(&self, op: Self::Op) -> Self::ExecuteState {
+        match op {
+            KvOp::Put(key, value) => KvExecute::ToPut(key, value),
+            KvOp::Get(key) => KvExecute::ToGet(key),
+        }
+    }
+}
+
+pub enum KvExecute {
+    ToPut(String, String),
+    ToGet(String),
+    Res(KvRes),
+}
+
+impl DataShardingExecuteState for KvExecute {
+    type App = Kv;
+    fn get_result(
+        &mut self,
+        key: <Self::App as DataShardingApp>::Key,
+        value: Option<<Self::App as DataShardingApp>::Value>,
+    ) {
+        match self {
+            KvExecute::ToGet(get_key) if get_key == &key => {
+                *self = KvExecute::Res(KvRes::Get(value));
+            }
+            _ => unimplemented!(),
+        }
+    }
+    fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App> {
+        match self {
+            Self::Res(res) => DataShardingExecuteOutput::Complete(res.clone()),
+            KvExecute::ToPut(key, value) => {
+                let output = DataShardingExecuteOutput::Put(key.clone(), value.clone());
+                *self = KvExecute::Res(KvRes::Put);
+                output
+            }
+            KvExecute::ToGet(key) => DataShardingExecuteOutput::Get(key.clone()),
+        }
+    }
+}
+
+pub mod ycsb {
+    use crate::{
+        app::{
+            AppProtocol,
+            ycsb::{YcsbOp, YcsbRes},
+        },
+        workload::WorkloadState,
+    };
+
+    use super::{KvOp, KvRes};
+
+    pub struct AdaptKv<W>(pub W);
+
+    impl<W> AppProtocol for AdaptKv<W> {
+        type Op = Vec<KvOp>;
+        type Res = Vec<KvRes>;
+    }
+
+    impl<W: WorkloadState<Op = YcsbOp, Res = YcsbRes>> WorkloadState for AdaptKv<W> {
+        type Metadata = W::Metadata;
+
+        fn next_op(&mut self) -> Option<(Self::Op, Self::Metadata)> {
+            let (op, metadata) = self.0.next_op()?;
+            let op = match op {
+                YcsbOp::Insert(key, value) | YcsbOp::Update(key, value) => KvOp::Put(key, value),
+                YcsbOp::Get(key) => KvOp::Get(key),
+                _ => unimplemented!(),
+            };
+            Some((vec![op], metadata))
+        }
+
+        fn complete(&mut self, metadata: Self::Metadata, mut res: Self::Res) -> anyhow::Result<()> {
+            anyhow::ensure!(res.len() == 1);
+            let res = match res.remove(0) {
+                KvRes::Put => YcsbRes::Ok,
+                KvRes::Get(Some(value)) => YcsbRes::Get(value),
+                KvRes::Get(None) => YcsbRes::NotFound,
+            };
+            self.0.complete(metadata, res)
+        }
+    }
+}
