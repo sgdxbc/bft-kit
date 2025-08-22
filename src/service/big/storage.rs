@@ -15,8 +15,8 @@ use crate::{
     state::{Proceed, State},
 };
 
-type StateVersion = u64;
-type Key = H256;
+pub type StateVersion = u64;
+pub type Key = H256;
 
 pub trait StorageState: State<Output = StorageStateOutput> {
     fn fetch(&mut self, key: Key);
@@ -167,7 +167,7 @@ pub enum Dest {
     All,
 }
 
-type ShardedStorageSend = (Dest, ShardedStorageMessage);
+pub type ShardedStorageSend = (Dest, ShardedStorageMessage);
 
 impl StorageState for ShardedStorage {
     fn fetch(&mut self, key: Key) {
@@ -361,5 +361,20 @@ pub mod message {
         pub version: StateVersion,
         pub key: [u8; 32],
         pub bytes: Option<Vec<u8>>, // `Bytes` does not support Encode/Decode
+    }
+}
+
+mod parse {
+    use crate::parse::{Configs, Extract};
+
+    use super::ShardedStorageConfig;
+
+    impl Extract for ShardedStorageConfig {
+        fn extract(configs: &Configs) -> anyhow::Result<Self> {
+            Ok(Self {
+                num_node: configs.get("big.num-node")?,
+                num_active_copy: configs.get("big.num-active-copy")?,
+            })
+        }
     }
 }

@@ -1,14 +1,16 @@
+use bincode::{Decode, Encode};
+
 use super::{AppProtocol, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState};
 
 pub struct Kv;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum KvOp {
     Put(String, String),
     Get(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum KvRes {
     Put,
     Get(Option<String>),
@@ -78,8 +80,8 @@ pub mod ycsb {
     pub struct AdaptKv<W>(pub W);
 
     impl<W> AppProtocol for AdaptKv<W> {
-        type Op = Vec<KvOp>;
-        type Res = Vec<KvRes>;
+        type Op = KvOp;
+        type Res = KvRes;
     }
 
     impl<W: WorkloadState<Op = YcsbOp, Res = YcsbRes>> WorkloadState for AdaptKv<W> {
@@ -92,12 +94,11 @@ pub mod ycsb {
                 YcsbOp::Get(key) => KvOp::Get(key),
                 _ => unimplemented!(),
             };
-            Some((vec![op], metadata))
+            Some((op, metadata))
         }
 
-        fn complete(&mut self, metadata: Self::Metadata, mut res: Self::Res) -> anyhow::Result<()> {
-            anyhow::ensure!(res.len() == 1);
-            let res = match res.remove(0) {
+        fn complete(&mut self, metadata: Self::Metadata, res: Self::Res) -> anyhow::Result<()> {
+            let res = match res {
                 KvRes::Put => YcsbRes::Ok,
                 KvRes::Get(Some(value)) => YcsbRes::Get(value),
                 KvRes::Get(None) => YcsbRes::NotFound,

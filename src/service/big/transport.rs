@@ -17,16 +17,21 @@ use tokio::{
     time::{Instant, sleep},
     try_join,
 };
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::{bytes::Bytes, sync::CancellationToken, task::TaskTracker};
 
 use crate::{
+    app::DataShardingApp,
     crypto::cert::quinn::{client_config, server_config},
-    replication::{ReplicaIndex, transport::ReplicaTable},
-    state::Proceed,
+    replication::{ReplicaIndex, ReplicationState, transport::ReplicaTable},
+    service::{ClientId, Message, Output, Reply, Request, Send, ServiceState},
+    state::{Proceed, State as _},
     transport::{BINCODE_CONFIG, PerformSend, read_loop, run_write, trace_error},
 };
 
-use super::*;
+use super::{
+    BigService, ServiceMessage, ServiceSend,
+    storage::{Dest, ShardedStorageMessage, ShardedStorageSend, StorageState},
+};
 
 struct ConnectionTables {
     client: HashMap<ClientId, (Connection, JoinHandle<()>)>,
@@ -45,13 +50,8 @@ enum Event {
     Tick,
 }
 
-pub async fn run_service<
-    A: DataShardingApp,
-    R: ReplicationState<Request<A::Op>>,
-    S: StorageState + InitStore<A::Shard>,
->(
+pub async fn run_service<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState>(
     mut service: BigService<A, R, S>,
-    init_shard: impl InitDataShard<A::Shard>,
     replica_index: ReplicaIndex,
     addrs: Vec<SocketAddr>,
     cancel: CancellationToken,
@@ -170,8 +170,8 @@ where
     tracing::info!("interconnections established");
 
     let temp_dir = tempfile::Builder::new().prefix("big-storage").tempdir()?;
-    let mut db = DB::open_default(temp_dir.path())?;
-    service.init_store(&init_shard, &mut db)?;
+    let db = DB::open_default(temp_dir.path())?;
+    // service.init_store(&init_shard, &mut db)?;
     tracing::info!("store initialized");
 
     let (store_command_sender, store_command_receiver) = mpsc::channel(100);
@@ -424,11 +424,4 @@ fn store_task(
     let total_size = db.property_int_value(LIVE_SST_FILES_SIZE)?;
     tracing::info!(?total_size, "live SST files size");
     Ok(())
-}
-
-impl Store for DB {
-    fn write(&mut self, key: String, value: Bytes) -> anyhow::Result<()> {
-        self.put(key, value)?;
-        Ok(())
-    }
 }

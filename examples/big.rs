@@ -1,17 +1,16 @@
 use std::{iter, time::Duration};
 
 use bft_kit::{
-    app::ycsb::YcsbWorkload,
+    app::{
+        kv::{Kv, ycsb::AdaptKv},
+        ycsb::YcsbWorkload,
+    },
     init_logging,
     parse::Configs,
     replication::replay::ReplayReplica,
     service::{
         Request,
-        big::{
-            BigService,
-            app::{DataShardingSchema, DefaultShard, Kv, ycsb::AdaptKv},
-            transport::run_service,
-        },
+        big::{BigService, transport::run_service},
     },
     workload::WorkloadState,
 };
@@ -42,9 +41,9 @@ ycsb.value-len          10
     let mut service_tasks = JoinSet::new();
     let cancel = CancellationToken::new();
     for index in 0..configs.get("big.num-node")? {
-        let app = Kv(DataShardingSchema::new(configs.get("big.num-shard")?));
+        let app = Kv;
         // let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
-        let storage = bft_kit::service::big::FullReplicationStorage::new();
+        let storage = bft_kit::service::big::storage::FullReplicationStorage::new();
         let mut workload = AdaptKv(YcsbWorkload::new(
             configs.extract()?,
             StdRng::seed_from_u64(117418),
@@ -56,7 +55,6 @@ ycsb.value-len          10
                 client_seq: index as _,
                 op,
             });
-        let init_shard = DefaultShard(configs.get("big.num-shard")?);
         let service = BigService::new(
             app,
             ReplayReplica::new(logs, 1),
@@ -65,7 +63,6 @@ ycsb.value-len          10
         );
         service_tasks.spawn(run_service(
             service,
-            init_shard,
             index,
             addrs.clone(),
             cancel.clone(),

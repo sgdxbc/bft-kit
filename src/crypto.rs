@@ -40,14 +40,6 @@ pub trait UpdateHash {
     fn update<D: sha2::Digest>(&self, state: &mut D);
 }
 
-impl<T: UpdateHash> UpdateHash for &[T] {
-    fn update<D: sha2::Digest>(&self, state: &mut D) {
-        for item in *self {
-            item.update(state)
-        }
-    }
-}
-
 // the canonical digest in this codebase is 32 byte SHA256
 // can swap to keccak256 in the future if have a (very) good reason
 pub trait DigestHash {
@@ -191,6 +183,20 @@ impl PeerConfig {
             public_keys: secret_keys.iter().map(SecretKey::public_key).collect(),
             secret_key: secret_keys[index].clone(),
         }
+    }
+}
+
+impl<T: UpdateHash> UpdateHash for &[T] {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
+        for item in *self {
+            item.update(state)
+        }
+    }
+}
+
+impl UpdateHash for String {
+    fn update<D: sha2::Digest>(&self, state: &mut D) {
+        state.update(self.as_bytes())
     }
 }
 
