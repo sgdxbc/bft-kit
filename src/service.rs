@@ -3,7 +3,7 @@ use tokio_util::bytes::Bytes;
 
 use crate::{app::AppProtocol, state::State};
 
-pub mod big;
+// pub mod big;
 pub mod unsharded;
 
 pub trait ServiceState<A: AppProtocol>:
@@ -44,7 +44,7 @@ pub enum Message<R, M> {
     Intermediate(M),
 }
 
-// id/index has no special meaning if id1 > id2, while seq1 > seq2 means seq1 
+// id/index has no special meaning if id1 > id2, while seq1 > seq2 means seq1
 // comes later
 // index is statically assigned while id is dynamic
 

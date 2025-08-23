@@ -24,7 +24,7 @@ use crate::{
     crypto::cert::quinn::{client_config, server_config},
     replication::{ReplicaIndex, ReplicationState, transport::ReplicaTable},
     service::{ClientId, Message, Output, Reply, Request, Send, ServiceState},
-    state::{Proceed, State as _},
+    state::{Action, State as _},
     transport::{BINCODE_CONFIG, PerformSend, read_loop, run_write, trace_error},
 };
 
@@ -324,9 +324,9 @@ where
             break Ok(None); // consider better returned value
         }
         match service.proceed(since_start) {
-            Proceed::Pending(tick_after) => break Ok(tick_after),
-            Proceed::Send(Send::Reply(..)) if !send_reply => {}
-            Proceed::Send(Send::Reply(client_id, reply)) => {
+            Action::Pending(tick_after) => break Ok(tick_after),
+            Action::Send(Send::Reply(..)) if !send_reply => {}
+            Action::Send(Send::Reply(client_id, reply)) => {
                 let Some((connection, _)) = connection_tables.client.get(&client_id) else {
                     tracing::warn!(%client_id, "client connection not found");
                     continue;
@@ -339,13 +339,13 @@ where
                     ),
                 ));
             }
-            Proceed::Send(Send::Intermediate(ServiceSend::Replication(send))) => {
+            Action::Send(Send::Intermediate(ServiceSend::Replication(send))) => {
                 connection_tables.replica.perform(send, write_tracker)?
             }
-            Proceed::Send(Send::Intermediate(ServiceSend::Storage(send))) => {
+            Action::Send(Send::Intermediate(ServiceSend::Storage(send))) => {
                 connection_tables.storage.perform(send, write_tracker)?
             }
-            Proceed::Output(output) => {
+            Action::Output(output) => {
                 if store_command_sender.capacity() == 0 {
                     tracing::warn!("store command sender congested");
                 }

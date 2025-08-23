@@ -8,7 +8,7 @@ use hdrhistogram::Histogram;
 use crate::{
     app::AppProtocol,
     service::ClientSeq,
-    state::{Proceed, State, earliest},
+    state::{Action, State, earliest},
 };
 
 pub mod transport;
@@ -30,18 +30,22 @@ pub trait WorkloadState: AppProtocol {
 
 pub type NanoLatencies = Histogram<u64>;
 
-pub struct CloseLoopWorker<W: WorkloadState, C> {
+pub struct CloseLoopWorker<W: WorkloadState, C: ClientState<W>> {
     workload: W,
     client: C,
+
     submitted: Option<W::Metadata>,
+
+    actions: Vec<Action<C::Send, anyhow::Result<()>>>,
 }
 
-impl<W: WorkloadState, C> CloseLoopWorker<W, C> {
+impl<W: WorkloadState, C: ClientState<W>> CloseLoopWorker<W, C> {
     pub fn new(workload: W, client: C) -> Self {
         Self {
             workload,
             client,
             submitted: None,
+            actions: Default::default(),
         }
     }
 }
@@ -50,31 +54,37 @@ impl<C: ClientState<W>, W: WorkloadState> State for CloseLoopWorker<W, C> {
     type Send = C::Send;
     type Output = anyhow::Result<()>;
 
-    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if self.submitted.is_none() {
-            let Some((op, metadata)) = self.workload.next_op() else {
-                return Proceed::Output(Ok(()));
-            };
-            self.client.submit(op);
-            self.submitted = Some(metadata)
+    fn proceed(&mut self) -> Option<impl Iterator<Item = Action<Self::Send, Self::Output>>> {
+        if let Some(actions) = self.client.proceed() {
+            for action in actions {
+                match action {
+                    Action::Send(send) => self.actions.push(Action::Send(send)),
+                    Action::Output((_, res)) => {
+                        let Some(metadata) = self.submitted.take() else {
+                            unimplemented!("multiple outputs to close loop worker")
+                        };
+                        if let Err(err) = self.workload.complete(metadata, res) {
+                            self.actions.push(Action::Output(Err(err)));
+                            break;
+                        }
+                    }
+                }
+            }
         }
-        match self.client.proceed(since_start) {
-            Proceed::Pending(tick_after) => {
-                if tick_after.is_none() {
-                    tracing::warn!("liveness issue detected in close loop worker")
-                }
-                Proceed::Pending(tick_after)
+
+        if self.submitted.is_none() {
+            if let Some((op, metadata)) = self.workload.next_op() {
+                self.client.submit(op);
+                self.submitted = Some(metadata)
+            } else {
+                self.actions.push(Action::Output(Ok(())))
             }
-            Proceed::Send(send) => Proceed::Send(send),
-            Proceed::Output((_, res)) => {
-                let Some(metadata) = self.submitted.take() else {
-                    unimplemented!("multiple outputs to close loop worker")
-                };
-                if let Err(err) = self.workload.complete(metadata, res) {
-                    return Proceed::Output(Err(err));
-                }
-                self.proceed(since_start)
-            }
+        }
+
+        if !self.actions.is_empty() {
+            Some(self.actions.drain(..))
+        } else {
+            None
         }
     }
 
@@ -82,69 +92,86 @@ impl<C: ClientState<W>, W: WorkloadState> State for CloseLoopWorker<W, C> {
     fn receive(&mut self, message: Self::Message) {
         self.client.receive(message)
     }
+
+    fn tick(&mut self, since_start: Duration) {
+        self.client.tick(since_start)
+    }
+    fn tick_after(&self) -> Option<Duration> {
+        self.client.tick_after()
+    }
 }
 
-pub struct OpenLoopWorker<W: WorkloadState, C> {
+pub struct OpenLoopWorker<W: WorkloadState, C: ClientState<W>> {
     workload: W,
     client: C,
-    submitted: HashMap<ClientSeq, W::Metadata>,
-    next_submit: Option<Instant>,
+
     target_tput: f32,
+
+    submitted: HashMap<ClientSeq, W::Metadata>,
+    next_submit: Option<Duration>,
+
+    actions: Vec<Action<C::Send, anyhow::Result<()>>>,
 }
 
-impl<W: WorkloadState, C> OpenLoopWorker<W, C> {
+impl<W: WorkloadState, C: ClientState<W>> OpenLoopWorker<W, C> {
     pub fn new(workload: W, client: C, target_tput: f32) -> Self {
         Self {
             workload,
             client,
-            submitted: Default::default(),
-            next_submit: Some(Instant::now()),
             target_tput,
+            submitted: Default::default(),
+            next_submit: Some(Duration::ZERO),
+            actions: Default::default(),
         }
     }
 }
 
 impl<W: WorkloadState, C: ClientState<W>> State for OpenLoopWorker<W, C> {
+    fn tick(&mut self, since_start: Duration) {
+        self.client.tick(since_start);
+        while let Some(next_submit) = &mut self.next_submit
+            && *next_submit <= since_start
+        {
+            let Some((op, metadata)) = self.workload.next_op() else {
+                self.next_submit = None;
+                break;
+            };
+            let seq = self.client.submit(op);
+            self.submitted.insert(seq, metadata);
+            // randomize interval?
+            *next_submit += Duration::from_secs_f32(1. / self.target_tput)
+        }
+    }
+
+    fn tick_after(&self) -> Option<Duration> {
+        earliest([self.next_submit, self.client.tick_after()])
+    }
+
     type Send = C::Send;
     type Output = anyhow::Result<()>;
 
-    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some(next_submit) = &mut self.next_submit {
-            let now = Instant::now();
-            while *next_submit <= now {
-                let Some((op, metadata)) = self.workload.next_op() else {
-                    self.next_submit = None;
-                    break;
-                };
-                let seq = self.client.submit(op);
-                self.submitted.insert(seq, metadata);
-                // randomize interval?
-                *next_submit += Duration::from_secs_f32(1. / self.target_tput)
+    fn proceed(&mut self) -> Option<impl Iterator<Item = Action<Self::Send, Self::Output>>> {
+        if let Some(actions) = self.client.proceed() {
+            for action in actions {
+                match action {
+                    Action::Send(send) => self.actions.push(Action::Send(send)),
+                    Action::Output((seq, res)) => {
+                        let Some(metadata) = self.submitted.remove(&seq) else {
+                            unimplemented!("output for unknown seq {seq}")
+                        };
+                        if let Err(err) = self.workload.complete(metadata, res) {
+                            self.actions.push(Action::Output(Err(err)));
+                            break;
+                        }
+                    }
+                }
             }
         }
-        // this `proceed` is only called if either `self` or `self.client` may make
-        // progress at this point (i.e. `since_start`). if it's `self.client` would
-        // proceed, we should call recursively `proceed` it. otherwise, `self` should
-        // have proceeded above, which probably have `submit` to `self.client`, after
-        // what we should `proceed` it as well
-        // the only exception is when `self.workload` is running out of operations. we
-        // just let `self.client` receives a false positive `proceed` call in this case
-        match self.client.proceed(since_start) {
-            Proceed::Pending(tick_after) => Proceed::Pending(earliest([
-                tick_after,
-                self.next_submit
-                    .map(|at| at.saturating_duration_since(Instant::now())),
-            ])),
-            Proceed::Send(send) => Proceed::Send(send),
-            Proceed::Output((seq, res)) => {
-                let Some(metadata) = self.submitted.remove(&seq) else {
-                    unimplemented!("output for unknown seq {seq}")
-                };
-                if let Err(err) = self.workload.complete(metadata, res) {
-                    return Proceed::Output(Err(err));
-                }
-                self.proceed(since_start)
-            }
+
+        if !self.actions.is_empty() {
+            Some(self.actions.drain(..))
+        } else {
+            None
         }
     }
 
@@ -231,13 +258,17 @@ impl<W> From<OpLatency<W>> for NanoLatencies {
     }
 }
 
-impl<W: WorkloadState + Into<NanoLatencies>, C> From<CloseLoopWorker<W, C>> for NanoLatencies {
+impl<W: WorkloadState + Into<NanoLatencies>, C: ClientState<W>> From<CloseLoopWorker<W, C>>
+    for NanoLatencies
+{
     fn from(worker: CloseLoopWorker<W, C>) -> Self {
         worker.workload.into()
     }
 }
 
-impl<W: WorkloadState + Into<NanoLatencies>, C> From<OpenLoopWorker<W, C>> for NanoLatencies {
+impl<W: WorkloadState + Into<NanoLatencies>, C: ClientState<W>> From<OpenLoopWorker<W, C>>
+    for NanoLatencies
+{
     fn from(worker: OpenLoopWorker<W, C>) -> Self {
         worker.workload.into()
     }

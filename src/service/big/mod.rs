@@ -12,7 +12,7 @@ use crate::{
     app::DataShardingExecuteState,
     crypto::{DigestHash, UpdateHash},
     replication::ReplicationState,
-    state::{Proceed, State, earliest},
+    state::{Action, State, earliest},
     workload::NanoLatencies,
 };
 
@@ -141,9 +141,9 @@ where
 {
     type Send = Send<Reply<A::Res, R::Metadata>, <Self as ServiceState<A>>::ServiceSend>;
     type Output = Output;
-    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, since_start: Duration) -> Action<Self::Send, Self::Output> {
         if let Some(send) = self.send_buffer.pop() {
-            return Proceed::Send(send);
+            return Action::Send(send);
         }
 
         if let Some((executing_buffer, metadata)) = self.replicated.front_mut() {
@@ -202,7 +202,7 @@ where
                             metadata: metadata.clone(),
                         };
                         self.replies.insert(executing.client_id, reply.clone());
-                        let proceed = Proceed::Send(Send::Reply(executing.client_id, reply));
+                        let proceed = Action::Send(Send::Reply(executing.client_id, reply));
                         executing_buffer.pop_front();
                         return proceed;
                     }
@@ -213,17 +213,17 @@ where
         #[allow(clippy::diverging_sub_expression)] // TODO
         let storage_tick_after = 'storage: {
             return match self.storage.proceed(since_start) {
-                Proceed::Pending(tick_after) => break 'storage tick_after,
-                Proceed::Send(send) => {
-                    Proceed::Send(Send::Intermediate(ServiceSend::Storage(send)))
+                Action::Pending(tick_after) => break 'storage tick_after,
+                Action::Send(send) => {
+                    Action::Send(Send::Intermediate(ServiceSend::Storage(send)))
                 }
-                Proceed::Output(StorageStateOutput::Read(key)) => {
-                    Proceed::Output(Output::Read(key))
+                Action::Output(StorageStateOutput::Read(key)) => {
+                    Action::Output(Output::Read(key))
                 }
-                Proceed::Output(StorageStateOutput::Write(key, value)) => {
-                    Proceed::Output(Output::Write(key, value))
+                Action::Output(StorageStateOutput::Write(key, value)) => {
+                    Action::Output(Output::Write(key, value))
                 }
-                Proceed::Output(StorageStateOutput::Fetched(key, bytes)) => {
+                Action::Output(StorageStateOutput::Fetched(key, bytes)) => {
                     let value = bytes.map(|bytes| {
                         let (value, _len) =
                             bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
@@ -240,7 +240,7 @@ where
                         .install(key, value);
                     self.proceed(since_start)
                 }
-                Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
+                Action::Output(StorageStateOutput::Skipped(num_skipped)) => {
                     self.num_skip += num_skipped;
                     self.proceed(since_start)
                 }
@@ -258,16 +258,16 @@ where
             // TODO configurable
             > 0
         {
-            return Proceed::Pending(storage_tick_after);
+            return Action::Pending(storage_tick_after);
         }
         match self.replication.proceed(since_start) {
-            Proceed::Pending(tick_after) => {
-                Proceed::Pending(earliest([storage_tick_after, tick_after]))
+            Action::Pending(tick_after) => {
+                Action::Pending(earliest([storage_tick_after, tick_after]))
             }
-            Proceed::Send(send) => {
-                Proceed::Send(Send::Intermediate(ServiceSend::Replication(send)))
+            Action::Send(send) => {
+                Action::Send(Send::Intermediate(ServiceSend::Replication(send)))
             }
-            Proceed::Output(replicated) => {
+            Action::Output(replicated) => {
                 let mut executing_buffer = VecDeque::new();
                 let start = Instant::now();
                 let logs_version_ahead = self

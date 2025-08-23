@@ -63,7 +63,7 @@ fn idle_pending() {
     };
     let (service, _) = &mut state.services[0];
     let proceed = service.proceed(Duration::ZERO);
-    assert!(matches!(proceed, Proceed::Pending(None)));
+    assert!(matches!(proceed, Action::Pending(None)));
 }
 
 impl SystemState {
@@ -76,17 +76,17 @@ impl SystemState {
     fn proceed_service(&mut self, index: ReplicaIndex, since_start: Duration) -> Option<Duration> {
         loop {
             match self.services[index as usize].0.proceed(since_start) {
-                Proceed::Pending(tick_after) => break tick_after,
-                Proceed::Send(Send::Reply(client_id, reply)) => {
+                Action::Pending(tick_after) => break tick_after,
+                Action::Send(Send::Reply(client_id, reply)) => {
                     self.replies.push((client_id, reply))
                 }
-                Proceed::Send(Send::Intermediate(ServiceSend::Storage((
+                Action::Send(Send::Intermediate(ServiceSend::Storage((
                     Dest::One(index),
                     message,
                 )))) => self
                     .service_network
                     .push_back((index, ServiceMessage::Storage(message))),
-                Proceed::Send(Send::Intermediate(ServiceSend::Storage((
+                Action::Send(Send::Intermediate(ServiceSend::Storage((
                     Dest::Multi(indices),
                     message,
                 )))) => {
@@ -95,18 +95,18 @@ impl SystemState {
                             .push_back((index, ServiceMessage::Storage(message.clone())))
                     }
                 }
-                Proceed::Send(Send::Intermediate(ServiceSend::Storage((Dest::All, message)))) => {
+                Action::Send(Send::Intermediate(ServiceSend::Storage((Dest::All, message)))) => {
                     for index in 0..self.services.len() {
                         self.service_network
                             .push_back((index as _, ServiceMessage::Storage(message.clone())))
                     }
                 }
-                Proceed::Output(Output::Read(key)) => {
+                Action::Output(Output::Read(key)) => {
                     let (service, storage) = &mut self.services[index as usize];
                     let value = storage[&key].clone();
                     service.read_ok(key, value)
                 }
-                Proceed::Output(Output::Write(key, value)) => {
+                Action::Output(Output::Write(key, value)) => {
                     let (service, storage) = &mut self.services[index as usize];
                     storage.insert(key.clone(), value);
                     service.write_ok(key)

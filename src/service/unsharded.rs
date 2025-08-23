@@ -8,7 +8,7 @@ use tokio_util::bytes::Bytes;
 use crate::{
     Never,
     app::AppState,
-    state::{Proceed, State},
+    state::{Action, State},
 };
 
 use super::{AppProtocol, ClientId, Message, Send, ServiceState};
@@ -29,8 +29,7 @@ pub struct UnshardedService<A: AppState, R: ReplicationState<A>> {
     replies: HashMap<ClientId, Reply<A, R>>,
     replicated: Option<Replicated<A, R>>,
 
-    submit_buffer: Vec<Request<A>>,
-    send_buffer: Vec<Send<Reply<A, R>, R::Send>>,
+    sends: Vec<Send<Reply<A, R>, R::Send>>,
 }
 
 type Replicated<A, R> = (
@@ -45,8 +44,7 @@ impl<A: AppState, R: ReplicationState<A>> UnshardedService<A, R> {
             app,
             replies: Default::default(),
             replicated: None,
-            submit_buffer: Default::default(),
-            send_buffer: Default::default(),
+            sends: Default::default(),
         }
     }
 }
@@ -77,47 +75,48 @@ where
 {
     type Send = Send<Reply<A, R>, R::Send>;
     type Output = Never;
-    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some(send) = self.send_buffer.pop() {
-            return Proceed::Send(send);
+    fn proceed(&mut self) -> Option<impl Iterator<Item = Action<Self::Send, Self::Output>>> {
+        if !self.sends.is_empty() {
+            return Some(self.sends.drain(..).map(Action::Send));
         }
 
         if let Some((requests, metadata)) = &mut self.replicated {
-            let Some(request) = requests.pop_front() else {
-                self.replicated = None;
-                return self.proceed(since_start);
-            };
-            if let Some(reply) = self.replies.get(&request.client_id)
-                && reply.client_seq >= request.client_seq
-            {
-                return self.proceed(since_start);
+            loop {
+                let Some(request) = requests.pop_front() else {
+                    self.replicated = None;
+                    return self.proceed();
+                };
+                if let Some(reply) = self.replies.get(&request.client_id)
+                    && reply.client_seq >= request.client_seq
+                {
+                    continue;
+                }
+                let reply = Reply::<A, R> {
+                    client_seq: request.client_seq,
+                    res: self.app.execute(request.op),
+                    metadata: metadata.clone(),
+                };
+                self.replies.insert(request.client_id, reply.clone());
+                self.sends.push(Send::Reply(request.client_id, reply));
+                return self.proceed();
             }
-            let reply = Reply::<A, R> {
-                client_seq: request.client_seq,
-                res: self.app.execute(request.op),
-                metadata: metadata.clone(),
-            };
-            self.replies.insert(request.client_id, reply.clone());
-            // in some cases `replicated` may contain plenty of requests, also, some kinds
-            // of the `execute` above could be costly
-            // return immediately without any batch processing to optimize for latency
-            return Proceed::Send(Send::Reply(request.client_id, reply));
         }
 
-        while let Some(request) = self.submit_buffer.pop() {
-            self.replication.submit(request)
-        }
-        match self.replication.proceed(since_start) {
-            Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
-            Proceed::Send(send) => Proceed::Send(Send::Intermediate(send)),
-            Proceed::Output(replicated) => {
-                let replaced = self
-                    .replicated
-                    .replace((replicated.logs.into(), replicated.metadata));
-                assert!(replaced.is_none());
-                self.proceed(since_start)
+        let again = if let Some(actions) = self.replication.proceed() {
+            for action in actions {
+                match action {
+                    Action::Send(send) => self.sends.push(Send::Intermediate(send)),
+                    Action::Output(output) => {
+                        self.replicated = Some((output.logs.into(), output.metadata))
+                    }
+                }
             }
-        }
+            true
+        } else {
+            false
+        };
+
+        if again { self.proceed() } else { None }
     }
 
     type Message = Message<Request<A>, R::Message>;
@@ -127,12 +126,19 @@ where
             Message::Request(request) => match self.replies.get(&request.client_id) {
                 Some(reply) if reply.client_seq > request.client_seq => {}
                 Some(reply) if reply.client_seq == request.client_seq => self
-                    .send_buffer
+                    .sends
                     .push(Send::Reply(request.client_id, reply.clone())),
-                _ => self.submit_buffer.push(request),
+                _ => self.replication.submit(request),
             },
             Message::Intermediate(message) => self.replication.receive(message),
         }
+    }
+
+    fn tick(&mut self, since_start: Duration) {
+        self.replication.tick(since_start)
+    }
+    fn tick_after(&self) -> Option<Duration> {
+        self.replication.tick_after()
     }
 }
 
@@ -156,7 +162,7 @@ pub mod transport {
         app::AppState,
         crypto::cert::quinn::{client_config, server_config},
         replication::ReplicaIndex,
-        state::Proceed,
+        state::Action,
         transport::{BINCODE_CONFIG, PerformSend, read_loop, run_write, trace_error},
     };
 
@@ -248,14 +254,10 @@ pub mod transport {
         let mut client_table = HashMap::new();
         let write_tracker = TaskTracker::new();
 
+        service.tick(Duration::ZERO);
+        let mut tick_after =
+            service_proceed(&mut service, &client_table, &replica_table, &write_tracker)?;
         let start = Instant::now();
-        let mut tick_after = service_proceed(
-            &mut service,
-            start.elapsed(),
-            &client_table,
-            &replica_table,
-            &write_tracker,
-        )?;
         loop {
             let tick = async {
                 if let Some(tick_after) = tick_after {
@@ -299,22 +301,19 @@ pub mod transport {
                 Event::Message(bytes) => {
                     let (request, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                     anyhow::ensure!(len == bytes.len());
+                    service.tick(start.elapsed());
                     service.receive(Message::Request(request))
                 }
                 Event::ReplicationMessage(bytes) => {
                     let (message, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                     anyhow::ensure!(len == bytes.len());
+                    service.tick(start.elapsed());
                     service.receive(Message::Intermediate(message))
                 }
-                Event::Tick => {}
+                Event::Tick => service.tick(start.elapsed()),
             }
-            tick_after = service_proceed(
-                &mut service,
-                start.elapsed(),
-                &client_table,
-                &replica_table,
-                &write_tracker,
-            )?
+            tick_after =
+                service_proceed(&mut service, &client_table, &replica_table, &write_tracker)?
         }
 
         write_tracker.close();
@@ -335,7 +334,6 @@ pub mod transport {
 
     fn service_proceed<A: AppState, R: ReplicationState<A>>(
         service: &mut UnshardedService<A, R>,
-        since_start: Duration,
         client_table: &HashMap<ClientId, (Connection, JoinHandle<()>)>,
         replica_table: &HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>,
         write_tracker: &TaskTracker,
@@ -346,26 +344,28 @@ pub mod transport {
         Reply<A, R>: Encode,
         HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
     {
-        loop {
-            match service.proceed(since_start) {
-                Proceed::Pending(tick_after) => break Ok(tick_after),
-                Proceed::Send(Send::Reply(client_id, reply)) => {
-                    let Some((connection, _)) = client_table.get(&client_id) else {
-                        tracing::warn!(%client_id, "client connection not found");
-                        continue;
-                    };
-                    write_tracker.spawn(trace_error(
-                        "connection write",
-                        run_write(
-                            connection.clone(),
-                            bincode::encode_to_vec(reply, BINCODE_CONFIG)?,
-                        ),
-                    ));
-                }
-                Proceed::Send(Send::Intermediate(send)) => {
-                    replica_table.perform(send, write_tracker)?
+        while let Some(actions) = service.proceed() {
+            for action in actions {
+                match action {
+                    Action::Send(Send::Reply(client_id, reply)) => {
+                        let Some((connection, _)) = client_table.get(&client_id) else {
+                            tracing::warn!(%client_id, "client connection not found");
+                            continue;
+                        };
+                        write_tracker.spawn(trace_error(
+                            "connection write",
+                            run_write(
+                                connection.clone(),
+                                bincode::encode_to_vec(reply, BINCODE_CONFIG)?,
+                            ),
+                        ));
+                    }
+                    Action::Send(Send::Intermediate(send)) => {
+                        replica_table.perform(send, write_tracker)?
+                    }
                 }
             }
         }
+        Ok(service.tick_after())
     }
 }
