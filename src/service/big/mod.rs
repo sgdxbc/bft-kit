@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
     hash::Hash,
-    mem::take,
     time::{Duration, Instant},
 };
 
@@ -47,7 +46,6 @@ pub struct BigService<
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     replicated: VecDeque<Replicated<A, R>>,
     fetch_keys: HashMap<Key, A::Key>,
-    bump_writes: HashMap<Key, Bytes>,
     num_skip: StateVersion,
     // additional data for optimization
     value_cache: Option<LruCache<A::Key, A::Value>>,
@@ -87,7 +85,6 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: State> BigServi
             replies: Default::default(),
             replicated: Default::default(),
             fetch_keys: Default::default(),
-            bump_writes: Default::default(),
             num_skip: 0,
             value_cache: config.num_cached_shard.try_into().ok().map(LruCache::new),
             submit_buffer: Default::default(),
@@ -168,39 +165,36 @@ where
                 return self.proceed(since_start);
             }
 
-            loop {
+            if self.fetch_keys.is_empty() {
                 match executing.execute.proceed() {
-                    DataShardingExecuteOutput::Pending => break,
-                    DataShardingExecuteOutput::Get(key) => {
-                        if let Some(value) =
-                            self.value_cache.as_mut().and_then(|cache| cache.get(&key))
-                        {
-                            executing.execute.get_result(key, Some(value.clone()));
-                            continue;
-                        }
-                        let storage_key = Key::from(key.digest().0);
-                        self.fetch_keys.insert(storage_key, key);
-                        self.storage.fetch(storage_key)
-                    }
-                    DataShardingExecuteOutput::Put(key, value) => {
-                        let storage_key = Key::from(key.digest().0);
-                        let bytes = bincode::encode_to_vec(&value, BINCODE_CONFIG)
-                            .unwrap()
-                            .into();
-                        self.bump_writes.insert(storage_key, bytes);
-                        if let Some(value_cache) = &mut self.value_cache {
-                            value_cache.put(key, value);
+                    DataShardingExecuteOutput::Pending(keys) => {
+                        for key in keys {
+                            if let Some(value) =
+                                self.value_cache.as_mut().and_then(|cache| cache.get(&key))
+                            {
+                                executing.execute.install(key, Some(value.clone()));
+                                continue;
+                            }
+                            let storage_key = Key::from(key.digest().0);
+                            self.fetch_keys.insert(storage_key, key);
+                            self.storage.fetch(storage_key)
                         }
                     }
-
-                    DataShardingExecuteOutput::Complete(res) => {
+                    DataShardingExecuteOutput::Complete(res, writes) => {
                         self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
 
-                        if !self.fetch_keys.is_empty() {
-                            tracing::warn!("execute complete while fetching keys");
-                            self.fetch_keys.clear()
+                        let mut bump_writes = HashMap::new();
+                        for (key, value) in writes {
+                            let storage_key = Key::from(key.digest().0);
+                            let bytes = bincode::encode_to_vec(&value, BINCODE_CONFIG)
+                                .unwrap()
+                                .into();
+                            bump_writes.insert(storage_key, bytes);
+                            if let Some(value_cache) = &mut self.value_cache {
+                                value_cache.put(key, value);
+                            }
                         }
-                        self.storage.bump(take(&mut self.bump_writes));
+                        self.storage.bump(bump_writes);
 
                         let reply = Reply {
                             client_seq: executing.client_seq,
@@ -243,7 +237,7 @@ where
                         .front_mut()
                         .unwrap()
                         .execute
-                        .get_result(key, value);
+                        .install(key, value);
                     self.proceed(since_start)
                 }
                 Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
@@ -276,20 +270,19 @@ where
             Proceed::Output(replicated) => {
                 let mut executing_buffer = VecDeque::new();
                 let start = Instant::now();
-                // let logs_version_ahead = self
-                //     .replicated
-                //     .iter()
-                //     .map(|(buffer, _)| buffer.len())
-                //     .sum::<usize>();
+                let logs_version_ahead = self
+                    .replicated
+                    .iter()
+                    .map(|(buffer, _)| buffer.len())
+                    .sum::<usize>();
                 for (i, request) in replicated.logs.into_iter().enumerate() {
-                    // let mut execute = self.app.new_execute(request.op);
-                    // TODO do not consume the Put (or Complete)
-                    // while let DataShardingExecuteOutput::Get(key) = execute.proceed() {
-                    //     self.storage
-                    //         .will_fetch(key.digest().0.into(), (logs_version_ahead + i) as _)
-                    // }
-                    let _ = i;
-                    let execute = self.app.new_execute(request.op);
+                    let mut execute = self.app.new_execute(request.op);
+                    if let DataShardingExecuteOutput::Pending(keys) = execute.proceed() {
+                        for key in keys {
+                            self.storage
+                                .will_fetch(key.digest().0.into(), (logs_version_ahead + i) as _)
+                        }
+                    }
                     executing_buffer.push_back(Executing {
                         execute,
                         client_id: request.client_id,

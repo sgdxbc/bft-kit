@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use bincode::{Decode, Encode};
 use thiserror::Error;
@@ -33,10 +33,9 @@ impl Default for Utxo {
 pub struct DataShardingUtxo;
 pub struct DataShardingUtxoExecute {
     op: UtxoOp,
+    pending_inputs: HashSet<UtxoId>,
     spend_amount: u64,
-    num_remaining_input: usize,
     input_buffer: Vec<(UtxoId, UtxoData)>,
-    proceed_buffer: VecDeque<DataShardingExecuteOutput<DataShardingUtxo>>,
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Encode, Decode)]
@@ -87,42 +86,34 @@ impl DataShardingApp for DataShardingUtxo {
     type Value = UtxoData;
     type ExecuteState = DataShardingUtxoExecute;
     fn new_execute(&self, op: Self::Op) -> Self::ExecuteState {
-        let get_proceeds = match &op.input {
-            UtxoOpInput::Spend(sigs) => sigs
-                .keys()
-                .map(|id| DataShardingExecuteOutput::Get(id.clone()))
-                .collect::<Vec<_>>(),
+        let pending_inputs = match &op.input {
+            UtxoOpInput::Spend(inputs) => inputs.keys().cloned().collect(),
             UtxoOpInput::Mint => Default::default(),
         };
         Self::ExecuteState {
             op,
             spend_amount: 0,
-            num_remaining_input: get_proceeds.len(),
+            pending_inputs,
             input_buffer: Default::default(),
-            proceed_buffer: get_proceeds.into(),
         }
     }
 }
 
 impl DataShardingExecuteState for DataShardingUtxoExecute {
     type App = DataShardingUtxo;
-    fn get_result(
+    fn install(
         &mut self,
         key: <Self::App as DataShardingApp>::Key,
         value: Option<<Self::App as DataShardingApp>::Value>,
     ) {
+        self.pending_inputs.remove(&key);
         if let Some(value) = value {
             self.input_buffer.push((key, value))
         } else {
             // or directly error?
-            self.num_remaining_input -= 1
         }
     }
     fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App> {
-        if let Some(output) = self.proceed_buffer.pop_front() {
-            return output;
-        }
-
         while let Some((id, data)) = self.input_buffer.pop() {
             let UtxoOpInput::Spend(sigs) = &self.op.input else {
                 unimplemented!()
@@ -130,10 +121,12 @@ impl DataShardingExecuteState for DataShardingUtxoExecute {
             match verify(&self.op, &data.owner, &sigs[&id]) {
                 Ok(()) => self.spend_amount += data.amount,
                 Err(_) => {
-                    return DataShardingExecuteOutput::Complete(Err(UtxoError::InvalidSignature));
+                    return DataShardingExecuteOutput::Complete(
+                        Err(UtxoError::InvalidSignature),
+                        Default::default(),
+                    );
                 }
             }
-            self.num_remaining_input -= 1
         }
 
         if match &self.op.input {
@@ -141,20 +134,21 @@ impl DataShardingExecuteState for DataShardingUtxoExecute {
             UtxoOpInput::Spend(_) => self.spend_amount >= self.op.total_output(),
         } {
             let tx_id = self.op.tx_id();
-            for (index, data) in self.op.outputs.drain(..).enumerate() {
-                self.proceed_buffer
-                    .push_back(DataShardingExecuteOutput::Put(
-                        UtxoId(tx_id.clone(), index as _),
-                        data,
-                    ))
-            }
-            self.proceed_buffer
-                .push_back(DataShardingExecuteOutput::Complete(Ok(())));
-            self.proceed()
-        } else if self.num_remaining_input == 0 {
-            DataShardingExecuteOutput::Complete(Err(UtxoError::InsufficientFunds))
+            let writes = self
+                .op
+                .outputs
+                .drain(..)
+                .enumerate()
+                .map(|(index, data)| (UtxoId(tx_id.clone(), index as _), data))
+                .collect();
+            DataShardingExecuteOutput::Complete(Ok(()), writes)
+        } else if self.pending_inputs.is_empty() {
+            DataShardingExecuteOutput::Complete(
+                Err(UtxoError::InsufficientFunds),
+                Default::default(),
+            )
         } else {
-            DataShardingExecuteOutput::Pending
+            DataShardingExecuteOutput::Pending(self.pending_inputs.iter().cloned().collect())
         }
     }
 }

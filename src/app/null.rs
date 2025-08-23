@@ -34,7 +34,7 @@ impl DataShardingApp for Null {
 
 impl DataShardingExecuteState for Null {
     type App = Null;
-    fn get_result(
+    fn install(
         &mut self,
         _key: <Self::App as DataShardingApp>::Key,
         _value: Option<<Self::App as DataShardingApp>::Value>,
@@ -42,6 +42,6 @@ impl DataShardingExecuteState for Null {
         unreachable!()
     }
     fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App> {
-        DataShardingExecuteOutput::Complete(())
+        DataShardingExecuteOutput::Complete((), Default::default())
     }
 }

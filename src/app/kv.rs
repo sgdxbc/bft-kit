@@ -27,47 +27,37 @@ impl DataShardingApp for Kv {
     type ExecuteState = KvExecute;
     fn new_execute(&self, op: Self::Op) -> Self::ExecuteState {
         match op {
-            KvOp::Put(key, value) => KvExecute::ToPut(key, value),
+            KvOp::Put(key, value) => KvExecute::Complete(KvRes::Put, vec![(key, value)]),
             KvOp::Get(key) => KvExecute::ToGet(key),
         }
     }
 }
 
 pub enum KvExecute {
-    ToPut(String, String),
     ToGet(String),
-    Getting(String),
-    Res(KvRes),
+    Complete(KvRes, Vec<(String, String)>),
 }
 
 impl DataShardingExecuteState for KvExecute {
     type App = Kv;
-    fn get_result(
+    fn install(
         &mut self,
         key: <Self::App as DataShardingApp>::Key,
         value: Option<<Self::App as DataShardingApp>::Value>,
     ) {
         match self {
-            KvExecute::Getting(get_key) if get_key == &key => {
-                *self = KvExecute::Res(KvRes::Get(value));
+            KvExecute::ToGet(get_key) if get_key == &key => {
+                *self = KvExecute::Complete(KvRes::Get(value), Default::default());
             }
             _ => unimplemented!(),
         }
     }
     fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App> {
         match self {
-            Self::Getting(_) => DataShardingExecuteOutput::Pending,
-            Self::Res(res) => DataShardingExecuteOutput::Complete(res.clone()),
-            KvExecute::ToPut(key, value) => {
-                let output = DataShardingExecuteOutput::Put(key.clone(), value.clone());
-                *self = KvExecute::Res(KvRes::Put);
-                output
+            Self::Complete(res, writes) => {
+                DataShardingExecuteOutput::Complete(res.clone(), writes.clone())
             }
-            KvExecute::ToGet(key) => {
-                let output = DataShardingExecuteOutput::Get(key.clone());
-                *self = KvExecute::Getting(key.clone());
-                output
-            }
+            Self::ToGet(key) => DataShardingExecuteOutput::Pending(vec![key.clone()]),
         }
     }
 }

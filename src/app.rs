@@ -34,7 +34,7 @@ pub trait DataShardingApp: AppProtocol {
 
 pub trait DataShardingExecuteState {
     type App: DataShardingApp;
-    fn get_result(
+    fn install(
         &mut self,
         key: <Self::App as DataShardingApp>::Key,
         value: Option<<Self::App as DataShardingApp>::Value>,
@@ -43,10 +43,8 @@ pub trait DataShardingExecuteState {
 }
 
 pub enum DataShardingExecuteOutput<A: DataShardingApp> {
-    Get(A::Key),
-    Put(A::Key, A::Value),
-    Pending,
-    Complete(A::Res),
+    Pending(Vec<A::Key>),
+    Complete(A::Res, Vec<(A::Key, A::Value)>),
 }
 
 pub struct Batched<A>(A);
@@ -111,15 +109,18 @@ where
         let mut execute = self.app.new_execute(op);
         loop {
             match execute.proceed() {
-                DataShardingExecuteOutput::Get(key) => {
-                    let value = self.store.get(&key).cloned();
-                    execute.get_result(key, value)
+                DataShardingExecuteOutput::Pending(keys) => {
+                    for key in keys {
+                        let value = self.store.get(&key).cloned();
+                        execute.install(key, value)
+                    }
                 }
-                DataShardingExecuteOutput::Put(key, value) => {
-                    self.store.insert(key, value);
+                DataShardingExecuteOutput::Complete(res, writes) => {
+                    for (key, value) in writes {
+                        self.store.insert(key, value);
+                    }
+                    break res;
                 }
-                DataShardingExecuteOutput::Pending => unimplemented!(),
-                DataShardingExecuteOutput::Complete(res) => break res,
             }
         }
     }
