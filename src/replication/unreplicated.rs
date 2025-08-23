@@ -1,10 +1,10 @@
-use std::{collections::BTreeMap, iter::once, mem::replace, time::Duration};
+use std::{collections::BTreeMap, mem::take, time::Duration};
 
 use crate::{
     Never,
     app::AppProtocol,
     service::{ClientId, ClientSeq, Reply, Request},
-    state::{Action, State},
+    state::{Proceed, State},
     workload::ClientState,
 };
 
@@ -14,11 +14,11 @@ pub struct UnreplicatedClient<A: AppProtocol> {
     id: ClientId,
     config: UnreplicatedClientConfig,
 
-    now: Duration,
     seq: ClientSeq,
     submits: BTreeMap<ClientSeq, SubmitData<A>>,
 
-    actions: Vec<Action<(Dest, Request<A::Op>), (ClientSeq, A::Res)>>,
+    submit_buffer: Vec<(ClientSeq, A::Op)>,
+    receive_buffer: Vec<Reply<A::Res, ()>>,
 }
 
 pub struct UnreplicatedClientConfig {
@@ -37,10 +37,10 @@ impl<A: AppProtocol> UnreplicatedClient<A> {
         Self {
             id,
             config,
-            now: Duration::ZERO,
             seq: 0,
             submits: Default::default(),
-            actions: Default::default(),
+            submit_buffer: Default::default(),
+            receive_buffer: Default::default(),
         }
     }
 }
@@ -50,21 +50,8 @@ where
     A::Op: Clone,
 {
     fn submit(&mut self, op: A::Op) -> ClientSeq {
-        tracing::trace!("submit");
         self.seq += 1;
-        self.submits.insert(
-            self.seq,
-            SubmitData {
-                op: op.clone(),
-                timeout_at: self.now + self.config.timeout,
-            },
-        );
-        let request = Request {
-            client_id: self.id,
-            client_seq: self.seq,
-            op,
-        };
-        self.actions.push(Action::Send((Dest::One(0), request)));
+        self.submit_buffer.push((self.seq, op));
         self.seq
     }
 }
@@ -75,42 +62,50 @@ where
 {
     type Send = (Dest, Request<A::Op>);
     type Output = (ClientSeq, A::Res);
-    fn proceed(&mut self) -> Option<impl Iterator<Item = Action<Self::Send, Self::Output>>> {
-        if self.actions.is_empty() {
-            None
-        } else {
-            Some(self.actions.drain(..))
+    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+        if let Some(reply) = self.receive_buffer.pop() {
+            match self.submits.remove(&reply.client_seq) {
+                Some(_) => return Proceed::Output((reply.client_seq, reply.res)),
+                None => return self.proceed(since_start),
+            }
+        }
+
+        if let Some((seq, op)) = self.submit_buffer.pop() {
+            self.submits.insert(
+                seq,
+                SubmitData {
+                    op: op.clone(),
+                    timeout_at: since_start + self.config.timeout,
+                },
+            );
+            let request = Request {
+                client_id: self.id,
+                client_seq: seq,
+                op,
+            };
+            return Proceed::Send((Dest::One(0), request));
+        }
+
+        loop {
+            let Some((&seq, submit)) = self.submits.first_key_value() else {
+                break Proceed::Pending(None);
+            };
+            if submit.timeout_at <= since_start {
+                self.submits.remove(&seq);
+            } else {
+                break Proceed::Pending(Some(submit.timeout_at - since_start));
+            }
         }
     }
 
     type Message = Reply<A::Res, ()>;
-    fn receive(&mut self, reply: Self::Message) {
-        if let Some(_) = self.submits.remove(&reply.client_seq) {
-            self.actions
-                .push(Action::Output((reply.client_seq, reply.res)))
-        }
-    }
-
-    fn tick(&mut self, since_start: Duration) {
-        while let Some((&seq, submit)) = self.submits.first_key_value() {
-            if submit.timeout_at <= since_start {
-                self.submits.remove(&seq);
-            } else {
-                break;
-            }
-        }
-        self.now = since_start
-    }
-
-    fn tick_after(&self) -> Option<Duration> {
-        self.submits
-            .first_key_value()
-            .map(|(_, submit)| submit.timeout_at - self.now)
+    fn receive(&mut self, message: Self::Message) {
+        self.receive_buffer.push(message)
     }
 }
 
 pub struct UnreplicatedReplica<T> {
-    output: Replicated<T, ()>,
+    submit_buffer: Vec<T>,
 }
 
 impl<T> Default for UnreplicatedReplica<T> {
@@ -122,10 +117,7 @@ impl<T> Default for UnreplicatedReplica<T> {
 impl<T> UnreplicatedReplica<T> {
     pub fn new() -> Self {
         Self {
-            output: Replicated {
-                logs: Default::default(),
-                metadata: (),
-            },
+            submit_buffer: Default::default(),
         }
     }
 }
@@ -134,36 +126,27 @@ impl<T> ReplicationState<T> for UnreplicatedReplica<T> {
     type Metadata = ();
 
     fn submit(&mut self, entry: T) {
-        self.output.logs.push(entry)
+        self.submit_buffer.push(entry)
     }
 }
 
 impl<T> State for UnreplicatedReplica<T> {
     type Send = Never;
     type Output = Replicated<T, ()>;
-    fn proceed(&mut self) -> Option<impl Iterator<Item = Action<Self::Send, Self::Output>>> {
-        if self.output.logs.is_empty() {
-            None
+    fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+        if self.submit_buffer.is_empty() {
+            Proceed::Pending(None)
         } else {
-            let output = replace(
-                &mut self.output,
-                Replicated {
-                    logs: Default::default(),
-                    metadata: (),
-                },
-            );
-            Some(once(Action::Output(output)))
+            Proceed::Output(Replicated {
+                logs: take(&mut self.submit_buffer),
+                metadata: (),
+            })
         }
     }
 
     type Message = Never;
     fn receive(&mut self, _message: Self::Message) {
         unreachable!()
-    }
-
-    fn tick(&mut self, _since_start: Duration) {}
-    fn tick_after(&self) -> Option<Duration> {
-        None
     }
 }
 

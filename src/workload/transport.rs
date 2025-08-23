@@ -12,7 +12,7 @@ use crate::{
     crypto::cert::quinn::client_config,
     replication::{ReplicaIndex, transport::ReplicaTable},
     service::ClientId,
-    state::{Action, State},
+    state::{Proceed, State},
     transport::{BINCODE_CONFIG, PerformSend, read_loop, trace_error},
 };
 
@@ -60,10 +60,9 @@ where
     }
 
     let write_tracker = TaskTracker::new();
-
-    worker.tick(Duration::ZERO);
-    let mut option_tick_at = worker_proceed(&mut worker, &connections, &write_tracker)?;
     let start = Instant::now();
+    let mut option_tick_at =
+        worker_proceed(&mut worker, start.elapsed(), &connections, &write_tracker)?;
     while let Some(tick_at) = option_tick_at {
         match select! {
             Some(event) = event_receiver.recv() => event,
@@ -73,12 +72,11 @@ where
             Event::Message(bytes) => {
                 let (message, len) = bincode::decode_from_slice(&bytes, BINCODE_CONFIG)?;
                 anyhow::ensure!(len == bytes.len());
-                worker.tick(start.elapsed());
                 worker.receive(message)
             }
-            Event::Tick => worker.tick(start.elapsed()),
+            Event::Tick => {}
         }
-        option_tick_at = worker_proceed(&mut worker, &connections, &write_tracker)?
+        option_tick_at = worker_proceed(&mut worker, start.elapsed(), &connections, &write_tracker)?
     }
 
     for (connection, task) in connections.into_iter().zip(read_tasks) {
@@ -90,30 +88,29 @@ where
 
 fn worker_proceed<S: State<Output = anyhow::Result<()>>>(
     worker: &mut S,
+    since_start: Duration,
     connections: &[Connection],
     write_tracker: &TaskTracker,
 ) -> anyhow::Result<Option<Duration>>
 where
     [Connection]: PerformSend<S::Send>,
 {
-    while let Some(actions) = worker.proceed() {
-        for action in actions {
-            match action {
-                Action::Send(send) => connections.perform(send, write_tracker)?,
-                Action::Output(output) => {
-                    output?;
-                    return Ok(None);
+    loop {
+        match worker.proceed(since_start) {
+            Proceed::Pending(tick_after) => {
+                anyhow::ensure!(tick_after.is_some(), "workload halted without output");
+                if tick_after == Some(Duration::ZERO) {
+                    tracing::warn!("zero interval tick detected, worker overloaded")
                 }
+                return Ok(tick_after);
+            }
+            Proceed::Send(send) => connections.perform(send, write_tracker)?,
+            Proceed::Output(output) => {
+                output?;
+                return Ok(None);
             }
         }
     }
-    let Some(tick_after) = worker.tick_after() else {
-        anyhow::bail!("worker halted without output");
-    };
-    if tick_after == Duration::ZERO {
-        tracing::warn!("zero interval tick detected, worker overloaded")
-    }
-    Ok(Some(tick_after))
 }
 
 impl ReplicaTable for [Connection] {

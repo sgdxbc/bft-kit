@@ -1,8 +1,8 @@
-use std::{iter::once, time::Duration};
+use std::time::Duration;
 
 use crate::{
     Never,
-    state::{Action, State},
+    state::{Proceed, State},
 };
 
 use super::{Replicated, ReplicationState};
@@ -30,22 +30,17 @@ impl<L: Iterator> State for ReplayReplica<L> {
     type Send = Never;
     type Output = Replicated<L::Item, <Self as ReplicationState<L::Item>>::Metadata>;
 
-    fn proceed(&mut self) -> Option<impl Iterator<Item = Action<Self::Send, Self::Output>>> {
+    fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         let logs = self.logs.by_ref().take(self.batch_size).collect::<Vec<_>>();
         if logs.is_empty() {
-            None
+            Proceed::Pending(None)
         } else {
-            Some(once(Action::Output(Replicated { logs, metadata: () })))
+            Proceed::Output(Replicated { logs, metadata: () })
         }
     }
 
     type Message = Never;
     fn receive(&mut self, _message: Self::Message) {
         unreachable!()
-    }
-
-    fn tick(&mut self, _since_start: Duration) {}
-    fn tick_after(&self) -> Option<Duration> {
-        None
     }
 }
