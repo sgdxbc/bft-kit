@@ -53,7 +53,7 @@ fn idle_pending() {
         UnreplicatedReplica::new(),
         storage,
         ServiceConfig {
-            num_cached_shard: 0,
+            num_cached_value: 0,
         },
     );
     let mut state = SystemState {
@@ -159,7 +159,7 @@ fn one_service() {
         UnreplicatedReplica::new(),
         storage,
         ServiceConfig {
-            num_cached_shard: 0,
+            num_cached_value: 0,
         },
     );
     let mut state = SystemState {
@@ -200,7 +200,7 @@ impl SystemState {
                             UnreplicatedReplica::new(),
                             storage,
                             ServiceConfig {
-                                num_cached_shard: 0,
+                                num_cached_value: 0,
                             },
                         ),
                         Default::default(),

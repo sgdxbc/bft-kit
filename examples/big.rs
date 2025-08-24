@@ -10,7 +10,7 @@ use bft_kit::{
     replication::replay::ReplayReplica,
     service::{
         Request,
-        big::{BigService, transport::run_service},
+        big::{BigService, storage::ShardedStorage, transport::run_service},
     },
     workload::WorkloadState,
 };
@@ -26,9 +26,8 @@ async fn main() -> anyhow::Result<()> {
     configs.parse(
         "
 big.num-node            4
-big.num-shard           100
 big.num-active-copy     1
-big.num-cached-shard    0
+big.num-cached-value    0
 
 ycsb.num-key            100
 ycsb.value-len          10
@@ -42,11 +41,7 @@ ycsb.value-len          10
     let cancel = CancellationToken::new();
     for index in 0..configs.get("big.num-node")? {
         let app = Kv;
-        let storage = bft_kit::service::big::storage::ShardedStorage::new(
-            configs.extract()?,
-            index,
-            [index].into(),
-        );
+        let storage = ShardedStorage::new(configs.extract()?, index, [index].into());
         // let storage = bft_kit::service::big::storage::FullReplicationStorage::new();
         let mut workload = AdaptKv(YcsbWorkload::new(
             configs.extract()?,

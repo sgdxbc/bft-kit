@@ -46,6 +46,7 @@ pub struct BigService<
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
     replicated: VecDeque<Replicated<A, R>>,
     fetch_keys: HashMap<Key, A::Key>,
+    bumping: bool,
     num_skip: StateVersion,
     // additional data for optimization
     value_cache: Option<LruCache<A::Key, A::Value>>,
@@ -57,7 +58,7 @@ pub struct BigService<
 }
 
 pub struct ServiceConfig {
-    num_cached_shard: usize,
+    num_cached_value: usize,
 }
 
 type Replicated<A, R> = (
@@ -84,8 +85,9 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: State> BigServi
             replies: Default::default(),
             replicated: Default::default(),
             fetch_keys: Default::default(),
+            bumping: false,
             num_skip: 0,
-            value_cache: config.num_cached_shard.try_into().ok().map(LruCache::new),
+            value_cache: config.num_cached_value.try_into().ok().map(LruCache::new),
             proceed_buffer: Default::default(),
             execute_latencies: NanoLatencies::new(3).unwrap(),
             // config,
@@ -245,13 +247,17 @@ where
                         let key = self.fetch_keys.remove(&key).unwrap();
                         executing.execute.install(key, value)
                     }
+                    Proceed::Output(StorageStateOutput::Bumped) => {
+                        assert!(self.bumping);
+                        self.bumping = false
+                    }
                     Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
                         self.num_skip += num_skipped
                     }
                 }
             }
 
-            if !self.fetch_keys.is_empty() {
+            if !self.fetch_keys.is_empty() || self.bumping {
                 break;
             }
 
@@ -284,6 +290,8 @@ where
                         }
                     }
                     self.storage.bump(bump_writes);
+                    assert!(!self.bumping);
+                    self.bumping = true;
 
                     let reply = Reply {
                         client_seq: executing.client_seq,
@@ -333,7 +341,7 @@ mod parse {
     impl Extract for ServiceConfig {
         fn extract(configs: &Configs) -> anyhow::Result<Self> {
             Ok(Self {
-                num_cached_shard: configs.get("big.num-cached-shard")?,
+                num_cached_value: configs.get("big.num-cached-value")?,
             })
         }
     }

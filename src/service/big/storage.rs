@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
@@ -30,6 +30,7 @@ pub trait StorageState: State<Output = StorageStateOutput> {
 
 pub enum StorageStateOutput {
     Fetched(Key, Option<Bytes>),
+    Bumped,
     Skipped(StateVersion), // number of versions to skip execute
 
     Read(String),
@@ -37,8 +38,9 @@ pub enum StorageStateOutput {
 }
 
 pub struct FullReplicationStorage {
-    output_buffer: Vec<StorageStateOutput>,
+    output_buffer: VecDeque<StorageStateOutput>,
     keys: HashSet<Key>,
+    writing_keys: HashSet<String>,
 }
 
 impl FullReplicationStorage {
@@ -46,6 +48,7 @@ impl FullReplicationStorage {
         Self {
             output_buffer: Default::default(),
             keys: Default::default(),
+            writing_keys: Default::default(),
         }
     }
 }
@@ -60,26 +63,37 @@ impl StorageState for FullReplicationStorage {
     fn fetch(&mut self, key: Key) {
         if !self.keys.contains(&key) {
             self.output_buffer
-                .push(StorageStateOutput::Fetched(key, None));
+                .push_back(StorageStateOutput::Fetched(key, None));
             return;
         }
         self.output_buffer
-            .push(StorageStateOutput::Read(format!("{key:x}")))
+            .push_back(StorageStateOutput::Read(format!("{key:x}")))
     }
     fn bump(&mut self, writes: HashMap<Key, Bytes>) {
         for (key, value) in writes {
             self.keys.insert(key);
+            let key = format!("{key:x}");
+            self.writing_keys.insert(key.clone());
             self.output_buffer
-                .push(StorageStateOutput::Write(format!("{key:x}"), value))
+                .push_back(StorageStateOutput::Write(key, value))
+        }
+        if self.writing_keys.is_empty() {
+            self.output_buffer.push_back(StorageStateOutput::Bumped)
         }
     }
     fn read_ok(&mut self, key: String, value: Bytes) {
-        self.output_buffer.push(StorageStateOutput::Fetched(
+        self.output_buffer.push_back(StorageStateOutput::Fetched(
             key.parse().unwrap(),
             Some(value),
         ))
     }
-    fn write_ok(&mut self, _key: String) {}
+    fn write_ok(&mut self, key: String) {
+        let removed = self.writing_keys.remove(&key);
+        assert!(removed);
+        if self.writing_keys.is_empty() {
+            self.output_buffer.push_back(StorageStateOutput::Bumped)
+        }
+    }
 }
 
 impl State for FullReplicationStorage {
@@ -87,7 +101,7 @@ impl State for FullReplicationStorage {
     type Output = StorageStateOutput;
 
     fn proceed(&mut self, _since_start: std::time::Duration) -> Proceed<Self::Send, Self::Output> {
-        match self.output_buffer.pop() {
+        match self.output_buffer.pop_front() {
             Some(output) => Proceed::Output(output),
             None => Proceed::Pending(None),
         }
@@ -109,10 +123,10 @@ pub struct ShardedStorage {
     version: StateVersion,
     key_versions: HashMap<Key, Vec<StateVersion>>,
     fetching: HashSet<Key>,
+    bump_writing: HashSet<String>,
     read_for: HashMap<(StateVersion, Key), HashMap<ReplicaIndex, StateVersion>>,
-    reorder_queries: HashMap<StateVersion, HashMap<Key, HashSet<ReplicaIndex>>>,
 
-    proceed_buffer: Vec<Proceed<ShardedStorageSend, StorageStateOutput>>,
+    proceed_buffer: VecDeque<Proceed<ShardedStorageSend, StorageStateOutput>>,
 }
 
 pub struct ShardedStorageConfig {
@@ -146,8 +160,8 @@ impl ShardedStorage {
             version: 0,
             key_versions: Default::default(),
             fetching: Default::default(),
+            bump_writing: Default::default(),
             read_for: Default::default(),
-            reorder_queries: Default::default(),
             proceed_buffer: Default::default(),
             config,
         }
@@ -184,7 +198,7 @@ impl StorageState for ShardedStorage {
             };
             let dest = Dest::Multi(self.config.node_indices_of(key));
             self.proceed_buffer
-                .push(Proceed::Send((dest, ShardedStorageMessage::Query(query))))
+                .push_back(Proceed::Send((dest, ShardedStorageMessage::Query(query))))
         }
     }
 
@@ -211,29 +225,18 @@ impl StorageState for ShardedStorage {
         }
 
         self.version += 1;
-        for (&key, bytes) in &writes {
+        for (key, bytes) in writes {
             if self.config.should_store(&self.node_indices, key) {
+                self.key_versions.entry(key).or_default().push(self.version);
+                let key = format!("{key:x}.{}", self.version);
+                self.bump_writing.insert(key.clone());
                 self.proceed_buffer
-                    .push(Proceed::Output(StorageStateOutput::Write(
-                        format!("{key:x}.{}", self.version),
-                        bytes.clone(),
-                    )));
-                self.key_versions.entry(key).or_default().push(self.version)
+                    .push_back(Proceed::Output(StorageStateOutput::Write(key, bytes)))
             }
         }
-
-        if let Some(fetches) = self.reorder_queries.remove(&self.version) {
-            for (key, service_indices) in fetches {
-                let query_ok = message::QueryOk {
-                    version: self.version,
-                    key: key.0,
-                    bytes: Some(writes[&key].to_vec()),
-                };
-                self.proceed_buffer.push(Proceed::Send((
-                    Dest::Multi(service_indices.into_iter().collect()),
-                    ShardedStorageMessage::QueryOk(query_ok),
-                )))
-            }
+        if self.bump_writing.is_empty() {
+            self.proceed_buffer
+                .push_back(Proceed::Output(StorageStateOutput::Bumped))
         }
     }
 
@@ -260,12 +263,19 @@ impl StorageState for ShardedStorage {
                         ShardedStorageMessage::QueryOk(query_ok),
                     ))
                 };
-                self.proceed_buffer.push(proceed)
+                self.proceed_buffer.push_back(proceed)
             }
         }
     }
 
-    fn write_ok(&mut self, _key: String) {}
+    fn write_ok(&mut self, key: String) {
+        let removed = self.bump_writing.remove(&key);
+        assert!(removed);
+        if self.bump_writing.is_empty() {
+            self.proceed_buffer
+                .push_back(Proceed::Output(StorageStateOutput::Bumped))
+        }
+    }
 }
 
 impl State for ShardedStorage {
@@ -273,7 +283,7 @@ impl State for ShardedStorage {
     type Output = StorageStateOutput;
 
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some(proceed) = self.proceed_buffer.pop() {
+        if let Some(proceed) = self.proceed_buffer.pop_front() {
             return proceed;
         }
         Proceed::Pending(None)
@@ -289,7 +299,7 @@ impl State for ShardedStorage {
                 let key = fetch_ok.key.into();
                 if fetch_ok.version == self.version && self.fetching.remove(&key) {
                     self.proceed_buffer
-                        .push(Proceed::Output(StorageStateOutput::Fetched(
+                        .push_back(Proceed::Output(StorageStateOutput::Fetched(
                             key,
                             fetch_ok.bytes.map(Into::into),
                         )))
@@ -324,13 +334,13 @@ impl ShardedStorage {
                     ShardedStorageMessage::QueryOk(query_ok),
                 ))
             };
-            self.proceed_buffer.push(proceed);
+            self.proceed_buffer.push_back(proceed);
             return;
         };
         let targets = self.read_for.entry((found_version, key)).or_default();
         if targets.is_empty() {
             self.proceed_buffer
-                .push(Proceed::Output(StorageStateOutput::Read(format!(
+                .push_back(Proceed::Output(StorageStateOutput::Read(format!(
                     "{key:x}.{found_version}"
                 ))))
         }
