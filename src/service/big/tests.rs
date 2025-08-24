@@ -7,27 +7,27 @@ use crate::{
 
 use super::{storage::*, *};
 
-// #[test]
-// fn print_placement() {
-//     let config = ShardedStorageConfig {
-//         num_node: 10,
-//         num_active_copy: 7,
-//     };
-//     println!("{:?}", config.node_indices_of(0.into()));
-//     println!("{:?}", config.node_indices_of(1.into()));
-//     println!("{:?}", config.node_indices_of(2.into()));
-//     println!("{:?}", config.node_indices_of(3.into()));
+#[test]
+fn print_placement() {
+    let config = ShardedStorageConfig {
+        num_node: 10,
+        num_active_copy: 7,
+    };
+    println!("{:?}", config.node_indices_of(Key::from_low_u64_le(0)));
+    println!("{:?}", config.node_indices_of(Key::from_low_u64_le(1)));
+    println!("{:?}", config.node_indices_of(Key::from_low_u64_le(2)));
+    println!("{:?}", config.node_indices_of(Key::from_low_u64_le(3)));
 
-//     let mut node_overheads = BTreeMap::new();
-//     for shard_index in 0..config.num_shard {
-//         for node_index in config.node_indices_of(shard_index) {
-//             *node_overheads.entry(node_index).or_insert(0) += 1
-//         }
-//     }
-//     for (node_index, num_shard) in node_overheads {
-//         println!("Node {node_index} has {num_shard} shards")
-//     }
-// }
+    let mut node_overheads = [0; 10];
+    for key in 0..1000 {
+        for node_index in config.node_indices_of(Key::from_low_u64_le(key)) {
+            node_overheads[node_index as usize] += 1;
+        }
+    }
+    for (node_index, num_key) in node_overheads.into_iter().enumerate() {
+        println!("Node {node_index} has {num_key} keys")
+    }
+}
 
 type A = Kv;
 type R = UnreplicatedReplica<Request<KvOp>>;
