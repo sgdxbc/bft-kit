@@ -54,6 +54,7 @@ fn idle_pending() {
         storage,
         ServiceConfig {
             num_cached_value: 0,
+            num_max_will_fetch: 0,
         },
     );
     let mut state = SystemState {
@@ -160,6 +161,7 @@ fn one_service() {
         storage,
         ServiceConfig {
             num_cached_value: 0,
+            num_max_will_fetch: 0,
         },
     );
     let mut state = SystemState {
@@ -201,6 +203,7 @@ impl SystemState {
                             storage,
                             ServiceConfig {
                                 num_cached_value: 0,
+                                num_max_will_fetch: 0,
                             },
                         ),
                         Default::default(),

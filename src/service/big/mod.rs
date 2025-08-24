@@ -37,7 +37,7 @@ pub struct BigService<
     R: ReplicationState<Request<A::Op>>,
     S: State = ShardedStorage,
 > {
-    // config: ServiceConfig,
+    config: ServiceConfig,
     // generic sub states
     app: A,
     replication: R,
@@ -59,6 +59,7 @@ pub struct BigService<
 
 pub struct ServiceConfig {
     num_cached_value: usize,
+    num_max_will_fetch: usize,
 }
 
 type Replicated<A, R> = (
@@ -90,7 +91,7 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: State> BigServi
             value_cache: config.num_cached_value.try_into().ok().map(LruCache::new),
             proceed_buffer: Default::default(),
             execute_latencies: NanoLatencies::new(3).unwrap(),
-            // config,
+            config,
         }
     }
 }
@@ -147,13 +148,12 @@ where
         }
 
         let mut earliest_tick_after = None;
-        while !(self
+        while self
             .replicated
             .iter()
             .map(|(buffer, _)| buffer.len())
             .sum::<usize>()
-            // TODO configurable
-            > 0)
+            <= self.config.num_max_will_fetch
         {
             match self.replication.proceed(since_start) {
                 Proceed::Pending(tick_after) => {
@@ -342,6 +342,7 @@ mod parse {
         fn extract(configs: &Configs) -> anyhow::Result<Self> {
             Ok(Self {
                 num_cached_value: configs.get("big.num-cached-value")?,
+                num_max_will_fetch: configs.get("big.num-max-will-fetch")?,
             })
         }
     }

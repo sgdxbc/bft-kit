@@ -28,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
 big.num-node            4
 big.num-active-copy     1
 big.num-cached-value    0
+big.num-max-will-fetch  0
 
 ycsb.num-key            100
 ycsb.value-len          10
