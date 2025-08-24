@@ -50,9 +50,8 @@ pub struct BigService<
     // additional data for optimization
     value_cache: Option<LruCache<A::Key, A::Value>>,
     // cross interface buffers
-    submit_buffer: Vec<Request<A::Op>>,
-    #[allow(clippy::type_complexity)] // this matches <Self as State>::Send
-    send_buffer: Vec<Send<Reply<A::Res, R::Metadata>, ServiceSend<R, S>>>,
+    #[allow(clippy::type_complexity)] // this matches Proceed<Self::Send, Self::Output>
+    proceed_buffer: VecDeque<Proceed<Send<Reply<A::Res, R::Metadata>, ServiceSend<R, S>>, Output>>,
     // stats
     execute_latencies: NanoLatencies,
 }
@@ -87,8 +86,7 @@ impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: State> BigServi
             fetch_keys: Default::default(),
             num_skip: 0,
             value_cache: config.num_cached_shard.try_into().ok().map(LruCache::new),
-            submit_buffer: Default::default(),
-            send_buffer: Default::default(),
+            proceed_buffer: Default::default(),
             execute_latencies: NanoLatencies::new(3).unwrap(),
             // config,
         }
@@ -142,158 +140,168 @@ where
     type Send = Send<Reply<A::Res, R::Metadata>, <Self as ServiceState<A>>::ServiceSend>;
     type Output = Output;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some(send) = self.send_buffer.pop() {
-            return Proceed::Send(send);
+        if let Some(proceed) = self.proceed_buffer.pop_front() {
+            return proceed;
         }
 
-        if let Some((executing_buffer, metadata)) = self.replicated.front_mut() {
+        let mut earliest_tick_after = None;
+        while !(self
+            .replicated
+            .iter()
+            .map(|(buffer, _)| buffer.len())
+            .sum::<usize>()
+            // TODO configurable
+            > 0)
+        {
+            match self.replication.proceed(since_start) {
+                Proceed::Pending(tick_after) => {
+                    earliest_tick_after = earliest([tick_after, earliest_tick_after]);
+                    break;
+                }
+                Proceed::Send(send) => {
+                    self.proceed_buffer
+                        .push_back(Proceed::Send(Send::Intermediate(ServiceSend::Replication(
+                            send,
+                        ))))
+                }
+                Proceed::Output(replicated) => {
+                    let mut executing_buffer = VecDeque::new();
+                    let start = Instant::now();
+                    let logs_version_ahead = self
+                        .replicated
+                        .iter()
+                        .map(|(buffer, _)| buffer.len())
+                        .sum::<usize>();
+                    for (i, request) in replicated.logs.into_iter().enumerate() {
+                        let mut execute = self.app.new_execute(request.op);
+                        if let DataShardingExecuteOutput::Pending(keys) = execute.proceed() {
+                            for key in keys {
+                                self.storage.will_fetch(
+                                    key.digest().0.into(),
+                                    (logs_version_ahead + i) as _,
+                                )
+                            }
+                        }
+                        executing_buffer.push_back(Executing {
+                            execute,
+                            client_id: request.client_id,
+                            client_seq: request.client_seq,
+                            start,
+                        })
+                    }
+                    self.replicated
+                        .push_back((executing_buffer, replicated.metadata))
+                }
+            }
+        }
+
+        loop {
+            let Some((executing_buffer, metadata)) = self.replicated.front_mut() else {
+                break;
+            };
             let Some(executing) = executing_buffer.front_mut() else {
                 self.replicated.pop_front();
-                return self.proceed(since_start);
+                continue;
             };
             // it would be better if we can filter before constructing `A::Execute`
             // anyway should be rare
             if let Some(reply) = self.replies.get(&executing.client_id)
                 && reply.client_seq >= executing.client_seq
             {
-                return self.proceed(since_start);
+                executing_buffer.pop_front();
+                continue;
             }
 
             if self.num_skip > 0 {
                 self.num_skip -= 1;
                 executing_buffer.pop_front();
-                return self.proceed(since_start);
+                continue;
             }
 
-            if self.fetch_keys.is_empty() {
-                match executing.execute.proceed() {
-                    DataShardingExecuteOutput::Pending(keys) => {
-                        for key in keys {
-                            if let Some(value) =
-                                self.value_cache.as_mut().and_then(|cache| cache.get(&key))
-                            {
-                                executing.execute.install(key, Some(value.clone()));
-                                continue;
-                            }
-                            let storage_key = Key::from(key.digest().0);
-                            self.fetch_keys.insert(storage_key, key);
-                            self.storage.fetch(storage_key)
+            loop {
+                match self.storage.proceed(since_start) {
+                    Proceed::Pending(tick_after) => {
+                        earliest_tick_after = earliest([tick_after, earliest_tick_after]);
+                        break;
+                    }
+                    Proceed::Send(send) => {
+                        self.proceed_buffer
+                            .push_back(Proceed::Send(Send::Intermediate(ServiceSend::Storage(
+                                send,
+                            ))))
+                    }
+                    Proceed::Output(StorageStateOutput::Read(key)) => self
+                        .proceed_buffer
+                        .push_back(Proceed::Output(Output::Read(key))),
+                    Proceed::Output(StorageStateOutput::Write(key, value)) => self
+                        .proceed_buffer
+                        .push_back(Proceed::Output(Output::Write(key, value))),
+                    Proceed::Output(StorageStateOutput::Fetched(key, bytes)) => {
+                        let value = bytes.map(|bytes| {
+                            let (value, _len) =
+                                bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
+                            value
+                        });
+                        let key = self.fetch_keys.remove(&key).unwrap();
+                        executing.execute.install(key, value)
+                    }
+                    Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
+                        self.num_skip += num_skipped
+                    }
+                }
+            }
+
+            if !self.fetch_keys.is_empty() {
+                break;
+            }
+
+            match executing.execute.proceed() {
+                DataShardingExecuteOutput::Pending(keys) => {
+                    for key in keys {
+                        if let Some(value) =
+                            self.value_cache.as_mut().and_then(|cache| cache.get(&key))
+                        {
+                            executing.execute.install(key, Some(value.clone()));
+                            continue;
+                        }
+                        let storage_key = Key::from(key.digest().0);
+                        self.fetch_keys.insert(storage_key, key);
+                        self.storage.fetch(storage_key)
+                    }
+                }
+                DataShardingExecuteOutput::Complete(res, writes) => {
+                    self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
+
+                    let mut bump_writes = HashMap::new();
+                    for (key, value) in writes {
+                        let storage_key = Key::from(key.digest().0);
+                        let bytes = bincode::encode_to_vec(&value, BINCODE_CONFIG)
+                            .unwrap()
+                            .into();
+                        bump_writes.insert(storage_key, bytes);
+                        if let Some(value_cache) = &mut self.value_cache {
+                            value_cache.put(key, value);
                         }
                     }
-                    DataShardingExecuteOutput::Complete(res, writes) => {
-                        self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
+                    self.storage.bump(bump_writes);
 
-                        let mut bump_writes = HashMap::new();
-                        for (key, value) in writes {
-                            let storage_key = Key::from(key.digest().0);
-                            let bytes = bincode::encode_to_vec(&value, BINCODE_CONFIG)
-                                .unwrap()
-                                .into();
-                            bump_writes.insert(storage_key, bytes);
-                            if let Some(value_cache) = &mut self.value_cache {
-                                value_cache.put(key, value);
-                            }
-                        }
-                        self.storage.bump(bump_writes);
-
-                        let reply = Reply {
-                            client_seq: executing.client_seq,
-                            res,
-                            metadata: metadata.clone(),
-                        };
-                        self.replies.insert(executing.client_id, reply.clone());
-                        let proceed = Proceed::Send(Send::Reply(executing.client_id, reply));
-                        executing_buffer.pop_front();
-                        return proceed;
-                    }
+                    let reply = Reply {
+                        client_seq: executing.client_seq,
+                        res,
+                        metadata: metadata.clone(),
+                    };
+                    self.replies.insert(executing.client_id, reply.clone());
+                    self.proceed_buffer
+                        .push_back(Proceed::Send(Send::Reply(executing.client_id, reply)));
+                    executing_buffer.pop_front();
                 }
             }
         }
 
-        #[allow(clippy::diverging_sub_expression)] // TODO
-        let storage_tick_after = 'storage: {
-            return match self.storage.proceed(since_start) {
-                Proceed::Pending(tick_after) => break 'storage tick_after,
-                Proceed::Send(send) => {
-                    Proceed::Send(Send::Intermediate(ServiceSend::Storage(send)))
-                }
-                Proceed::Output(StorageStateOutput::Read(key)) => {
-                    Proceed::Output(Output::Read(key))
-                }
-                Proceed::Output(StorageStateOutput::Write(key, value)) => {
-                    Proceed::Output(Output::Write(key, value))
-                }
-                Proceed::Output(StorageStateOutput::Fetched(key, bytes)) => {
-                    let value = bytes.map(|bytes| {
-                        let (value, _len) =
-                            bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
-                        value
-                    });
-                    let key = self.fetch_keys.remove(&key).unwrap();
-                    self.replicated
-                        .front_mut()
-                        .unwrap()
-                        .0
-                        .front_mut()
-                        .unwrap()
-                        .execute
-                        .install(key, value);
-                    self.proceed(since_start)
-                }
-                Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
-                    self.num_skip += num_skipped;
-                    self.proceed(since_start)
-                }
-            };
-        };
-
-        while let Some(request) = self.submit_buffer.pop() {
-            self.replication.submit(request)
-        }
-        if self
-            .replicated
-            .iter()
-            .map(|(buffer, _)| buffer.len())
-            .sum::<usize>()
-            // TODO configurable
-            > 0
-        {
-            return Proceed::Pending(storage_tick_after);
-        }
-        match self.replication.proceed(since_start) {
-            Proceed::Pending(tick_after) => {
-                Proceed::Pending(earliest([storage_tick_after, tick_after]))
-            }
-            Proceed::Send(send) => {
-                Proceed::Send(Send::Intermediate(ServiceSend::Replication(send)))
-            }
-            Proceed::Output(replicated) => {
-                let mut executing_buffer = VecDeque::new();
-                let start = Instant::now();
-                let logs_version_ahead = self
-                    .replicated
-                    .iter()
-                    .map(|(buffer, _)| buffer.len())
-                    .sum::<usize>();
-                for (i, request) in replicated.logs.into_iter().enumerate() {
-                    let mut execute = self.app.new_execute(request.op);
-                    if let DataShardingExecuteOutput::Pending(keys) = execute.proceed() {
-                        for key in keys {
-                            self.storage
-                                .will_fetch(key.digest().0.into(), (logs_version_ahead + i) as _)
-                        }
-                    }
-                    executing_buffer.push_back(Executing {
-                        execute,
-                        client_id: request.client_id,
-                        client_seq: request.client_seq,
-                        start,
-                    })
-                }
-                self.replicated
-                    .push_back((executing_buffer, replicated.metadata));
-                self.proceed(since_start)
-            }
+        if self.proceed_buffer.is_empty() {
+            Proceed::Pending(earliest_tick_after)
+        } else {
+            self.proceed(since_start)
         }
     }
 
@@ -303,9 +311,9 @@ where
             Message::Request(request) => match self.replies.get(&request.client_id) {
                 Some(reply) if reply.client_seq > request.client_seq => {}
                 Some(reply) if reply.client_seq == request.client_seq => self
-                    .send_buffer
-                    .push(Send::Reply(request.client_id, reply.clone())),
-                _ => self.submit_buffer.push(request),
+                    .proceed_buffer
+                    .push_back(Proceed::Send(Send::Reply(request.client_id, reply.clone()))),
+                _ => self.replication.submit(request),
             },
             Message::Intermediate(ServiceMessage::Storage(message)) => {
                 self.storage.receive(message)

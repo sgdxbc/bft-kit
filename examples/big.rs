@@ -42,8 +42,12 @@ ycsb.value-len          10
     let cancel = CancellationToken::new();
     for index in 0..configs.get("big.num-node")? {
         let app = Kv;
-        // let storage = ShardedStorage::new(settings.extract()?, index, [index].into(), &app);
-        let storage = bft_kit::service::big::storage::FullReplicationStorage::new();
+        let storage = bft_kit::service::big::storage::ShardedStorage::new(
+            configs.extract()?,
+            index,
+            [index].into(),
+        );
+        // let storage = bft_kit::service::big::storage::FullReplicationStorage::new();
         let mut workload = AdaptKv(YcsbWorkload::new(
             configs.extract()?,
             StdRng::seed_from_u64(117418),
