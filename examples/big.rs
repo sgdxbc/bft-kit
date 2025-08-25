@@ -10,7 +10,7 @@ use bft_kit::{
     replication::replay::ReplayReplica,
     service::{
         Request,
-        big::{BigService, storage::ShardedStorage, transport::run_service},
+        big::{BigService, BigServiceLog, storage::ShardedStorage, transport::run_service},
     },
     workload::WorkloadState,
 };
@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
     configs.parse(
         "
 big.num-node            4
+big.num-faulty-node     1
 big.num-active-copy     1
 big.num-cached-value    0
 big.num-max-will-fetch  0
@@ -50,10 +51,12 @@ ycsb.value-len          10
         ));
         let logs = iter::from_fn(move || workload.next_op())
             .enumerate()
-            .map(|(index, (op, _))| Request {
-                client_id: 0,
-                client_seq: index as _,
-                op,
+            .map(|(index, (op, _))| {
+                BigServiceLog::Request(Request {
+                    client_id: 0,
+                    client_seq: index as _,
+                    op,
+                })
             });
         let service = BigService::new(
             app,

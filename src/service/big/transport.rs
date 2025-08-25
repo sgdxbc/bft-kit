@@ -29,7 +29,7 @@ use crate::{
 };
 
 use super::{
-    BigService, ServiceMessage, ServiceSend,
+    BigService, BigServiceLog, ServiceMessage, ServiceSend,
     storage::{Dest, ShardedStorageMessage, ShardedStorageSend, StorageState},
 };
 
@@ -50,7 +50,11 @@ enum Event {
     Tick,
 }
 
-pub async fn run_service<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState>(
+pub async fn run_service<
+    A: DataShardingApp,
+    R: ReplicationState<BigServiceLog<A, S>>,
+    S: StorageState,
+>(
     mut service: BigService<A, R, S>,
     replica_index: ReplicaIndex,
     addrs: Vec<SocketAddr>,
@@ -303,7 +307,11 @@ where
     Ok(())
 }
 
-async fn service_proceed<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState>(
+async fn service_proceed<
+    A: DataShardingApp,
+    R: ReplicationState<BigServiceLog<A, S>>,
+    S: StorageState,
+>(
     service: &mut BigService<A, R, S>,
     since_start: Duration,
     connection_tables: &ConnectionTables,

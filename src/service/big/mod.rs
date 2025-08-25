@@ -34,8 +34,8 @@ const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard
 
 pub struct BigService<
     A: DataShardingApp,
-    R: ReplicationState<Request<A::Op>>,
-    S: State = ShardedStorage,
+    R: ReplicationState<BigServiceLog<A, S>>,
+    S: StorageState = ShardedStorage,
 > {
     config: ServiceConfig,
     // generic sub states
@@ -44,7 +44,7 @@ pub struct BigService<
     storage: S,
     // essential state data
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
-    replicated: VecDeque<Replicated<A, R>>,
+    replicated: VecDeque<Replicated<A, R::Metadata>>,
     fetch_keys: HashMap<Key, A::Key>,
     bumping: bool,
     num_skip: StateVersion,
@@ -62,10 +62,12 @@ pub struct ServiceConfig {
     num_max_will_fetch: usize,
 }
 
-type Replicated<A, R> = (
-    VecDeque<Executing<A>>,
-    <R as ReplicationState<Request<<A as AppProtocol>::Op>>>::Metadata,
-);
+pub enum BigServiceLog<A: AppProtocol, S: StorageState> {
+    Request(Request<A::Op>),
+    StorageGossip(S::Gossip),
+}
+
+type Replicated<A, M> = (VecDeque<Executing<A>>, M);
 
 struct Executing<A: DataShardingApp> {
     execute: A::ExecuteState,
@@ -74,7 +76,9 @@ struct Executing<A: DataShardingApp> {
     start: Instant,
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: State> BigService<A, R, S> {
+impl<A: DataShardingApp, R: ReplicationState<BigServiceLog<A, S>>, S: StorageState>
+    BigService<A, R, S>
+{
     pub fn new(app: A, replication: R, storage: S, config: ServiceConfig) -> Self
     where
         A::Key: Hash + Eq,
@@ -111,7 +115,7 @@ pub enum ServiceMessage<RM, SM> {
     Storage(SM),
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState> ServiceState<A>
+impl<A: DataShardingApp, R: ReplicationState<BigServiceLog<A, S>>, S: StorageState> ServiceState<A>
     for BigService<A, R, S>
 where
     A::Key: Hash + Eq + UpdateHash,
@@ -132,7 +136,7 @@ where
     }
 }
 
-impl<A: DataShardingApp, R: ReplicationState<Request<A::Op>>, S: StorageState> State
+impl<A: DataShardingApp, R: ReplicationState<BigServiceLog<A, S>>, S: StorageState> State
     for BigService<A, R, S>
 where
     A::Key: Hash + Eq + UpdateHash,
@@ -174,22 +178,30 @@ where
                         .iter()
                         .map(|(buffer, _)| buffer.len())
                         .sum::<usize>();
-                    for (i, request) in replicated.logs.into_iter().enumerate() {
-                        let mut execute = self.app.new_execute(request.op);
-                        if let DataShardingExecuteOutput::Pending(keys) = execute.proceed() {
-                            for key in keys {
-                                self.storage.will_fetch(
-                                    key.digest().0.into(),
-                                    (logs_version_ahead + i) as _,
-                                )
+                    for (i, log) in replicated.logs.into_iter().enumerate() {
+                        match log {
+                            BigServiceLog::Request(request) => {
+                                let mut execute = self.app.new_execute(request.op);
+                                if let DataShardingExecuteOutput::Pending(keys) = execute.proceed()
+                                {
+                                    for key in keys {
+                                        self.storage.will_fetch(
+                                            key.digest().0.into(),
+                                            (logs_version_ahead + i) as _,
+                                        )
+                                    }
+                                }
+                                executing_buffer.push_back(Executing {
+                                    execute,
+                                    client_id: request.client_id,
+                                    client_seq: request.client_seq,
+                                    start,
+                                })
+                            }
+                            BigServiceLog::StorageGossip(gossip) => {
+                                self.storage.remote_gossip(gossip)
                             }
                         }
-                        executing_buffer.push_back(Executing {
-                            execute,
-                            client_id: request.client_id,
-                            client_seq: request.client_seq,
-                            start,
-                        })
                     }
                     self.replicated
                         .push_back((executing_buffer, replicated.metadata))
@@ -254,6 +266,9 @@ where
                     Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
                         self.num_skip += num_skipped
                     }
+                    Proceed::Output(StorageStateOutput::Gossip(gossip)) => self
+                        .replication
+                        .submit(BigServiceLog::StorageGossip(gossip)),
                 }
             }
 
@@ -321,7 +336,7 @@ where
                 Some(reply) if reply.client_seq == request.client_seq => self
                     .proceed_buffer
                     .push_back(Proceed::Send(Send::Reply(request.client_id, reply.clone()))),
-                _ => self.replication.submit(request),
+                _ => self.replication.submit(BigServiceLog::Request(request)),
             },
             Message::Intermediate(ServiceMessage::Storage(message)) => {
                 self.storage.receive(message)

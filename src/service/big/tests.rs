@@ -11,6 +11,7 @@ use super::{storage::*, *};
 fn print_placement() {
     let config = ShardedStorageConfig {
         num_node: 10,
+        num_faulty_node: 3,
         num_active_copy: 7,
     };
     println!("{:?}", config.node_indices_of(Key::from_low_u64_le(0)));
@@ -30,7 +31,7 @@ fn print_placement() {
 }
 
 type A = Kv;
-type R = UnreplicatedReplica<Request<KvOp>>;
+type R = UnreplicatedReplica<BigServiceLog<A, S>>;
 type S = ShardedStorage;
 type ServiceMessage = super::ServiceMessage<<R as State>::Message, <S as State>::Message>;
 
@@ -45,6 +46,7 @@ fn idle_pending() {
     let app = Kv;
     let storage_config = ShardedStorageConfig {
         num_node: 1,
+        num_faulty_node: 0,
         num_active_copy: 1,
     };
     let storage = ShardedStorage::new(storage_config, 0, [0].into());
@@ -152,6 +154,7 @@ fn one_service() {
     let app = Kv;
     let storage_config = ShardedStorageConfig {
         num_node: 1,
+        num_faulty_node: 0,
         num_active_copy: 1,
     };
     let storage = ShardedStorage::new(storage_config, 0, [0].into());
@@ -186,13 +189,14 @@ fn one_service() {
 }
 
 impl SystemState {
-    fn new(num_service: ReplicaIndex) -> Self {
+    fn new(num_service: ReplicaIndex, num_faulty: ReplicaIndex) -> Self {
         Self {
             services: (0..num_service)
                 .map(|index| {
                     let app = Kv;
                     let storage_config = ShardedStorageConfig {
                         num_node: num_service,
+                        num_faulty_node: num_faulty,
                         num_active_copy: 1,
                     };
                     let storage = ShardedStorage::new(storage_config, index, [index].into());
@@ -227,7 +231,7 @@ impl SystemState {
 
 #[test]
 fn multiple_services() {
-    let mut state = SystemState::new(2);
+    let mut state = SystemState::new(2, 0);
     state.receive(
         request(1, KvOp::Put("k".into(), "v".into())),
         Duration::ZERO,

@@ -18,7 +18,7 @@ use crate::{
 pub type StateVersion = u64;
 pub type Key = H256;
 
-pub trait StorageState: State<Output = StorageStateOutput> {
+pub trait StorageState: State<Output = StorageStateOutput<Self::Gossip>> {
     fn fetch(&mut self, key: Key);
     fn bump(&mut self, writes: HashMap<Key, Bytes>);
     #[allow(unused_variables)]
@@ -26,19 +26,24 @@ pub trait StorageState: State<Output = StorageStateOutput> {
 
     fn read_ok(&mut self, key: String, value: Bytes);
     fn write_ok(&mut self, key: String);
+
+    type Gossip;
+    fn remote_gossip(&mut self, gossip: Self::Gossip);
 }
 
-pub enum StorageStateOutput {
+pub enum StorageStateOutput<G> {
     Fetched(Key, Option<Bytes>),
     Bumped,
     Skipped(StateVersion), // number of versions to skip execute
 
     Read(String),
     Write(String, Bytes),
+
+    Gossip(G),
 }
 
 pub struct FullReplicationStorage {
-    output_buffer: VecDeque<StorageStateOutput>,
+    output_buffer: VecDeque<StorageStateOutput<Never>>,
     keys: HashSet<Key>,
     writing_keys: HashSet<String>,
 }
@@ -69,6 +74,7 @@ impl StorageState for FullReplicationStorage {
         self.output_buffer
             .push_back(StorageStateOutput::Read(format!("{key:x}")))
     }
+
     fn bump(&mut self, writes: HashMap<Key, Bytes>) {
         for (key, value) in writes {
             self.keys.insert(key);
@@ -81,12 +87,14 @@ impl StorageState for FullReplicationStorage {
             self.output_buffer.push_back(StorageStateOutput::Bumped)
         }
     }
+
     fn read_ok(&mut self, key: String, value: Bytes) {
         self.output_buffer.push_back(StorageStateOutput::Fetched(
             key.parse().unwrap(),
             Some(value),
         ))
     }
+
     fn write_ok(&mut self, key: String) {
         let removed = self.writing_keys.remove(&key);
         assert!(removed);
@@ -94,11 +102,16 @@ impl StorageState for FullReplicationStorage {
             self.output_buffer.push_back(StorageStateOutput::Bumped)
         }
     }
+
+    type Gossip = Never;
+    fn remote_gossip(&mut self, _gossip: Self::Gossip) {
+        unreachable!()
+    }
 }
 
 impl State for FullReplicationStorage {
     type Send = Never;
-    type Output = StorageStateOutput;
+    type Output = StorageStateOutput<Never>;
 
     fn proceed(&mut self, _since_start: std::time::Duration) -> Proceed<Self::Send, Self::Output> {
         match self.output_buffer.pop_front() {
@@ -122,16 +135,63 @@ pub struct ShardedStorage {
 
     version: StateVersion,
     key_versions: HashMap<Key, Vec<StateVersion>>,
+    read_for: HashMap<(StateVersion, Key), HashMap<ReplicaIndex, StateVersion>>,
     fetching: HashSet<Key>,
     bump_writing: HashSet<String>,
-    read_for: HashMap<(StateVersion, Key), HashMap<ReplicaIndex, StateVersion>>,
+    node_versions: Vec<StateVersion>,
+    active_version: StateVersion,
 
-    proceed_buffer: VecDeque<Proceed<ShardedStorageSend, StorageStateOutput>>,
+    proceed_buffer:
+        VecDeque<Proceed<ShardedStorageSend, StorageStateOutput<ShardedStorageStatusMessage>>>,
 }
 
 pub struct ShardedStorageConfig {
     pub num_node: NodeIndex, // virtual "storage node"
+    pub num_faulty_node: NodeIndex,
     pub num_active_copy: usize,
+}
+
+impl ShardedStorage {
+    pub fn new(
+        config: ShardedStorageConfig,
+        replica_index: ReplicaIndex,
+        node_indices: HashSet<NodeIndex>,
+    ) -> Self {
+        Self {
+            replica_index,
+            node_indices,
+            version: 0,
+            key_versions: Default::default(),
+            read_for: Default::default(),
+            fetching: Default::default(),
+            bump_writing: Default::default(),
+            node_versions: vec![0; config.num_node as _],
+            active_version: 0,
+            proceed_buffer: Default::default(),
+            config,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
+pub enum ShardedStorageMessage {
+    Query(message::Query),
+    QueryOk(message::QueryOk),
+    Archived(message::Archived),
+}
+
+// should we just add a Multi variant to replication::Dest?
+pub enum Dest {
+    One(ReplicaIndex),
+    Multi(Vec<ReplicaIndex>),
+    All,
+}
+
+pub type ShardedStorageSend = (Dest, ShardedStorageMessage);
+
+pub struct ShardedStorageStatusMessage {
+    version: StateVersion,
+    node_indices: HashSet<NodeIndex>,
 }
 
 impl ShardedStorageConfig {
@@ -147,41 +207,6 @@ impl ShardedStorageConfig {
             .any(|node_index| node_indices.contains(&node_index))
     }
 }
-
-impl ShardedStorage {
-    pub fn new(
-        config: ShardedStorageConfig,
-        replica_index: ReplicaIndex,
-        node_indices: HashSet<NodeIndex>,
-    ) -> Self {
-        Self {
-            replica_index,
-            node_indices,
-            version: 0,
-            key_versions: Default::default(),
-            fetching: Default::default(),
-            bump_writing: Default::default(),
-            read_for: Default::default(),
-            proceed_buffer: Default::default(),
-            config,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Encode, Decode)]
-pub enum ShardedStorageMessage {
-    Query(message::Query),
-    QueryOk(message::QueryOk),
-}
-
-// should we just add a Multi variant to replication::Dest?
-pub enum Dest {
-    One(ReplicaIndex),
-    Multi(Vec<ReplicaIndex>),
-    All,
-}
-
-pub type ShardedStorageSend = (Dest, ShardedStorageMessage);
 
 impl StorageState for ShardedStorage {
     fn fetch(&mut self, key: Key) {
@@ -201,20 +226,6 @@ impl StorageState for ShardedStorage {
                 .push_back(Proceed::Send((dest, ShardedStorageMessage::Query(query))))
         }
     }
-
-    // fn fetch_ahead(&mut self, index: ShardIndex, _version_ahead: StateVersion) {
-    //     if self.stored_shards.last().unwrap().contains_key(&index) {
-    //         return;
-    //     }
-    //     let fetch = message::Fetch {
-    //         version: None,
-    //         shard_index: index,
-    //         replica_index: self.replica_index,
-    //     };
-    //     let dest = Dest::Multi(self.config.node_indices_of(index));
-    //     self.proceed_buffer
-    //         .push(Proceed::Send((dest, ShardedStorageMessage::Fetch(fetch))))
-    // }
 
     fn bump(&mut self, writes: HashMap<Key, Bytes>) {
         // tracing::trace!(%self.replica_index, %self.version, "bumping");
@@ -276,11 +287,16 @@ impl StorageState for ShardedStorage {
                 .push_back(Proceed::Output(StorageStateOutput::Bumped))
         }
     }
+
+    type Gossip = ShardedStorageStatusMessage;
+    fn remote_gossip(&mut self, gossip: Self::Gossip) {
+        todo!()
+    }
 }
 
 impl State for ShardedStorage {
     type Send = ShardedStorageSend;
-    type Output = StorageStateOutput;
+    type Output = StorageStateOutput<ShardedStorageStatusMessage>;
 
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(proceed) = self.proceed_buffer.pop_front() {
@@ -303,6 +319,37 @@ impl State for ShardedStorage {
                             key,
                             fetch_ok.bytes.map(Into::into),
                         )))
+                }
+            }
+            ShardedStorageMessage::Archived(archived) => {
+                for node_index in archived.node_indices {
+                    self.node_versions[node_index as usize] =
+                        self.node_versions[node_index as usize].max(archived.version)
+                }
+                let mut node_versions = self.node_versions.clone();
+                node_versions.sort_unstable();
+                let active_version = node_versions[self.config.num_faulty_node as usize];
+                if active_version > self.active_version {
+                    // optimized with a binary heap if iterating all keys is too slow
+                    for (key, versions) in &mut self.key_versions {
+                        let active_index = match versions.binary_search(&active_version) {
+                            Ok(index) => index + 1,
+                            Err(index) => index,
+                        };
+                        for version in versions.drain(..active_index) {
+                            // TODO output delete
+                        }
+                    }
+                    self.active_version = active_version;
+
+                    if self.active_version > self.version {
+                        self.proceed_buffer.push_back(Proceed::Output(
+                            StorageStateOutput::Skipped(self.active_version - self.version),
+                        ));
+                        self.version = self.active_version
+                    }
+
+                    self.gossip_status()
                 }
             }
         }
@@ -352,12 +399,18 @@ impl ShardedStorage {
             targets.insert(replica_index, version);
         }
     }
+
+    fn gossip_status(&mut self) {
+        //
+    }
 }
 
 pub mod message {
+    use std::collections::HashSet;
+
     use bincode::{Decode, Encode};
 
-    use super::{ReplicaIndex, StateVersion};
+    use super::{NodeIndex, ReplicaIndex, StateVersion};
 
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct Query {
@@ -372,6 +425,12 @@ pub mod message {
         pub key: [u8; 32],
         pub bytes: Option<Vec<u8>>, // `Bytes` does not support Encode/Decode
     }
+
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct Archived {
+        pub version: StateVersion,
+        pub node_indices: HashSet<NodeIndex>,
+    }
 }
 
 mod parse {
@@ -383,6 +442,7 @@ mod parse {
         fn extract(configs: &Configs) -> anyhow::Result<Self> {
             Ok(Self {
                 num_node: configs.get("big.num-node")?,
+                num_faulty_node: configs.get("big.num-faulty-node")?,
                 num_active_copy: configs.get("big.num-active-copy")?,
             })
         }

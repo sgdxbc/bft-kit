@@ -16,7 +16,7 @@ use bft_kit::{
     service::{
         Request,
         big::{
-            self, BigService,
+            self, BigService, BigServiceLog,
             storage::{FullReplicationStorage, ShardedStorage},
         },
         unsharded::{self, UnshardedService},
@@ -159,14 +159,23 @@ async fn service_big(
             client_seq: index as _,
             op,
         });
-    let replica = ReplayReplica::new(logs, configs.get("in-memory.batch-size")?);
     let addrs = configs.get_values("addr")?;
     let service_config = configs.extract()?;
     if configs.get("big.sharded")? {
+        // it may looks like the `let replica = ...` in two branches are identical, but
+        // actually their (inferred) types are different
+        let replica = ReplayReplica::new(
+            logs.map(BigServiceLog::Request),
+            configs.get("in-memory.batch-size")?,
+        );
         let storage = ShardedStorage::new(configs.extract()?, index, [index].into());
         let service = BigService::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
     } else {
+        let replica = ReplayReplica::new(
+            logs.map(BigServiceLog::Request),
+            configs.get("in-memory.batch-size")?,
+        );
         let storage = FullReplicationStorage::new();
         let service = BigService::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
