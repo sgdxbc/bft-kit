@@ -138,17 +138,22 @@ pub struct ShardedStorage {
     read_for: HashMap<(StateVersion, Key), HashMap<ReplicaIndex, StateVersion>>,
     fetching: HashSet<Key>,
     bump_writing: HashSet<String>,
-    node_versions: Vec<StateVersion>,
-    active_version: StateVersion,
 
-    proceed_buffer:
-        VecDeque<Proceed<ShardedStorageSend, StorageStateOutput<ShardedStorageStatusMessage>>>,
+    vote_archive_version: StateVersion,
+    node_vote_archive_versions: Vec<StateVersion>,
+    archiving_version: StateVersion,
+    node_archived_versions: Vec<StateVersion>,
+    quorum_archived_version: StateVersion, // a cache for sorted(node_archived_versions)[f]
+
+    proceed_buffer: VecDeque<Proceed<ShardedStorageSend, StorageStateOutput<message::VoteArchive>>>,
 }
 
 pub struct ShardedStorageConfig {
     pub num_node: NodeIndex, // virtual "storage node"
     pub num_faulty_node: NodeIndex,
     pub num_active_copy: usize,
+
+    pub bypass_vote: bool,
 }
 
 impl ShardedStorage {
@@ -165,8 +170,11 @@ impl ShardedStorage {
             read_for: Default::default(),
             fetching: Default::default(),
             bump_writing: Default::default(),
-            node_versions: vec![0; config.num_node as _],
-            active_version: 0,
+            vote_archive_version: 0,
+            node_vote_archive_versions: vec![0; config.num_node as _],
+            archiving_version: 0,
+            node_archived_versions: vec![0; config.num_node as _],
+            quorum_archived_version: 0,
             proceed_buffer: Default::default(),
             config,
         }
@@ -188,11 +196,6 @@ pub enum Dest {
 }
 
 pub type ShardedStorageSend = (Dest, ShardedStorageMessage);
-
-pub struct ShardedStorageStatusMessage {
-    version: StateVersion,
-    node_indices: HashSet<NodeIndex>,
-}
 
 impl ShardedStorageConfig {
     pub fn node_indices_of(&self, key: Key) -> Vec<NodeIndex> {
@@ -249,6 +252,9 @@ impl StorageState for ShardedStorage {
             self.proceed_buffer
                 .push_back(Proceed::Output(StorageStateOutput::Bumped))
         }
+        if self.should_vote_archive() {
+            self.vote_archive()
+        }
     }
 
     fn read_ok(&mut self, key: String, value: Bytes) {
@@ -288,15 +294,24 @@ impl StorageState for ShardedStorage {
         }
     }
 
-    type Gossip = ShardedStorageStatusMessage;
-    fn remote_gossip(&mut self, gossip: Self::Gossip) {
-        todo!()
+    type Gossip = message::VoteArchive;
+    fn remote_gossip(&mut self, vote_archive: Self::Gossip) {
+        let mut updated = false;
+        for node_index in vote_archive.node_indices {
+            if self.node_vote_archive_versions[node_index as usize] < vote_archive.version {
+                self.node_vote_archive_versions[node_index as usize] = vote_archive.version;
+                updated = true
+            }
+        }
+        if updated {
+            self.may_enter_archiving()
+        }
     }
 }
 
 impl State for ShardedStorage {
     type Send = ShardedStorageSend;
-    type Output = StorageStateOutput<ShardedStorageStatusMessage>;
+    type Output = StorageStateOutput<message::VoteArchive>;
 
     fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
         if let Some(proceed) = self.proceed_buffer.pop_front() {
@@ -322,47 +337,37 @@ impl State for ShardedStorage {
                 }
             }
             ShardedStorageMessage::Archived(archived) => {
+                let mut updated = false;
                 for node_index in archived.node_indices {
-                    self.node_versions[node_index as usize] =
-                        self.node_versions[node_index as usize].max(archived.version)
-                }
-                let mut node_versions = self.node_versions.clone();
-                node_versions.sort_unstable();
-                let active_version = node_versions[self.config.num_faulty_node as usize];
-                if active_version > self.active_version {
-                    // optimized with a binary heap if iterating all keys is too slow
-                    for (key, versions) in &mut self.key_versions {
-                        let active_index = match versions.binary_search(&active_version) {
-                            Ok(index) => index + 1,
-                            Err(index) => index,
-                        };
-                        for version in versions.drain(..active_index) {
-                            // TODO output delete
-                        }
+                    if archived.version > self.node_vote_archive_versions[node_index as usize] {
+                        self.node_vote_archive_versions[node_index as usize] = archived.version;
+                        updated = true
                     }
-                    self.active_version = active_version;
-
-                    if self.active_version > self.version {
-                        self.proceed_buffer.push_back(Proceed::Output(
-                            StorageStateOutput::Skipped(self.active_version - self.version),
-                        ));
-                        self.version = self.active_version
-                    }
-
-                    self.gossip_status()
                 }
+                if !updated {
+                    return;
+                }
+                self.may_collect();
             }
         }
     }
 }
 
 impl ShardedStorage {
+    fn is_archiving(&self) -> bool {
+        self.archiving_version > self.node_archived_versions[self.replica_index as usize]
+    }
+
+    fn should_vote_archive(&self) -> bool {
+        self.version > self.vote_archive_version && !self.is_archiving()
+    }
+
     fn find_version(&self, key: Key, version: StateVersion) -> Option<StateVersion> {
-        let shard_versions = self.key_versions.get(&key)?;
-        match shard_versions.binary_search(&version) {
+        let key_versions = self.key_versions.get(&key)?;
+        match key_versions.binary_search(&version) {
             Err(0) => None,
-            Ok(index) => Some(shard_versions[index]),
-            Err(index) => Some(shard_versions[index - 1]),
+            Ok(index) => Some(key_versions[index]),
+            Err(index) => Some(key_versions[index - 1]),
         }
     }
 
@@ -400,8 +405,64 @@ impl ShardedStorage {
         }
     }
 
-    fn gossip_status(&mut self) {
-        //
+    fn vote_archive(&mut self) {
+        if self.config.bypass_vote {
+            // TODO
+            return;
+        }
+        let vote_archive = message::VoteArchive {
+            version: self.version,
+            node_indices: self.node_indices.clone(),
+        };
+        self.proceed_buffer
+            .push_back(Proceed::Output(StorageStateOutput::Gossip(vote_archive)));
+        self.node_vote_archive_versions[self.replica_index as usize] = self.version;
+        self.may_enter_archiving()
+    }
+
+    fn may_enter_archiving(&mut self) {
+        let mut node_vote_archive_versions = self.node_vote_archive_versions.clone();
+        node_vote_archive_versions.sort_unstable();
+        let quorum_vote_archive_version =
+            node_vote_archive_versions[self.config.num_faulty_node as usize];
+        if quorum_vote_archive_version <= self.archiving_version {
+            return;
+        }
+
+        self.archiving_version = quorum_vote_archive_version;
+        // TODO do archive
+    }
+
+    fn may_collect(&mut self) {
+        let mut node_archived_versions = self.node_archived_versions.clone();
+        node_archived_versions.sort_unstable();
+        let quorum_archived_version = node_archived_versions[self.config.num_faulty_node as usize];
+        if quorum_archived_version <= self.quorum_archived_version {
+            return;
+        }
+
+        // optimized with a binary heap if iterating all keys is too slow
+        for (key, versions) in &mut self.key_versions {
+            // active index contains the first version that > quorum archived version
+            // using this exclusive bound instead of a inclusive one (e.g.
+            // `archived_index`) to prevent underflow
+            let active_index = match versions.binary_search(&quorum_archived_version) {
+                Ok(index) => index + 1,
+                Err(index) => index,
+            };
+            for version in versions.drain(..active_index) {
+                // TODO output delete
+            }
+        }
+        self.quorum_archived_version = quorum_archived_version;
+
+        if self.quorum_archived_version > self.version {
+            self.proceed_buffer
+                .push_back(Proceed::Output(StorageStateOutput::Skipped(
+                    self.quorum_archived_version - self.version,
+                )));
+            self.version = self.quorum_archived_version
+        }
     }
 }
 
@@ -411,6 +472,12 @@ pub mod message {
     use bincode::{Decode, Encode};
 
     use super::{NodeIndex, ReplicaIndex, StateVersion};
+
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct VoteArchive {
+        pub version: StateVersion,
+        pub node_indices: HashSet<NodeIndex>,
+    }
 
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct Query {
@@ -444,6 +511,7 @@ mod parse {
                 num_node: configs.get("big.num-node")?,
                 num_faulty_node: configs.get("big.num-faulty-node")?,
                 num_active_copy: configs.get("big.num-active-copy")?,
+                bypass_vote: configs.get("big.bypass-vote")?,
             })
         }
     }

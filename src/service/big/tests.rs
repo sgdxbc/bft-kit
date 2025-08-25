@@ -13,6 +13,7 @@ fn print_placement() {
         num_node: 10,
         num_faulty_node: 3,
         num_active_copy: 7,
+        bypass_vote: true,
     };
     println!("{:?}", config.node_indices_of(Key::from_low_u64_le(0)));
     println!("{:?}", config.node_indices_of(Key::from_low_u64_le(1)));
@@ -48,6 +49,7 @@ fn idle_pending() {
         num_node: 1,
         num_faulty_node: 0,
         num_active_copy: 1,
+        bypass_vote: false,
     };
     let storage = ShardedStorage::new(storage_config, 0, [0].into());
     let service = BigService::new(
@@ -156,6 +158,7 @@ fn one_service() {
         num_node: 1,
         num_faulty_node: 0,
         num_active_copy: 1,
+        bypass_vote: false,
     };
     let storage = ShardedStorage::new(storage_config, 0, [0].into());
     let service = BigService::new(
@@ -198,6 +201,7 @@ impl SystemState {
                         num_node: num_service,
                         num_faulty_node: num_faulty,
                         num_active_copy: 1,
+                        bypass_vote: false,
                     };
                     let storage = ShardedStorage::new(storage_config, index, [index].into());
                     (
