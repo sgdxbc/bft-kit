@@ -201,7 +201,7 @@ impl SystemState {
                         num_node: num_service,
                         num_faulty_node: num_faulty,
                         num_active_copy: 1,
-                        bypass_vote: false,
+                        bypass_vote: true,
                     };
                     let storage = ShardedStorage::new(storage_config, index, [index].into());
                     (

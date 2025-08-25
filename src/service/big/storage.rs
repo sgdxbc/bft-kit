@@ -407,7 +407,7 @@ impl ShardedStorage {
 
     fn vote_archive(&mut self) {
         if self.config.bypass_vote {
-            // TODO
+            self.archive(self.version);
             return;
         }
         let vote_archive = message::VoteArchive {
@@ -429,8 +429,12 @@ impl ShardedStorage {
             return;
         }
 
-        self.archiving_version = quorum_vote_archive_version;
-        // TODO do archive
+        self.archive(quorum_vote_archive_version)
+    }
+
+    fn archive(&mut self, version: StateVersion) {
+        //
+        self.archiving_version = version;
     }
 
     fn may_collect(&mut self) {
