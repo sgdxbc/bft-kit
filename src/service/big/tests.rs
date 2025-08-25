@@ -14,17 +14,17 @@ fn print_active_placement() {
         num_faulty_node: 3,
         num_active_copy: 7,
         num_stripe: 1000,
-        num_shard_per_stripe: 1,
+        repair_threshold: 1,
         bypass_vote: true,
     };
-    println!("{:?}", config.nodes_of_shard(0));
-    println!("{:?}", config.nodes_of_shard(1));
-    println!("{:?}", config.nodes_of_shard(2));
-    println!("{:?}", config.nodes_of_shard(3));
+    println!("{:?}", config.nodes_of_stripe(0));
+    println!("{:?}", config.nodes_of_stripe(1));
+    println!("{:?}", config.nodes_of_stripe(2));
+    println!("{:?}", config.nodes_of_stripe(3));
 
     let mut node_overheads = [0; 10];
     for index in 0..1000 {
-        for node_index in config.nodes_of_shard(index) {
+        for node_index in config.nodes_of_stripe(index) {
             node_overheads[node_index as usize] += 1
         }
     }
@@ -52,7 +52,7 @@ fn idle_pending() {
         num_faulty_node: 0,
         num_active_copy: 1,
         num_stripe: 1,
-        num_shard_per_stripe: 1,
+        repair_threshold: 1,
         bypass_vote: false,
     };
     let storage = ShardedStorage::new(storage_config, 0, [0].into());
@@ -163,7 +163,7 @@ fn one_service() {
         num_faulty_node: 0,
         num_active_copy: 1,
         num_stripe: 1,
-        num_shard_per_stripe: 1,
+        repair_threshold: 1,
         bypass_vote: false,
     };
     let storage = ShardedStorage::new(storage_config, 0, [0].into());
@@ -208,7 +208,7 @@ impl SystemState {
                         num_faulty_node: num_faulty,
                         num_active_copy: 1,
                         num_stripe: 1,
-                        num_shard_per_stripe: 1,
+                        repair_threshold: 1,
                         bypass_vote: true,
                     };
                     let storage = ShardedStorage::new(storage_config, index, [index].into());

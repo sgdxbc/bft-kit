@@ -64,7 +64,7 @@ pub struct ServiceConfig {
 
 pub enum BigServiceLog<A: AppProtocol, S: StorageState> {
     Request(Request<A::Op>),
-    StorageGossip(S::Gossip),
+    StorageGossip(S::OrderedMessage),
 }
 
 type Replicated<A, M> = (VecDeque<Executing<A>>, M);
@@ -199,7 +199,7 @@ where
                                 })
                             }
                             BigServiceLog::StorageGossip(gossip) => {
-                                self.storage.remote_gossip(gossip)
+                                self.storage.receive_ordered(gossip)
                             }
                         }
                     }
@@ -266,7 +266,7 @@ where
                     Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
                         self.num_skip += num_skipped
                     }
-                    Proceed::Output(StorageStateOutput::Gossip(gossip)) => self
+                    Proceed::Output(StorageStateOutput::OrderedSend(gossip)) => self
                         .replication
                         .submit(BigServiceLog::StorageGossip(gossip)),
                 }
