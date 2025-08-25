@@ -135,10 +135,9 @@ pub struct ShardedStorage {
     config: ShardedStorageConfig,
     replica_index: ReplicaIndex,
     node_indices: HashSet<NodeIndex>,
-    shard_indices: HashSet<ShardIndex>, // cache for config.shards_of(node_indices)
 
     version: StateVersion,
-    key_versions: HashMap<Key, Vec<StateVersion>>,
+    version_table: VersionTable,
     read_for: HashMap<(StateVersion, Key), HashMap<ReplicaIndex, StateVersion>>,
     fetching: HashSet<Key>,
     bump_writing: HashSet<String>,
@@ -175,10 +174,9 @@ impl ShardedStorage {
     ) -> Self {
         Self {
             replica_index,
-            shard_indices: config.shards_of_nodes(&node_indices).collect(),
-            node_indices,
             version: 0,
-            key_versions: Default::default(),
+            version_table: VersionTable::new(config.shards_of_nodes(&node_indices)),
+            node_indices,
             read_for: Default::default(),
             fetching: Default::default(),
             bump_writing: Default::default(),
@@ -194,6 +192,14 @@ impl ShardedStorage {
 }
 
 impl VersionTable {
+    fn new(shard_indices: impl Iterator<Item = ShardIndex>) -> Self {
+        Self {
+            map: shard_indices
+                .map(|index| (index, Default::default()))
+                .collect(),
+        }
+    }
+
     fn add(&mut self, key: Key, version: StateVersion, config: &ShardedStorageConfig) {
         let versions = self
             .map
@@ -360,7 +366,7 @@ impl StorageState for ShardedStorage {
         self.version += 1;
         for (key, bytes) in writes {
             if self.should_store(&key) {
-                self.key_versions.entry(key).or_default().push(self.version);
+                self.version_table.add(key, self.version, &self.config);
                 let key = format!("{key:x}.{}", self.version);
                 self.bump_writing.insert(key.clone());
                 self.proceed_buffer
@@ -443,6 +449,9 @@ impl State for ShardedStorage {
     fn receive(&mut self, message: Self::Message) {
         match message {
             ShardedStorageMessage::Query(fetch) => {
+                if fetch.version < self.quorum_archived_version {
+                    return;
+                }
                 self.read_key(fetch.replica_index, fetch.version, fetch.key.into())
             }
             ShardedStorageMessage::QueryOk(fetch_ok) => {
@@ -474,7 +483,9 @@ impl State for ShardedStorage {
 
 impl ShardedStorage {
     fn should_store(&self, key: &Key) -> bool {
-        self.shard_indices.contains(&self.config.shard_of(key))
+        self.version_table
+            .map
+            .contains_key(&self.config.shard_of(key))
     }
 
     fn is_archiving(&self) -> bool {
@@ -485,18 +496,11 @@ impl ShardedStorage {
         self.version > self.vote_archive_version && !self.is_archiving()
     }
 
-    fn find_version(&self, key: Key, version: StateVersion) -> Option<StateVersion> {
-        let key_versions = self.key_versions.get(&key)?;
-        match key_versions.binary_search(&version) {
-            Err(0) => None,
-            Ok(index) => Some(key_versions[index]),
-            Err(index) => Some(key_versions[index - 1]),
-        }
-    }
-
     fn read_key(&mut self, replica_index: ReplicaIndex, version: StateVersion, key: Key) {
-        let Some(found_version) = self.find_version(key, version) else {
+        let Some(found_version) = self.version_table.find(&key, version, &self.config) else {
             let proceed = if replica_index == self.replica_index {
+                let removed = self.fetching.remove(&key);
+                assert!(removed);
                 Proceed::Output(StorageStateOutput::Fetched(key, None))
             } else {
                 let query_ok = message::QueryOk {
@@ -512,10 +516,6 @@ impl ShardedStorage {
             self.proceed_buffer.push_back(proceed);
             return;
         };
-
-        if found_version < self.quorum_archived_version {
-            return;
-        }
 
         let targets = self.read_for.entry((found_version, key)).or_default();
         if targets.is_empty() {
@@ -557,8 +557,7 @@ impl ShardedStorage {
     }
 
     fn archive(&mut self, version: StateVersion) {
-        //
-        self.archiving_version = version;
+        self.archiving_version = version
     }
 
     fn may_collect(&mut self) {
@@ -569,17 +568,8 @@ impl ShardedStorage {
             return;
         }
 
-        for (key, versions) in &mut self.key_versions {
-            // active index contains the first version that > quorum archived version
-            // using this exclusive bound instead of a inclusive one (e.g.
-            // `archived_index`) to prevent underflow
-            let active_index = match versions.binary_search(&quorum_archived_version) {
-                Ok(index) => index + 1,
-                Err(index) => index,
-            };
-            for version in versions.drain(..active_index) {
-                // TODO output delete
-            }
+        for (key, version) in self.version_table.collect(quorum_archived_version) {
+            // TODO
         }
         self.quorum_archived_version = quorum_archived_version;
 
@@ -594,11 +584,11 @@ impl ShardedStorage {
 }
 
 pub mod message {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use bincode::{Decode, Encode};
 
-    use super::{NodeIndex, ReplicaIndex, StateVersion};
+    use super::{NodeIndex, ReplicaIndex, ShardIndex, StateVersion};
 
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct VoteArchive {
@@ -609,7 +599,7 @@ pub mod message {
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct Query {
         pub version: StateVersion,
-        pub key: [u8; 32],
+        pub key: [u8; 32], // `Key` does not support Encode/Decode
         pub replica_index: ReplicaIndex,
     }
 
@@ -618,6 +608,13 @@ pub mod message {
         pub version: StateVersion,
         pub key: [u8; 32],
         pub bytes: Option<Vec<u8>>, // `Bytes` does not support Encode/Decode
+    }
+
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct ArchivePush {
+        pub version: StateVersion,
+        pub shard_index: ShardIndex,
+        pub values: HashMap<[u8; 32], Vec<u8>>,
     }
 
     #[derive(Debug, Clone, Encode, Decode)]
@@ -639,7 +636,7 @@ mod parse {
                 num_faulty_node: configs.get("big.num-faulty-node")?,
                 num_active_copy: configs.get("big.num-active-copy")?,
                 num_stripe: configs.get("big.num-stripe")?,
-                num_shard_per_stripe: configs.get("big.stripe-width")?,
+                num_shard_per_stripe: configs.get("big.num-shard-per-stripe")?,
                 bypass_vote: configs.get("big.bypass-vote")?,
             })
         }

@@ -185,6 +185,7 @@ where
     });
 
     let write_tracker = TaskTracker::new();
+    let start = Instant::now();
     let mut tick_after = service_proceed(
         &mut service,
         Duration::ZERO,
@@ -196,7 +197,6 @@ where
     )
     .await?;
 
-    let start = Instant::now();
     tracing::info!(%replica_index, "enter event loop");
     loop {
         let tick = async {

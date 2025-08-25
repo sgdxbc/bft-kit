@@ -62,12 +62,17 @@ impl WorkloadState for YcsbWorkload {
 
     fn next_op(&mut self) -> Option<(Self::Op, Self::Metadata)> {
         let k = format!("key{}", self.rng.random_range(0..self.config.num_key));
-        let v = (&mut self.rng)
-            .sample_iter(Alphanumeric)
-            .take(self.config.value_len)
-            .map(char::from)
-            .collect();
-        Some((YcsbOp::Update(k, v), Instant::now())) // TODO
+        let op = if self.rng.random_bool(0.5) {
+            YcsbOp::Get(k)
+        } else {
+            let v = (&mut self.rng)
+                .sample_iter(Alphanumeric)
+                .take(self.config.value_len)
+                .map(char::from)
+                .collect();
+            YcsbOp::Update(k, v)
+        };
+        Some((op, Instant::now()))
     }
 
     fn complete(&mut self, start: Self::Metadata, res: Self::Res) -> anyhow::Result<()> {
