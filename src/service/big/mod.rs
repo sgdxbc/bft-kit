@@ -44,35 +44,34 @@ pub struct BigService<
     storage: S,
     // essential state data
     replies: HashMap<ClientId, Reply<A::Res, R::Metadata>>,
-    replicated: VecDeque<Replicated<A, R::Metadata>>,
+    executing: VecDeque<Executing<A::ExecuteState, R::Metadata>>,
     fetch_keys: HashMap<Key, A::Key>,
     bumping: bool,
     num_skip: StateVersion,
     // additional data for optimization
     value_cache: Option<LruCache<A::Key, A::Value>>,
     // cross interface buffers
-    #[allow(clippy::type_complexity)] // this matches Proceed<Self::Send, Self::Output>
-    proceed_buffer: VecDeque<Proceed<Send<Reply<A::Res, R::Metadata>, ServiceSend<R, S>>, Output>>,
+    #[allow(clippy::type_complexity)]
+    resend_replies: Vec<(ClientId, Reply<A::Res, R::Metadata>)>,
     // stats
     execute_latencies: NanoLatencies,
 }
 
 pub struct ServiceConfig {
     num_cached_value: usize,
-    num_max_will_fetch: usize,
+    executing_buffer_size: usize,
 }
 
 pub enum BigServiceLog<A: AppProtocol, S: StorageState> {
     Request(Request<A::Op>),
-    StorageGossip(S::OrderedMessage),
+    StorageOrderedMessage(S::OrderedMessage),
 }
 
-type Replicated<A, M> = (VecDeque<Executing<A>>, M);
-
-struct Executing<A: DataShardingApp> {
-    execute: A::ExecuteState,
+struct Executing<E, M> {
+    execute: E,
     client_id: ClientId,
     client_seq: ClientSeq,
+    metadata: M,
     start: Instant,
 }
 
@@ -88,12 +87,12 @@ impl<A: DataShardingApp, R: ReplicationState<BigServiceLog<A, S>>, S: StorageSta
             replication,
             storage,
             replies: Default::default(),
-            replicated: Default::default(),
+            executing: Default::default(),
             fetch_keys: Default::default(),
             bumping: false,
             num_skip: 0,
             value_cache: config.num_cached_value.try_into().ok().map(LruCache::new),
-            proceed_buffer: Default::default(),
+            resend_replies: Default::default(),
             execute_latencies: NanoLatencies::new(3).unwrap(),
             config,
         }
@@ -147,129 +146,107 @@ where
     type Send = Send<Reply<A::Res, R::Metadata>, <Self as ServiceState<A>>::ServiceSend>;
     type Output = Output;
     fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some(proceed) = self.proceed_buffer.pop_front() {
-            return proceed;
+        if let Some((client_id, reply)) = self.resend_replies.pop() {
+            return Proceed::Send(Send::Reply(client_id, reply));
         }
 
         let mut earliest_tick_after = None;
-        while self
-            .replicated
-            .iter()
-            .map(|(buffer, _)| buffer.len())
-            .sum::<usize>()
-            <= self.config.num_max_will_fetch
-        {
+
+        while self.executing.len() <= self.config.executing_buffer_size {
             match self.replication.proceed(since_start) {
                 Proceed::Pending(tick_after) => {
                     earliest_tick_after = earliest([tick_after, earliest_tick_after]);
                     break;
                 }
                 Proceed::Send(send) => {
-                    self.proceed_buffer
-                        .push_back(Proceed::Send(Send::Intermediate(ServiceSend::Replication(
-                            send,
-                        ))))
+                    return Proceed::Send(Send::Intermediate(ServiceSend::Replication(send)));
                 }
                 Proceed::Output(replicated) => {
-                    let mut executing_buffer = VecDeque::new();
                     let start = Instant::now();
-                    let logs_version_ahead = self
-                        .replicated
-                        .iter()
-                        .map(|(buffer, _)| buffer.len())
-                        .sum::<usize>();
-                    for (i, log) in replicated.logs.into_iter().enumerate() {
+                    for log in replicated.logs {
                         match log {
                             BigServiceLog::Request(request) => {
                                 let mut execute = self.app.new_execute(request.op);
                                 if let DataShardingExecuteOutput::Pending(keys) = execute.proceed()
                                 {
                                     for key in keys {
-                                        self.storage.will_fetch(
-                                            key.digest().0.into(),
-                                            (logs_version_ahead + i) as _,
-                                        )
+                                        self.storage.will_fetch(key.digest().0.into())
                                     }
                                 }
-                                executing_buffer.push_back(Executing {
+                                self.executing.push_back(Executing {
                                     execute,
                                     client_id: request.client_id,
                                     client_seq: request.client_seq,
+                                    metadata: replicated.metadata.clone(),
                                     start,
                                 })
                             }
-                            BigServiceLog::StorageGossip(gossip) => {
-                                self.storage.receive_ordered(gossip)
+                            BigServiceLog::StorageOrderedMessage(message) => {
+                                self.storage.receive_ordered(message)
                             }
                         }
                     }
-                    self.replicated
-                        .push_back((executing_buffer, replicated.metadata))
                 }
             }
         }
 
         loop {
-            let Some((executing_buffer, metadata)) = self.replicated.front_mut() else {
-                break;
-            };
-            let Some(executing) = executing_buffer.front_mut() else {
-                self.replicated.pop_front();
-                continue;
-            };
+            match self.storage.proceed(since_start) {
+                Proceed::Pending(tick_after) => {
+                    earliest_tick_after = earliest([tick_after, earliest_tick_after]);
+                    break;
+                }
+                Proceed::Send(send) => {
+                    return Proceed::Send(Send::Intermediate(ServiceSend::Storage(send)));
+                }
+                Proceed::Output(StorageStateOutput::Read(key)) => {
+                    return Proceed::Output(Output::Read(key));
+                }
+                Proceed::Output(StorageStateOutput::Write(key, value)) => {
+                    return Proceed::Output(Output::Write(key, value));
+                }
+                Proceed::Output(StorageStateOutput::OrderedSend(gossip)) => {
+                    self.replication
+                        .submit(BigServiceLog::StorageOrderedMessage(gossip));
+                    return self.proceed(since_start);
+                }
+                Proceed::Output(StorageStateOutput::Fetched(key, bytes)) => {
+                    let value = bytes.map(|bytes| {
+                        let (value, _len) =
+                            bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
+                        value
+                    });
+                    let key = self.fetch_keys.remove(&key).unwrap();
+                    self.executing
+                        .front_mut()
+                        .unwrap()
+                        .execute
+                        .install(key, value)
+                }
+                Proceed::Output(StorageStateOutput::Bumped) => {
+                    assert!(self.bumping);
+                    self.bumping = false
+                }
+                Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
+                    self.num_skip += num_skipped
+                }
+            }
+        }
+
+        while let Some(executing) = self.executing.front_mut() {
             // it would be better if we can filter before constructing `A::Execute`
             // anyway should be rare
             if let Some(reply) = self.replies.get(&executing.client_id)
                 && reply.client_seq >= executing.client_seq
             {
-                executing_buffer.pop_front();
+                self.executing.pop_front();
                 continue;
             }
 
             if self.num_skip > 0 {
                 self.num_skip -= 1;
-                executing_buffer.pop_front();
+                self.executing.pop_front();
                 continue;
-            }
-
-            loop {
-                match self.storage.proceed(since_start) {
-                    Proceed::Pending(tick_after) => {
-                        earliest_tick_after = earliest([tick_after, earliest_tick_after]);
-                        break;
-                    }
-                    Proceed::Send(send) => {
-                        self.proceed_buffer
-                            .push_back(Proceed::Send(Send::Intermediate(ServiceSend::Storage(
-                                send,
-                            ))))
-                    }
-                    Proceed::Output(StorageStateOutput::Read(key)) => self
-                        .proceed_buffer
-                        .push_back(Proceed::Output(Output::Read(key))),
-                    Proceed::Output(StorageStateOutput::Write(key, value)) => self
-                        .proceed_buffer
-                        .push_back(Proceed::Output(Output::Write(key, value))),
-                    Proceed::Output(StorageStateOutput::Fetched(key, bytes)) => {
-                        let value = bytes.map(|bytes| {
-                            let (value, _len) =
-                                bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
-                            value
-                        });
-                        let key = self.fetch_keys.remove(&key).unwrap();
-                        executing.execute.install(key, value)
-                    }
-                    Proceed::Output(StorageStateOutput::Bumped) => {
-                        assert!(self.bumping);
-                        self.bumping = false
-                    }
-                    Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
-                        self.num_skip += num_skipped
-                    }
-                    Proceed::Output(StorageStateOutput::OrderedSend(gossip)) => self
-                        .replication
-                        .submit(BigServiceLog::StorageGossip(gossip)),
-                }
             }
 
             if !self.fetch_keys.is_empty() || self.bumping {
@@ -289,9 +266,11 @@ where
                         self.fetch_keys.insert(storage_key, key);
                         self.storage.fetch(storage_key)
                     }
+                    return self.proceed(since_start);
                 }
                 DataShardingExecuteOutput::Complete(res, writes) => {
                     self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
+                    let executing = self.executing.pop_front().unwrap();
 
                     let mut bump_writes = HashMap::new();
                     for (key, value) in writes {
@@ -311,21 +290,15 @@ where
                     let reply = Reply {
                         client_seq: executing.client_seq,
                         res,
-                        metadata: metadata.clone(),
+                        metadata: executing.metadata,
                     };
                     self.replies.insert(executing.client_id, reply.clone());
-                    self.proceed_buffer
-                        .push_back(Proceed::Send(Send::Reply(executing.client_id, reply)));
-                    executing_buffer.pop_front();
+                    return Proceed::Send(Send::Reply(executing.client_id, reply));
                 }
             }
         }
 
-        if self.proceed_buffer.is_empty() {
-            Proceed::Pending(earliest_tick_after)
-        } else {
-            self.proceed(since_start)
-        }
+        Proceed::Pending(earliest_tick_after)
     }
 
     type Message = Message<Request<A::Op>, <Self as ServiceState<A>>::ServiceMessage>;
@@ -333,9 +306,9 @@ where
         match message {
             Message::Request(request) => match self.replies.get(&request.client_id) {
                 Some(reply) if reply.client_seq > request.client_seq => {}
-                Some(reply) if reply.client_seq == request.client_seq => self
-                    .proceed_buffer
-                    .push_back(Proceed::Send(Send::Reply(request.client_id, reply.clone()))),
+                Some(reply) if reply.client_seq == request.client_seq => {
+                    self.resend_replies.push((request.client_id, reply.clone()))
+                }
                 _ => self.replication.submit(BigServiceLog::Request(request)),
             },
             Message::Intermediate(ServiceMessage::Storage(message)) => {
@@ -357,7 +330,7 @@ mod parse {
         fn extract(configs: &Configs) -> anyhow::Result<Self> {
             Ok(Self {
                 num_cached_value: configs.get("big.num-cached-value")?,
-                num_max_will_fetch: configs.get("big.num-max-will-fetch")?,
+                executing_buffer_size: configs.get("big.num-max-will-fetch")?,
             })
         }
     }

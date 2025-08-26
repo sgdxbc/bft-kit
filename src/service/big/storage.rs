@@ -24,13 +24,13 @@ pub trait StorageState: State<Output = StorageStateOutput<Self::OrderedMessage>>
     fn fetch(&mut self, key: Key);
     fn bump(&mut self, writes: HashMap<Key, Bytes>);
     #[allow(unused_variables)]
-    fn will_fetch(&mut self, key: Key, version_ahead: StateVersion) {}
+    fn will_fetch(&mut self, key: Key) {}
 
     fn read_ok(&mut self, key: String, value: Bytes);
     fn write_ok(&mut self, key: String);
 
     type OrderedMessage;
-    fn receive_ordered(&mut self, gossip: Self::OrderedMessage);
+    fn receive_ordered(&mut self, message: Self::OrderedMessage);
 }
 
 pub enum StorageStateOutput<G> {
