@@ -23,14 +23,14 @@ use crate::{
     app::DataShardingApp,
     crypto::cert::quinn::{client_config, server_config},
     replication::{ReplicaIndex, ReplicationState, transport::ReplicaTable},
-    service::{ClientId, Message, Output, Reply, Request, Send, ServiceState},
-    state::{Proceed, State as _},
+    service::{ClientId, Effect, Message, Reply, Request, ServiceState, Store},
+    state::{Action, State as _},
     transport::{BINCODE_CONFIG, PerformSend, read_loop, run_write, trace_error},
 };
 
 use super::{
-    BigService, BigServiceLog, ServiceMessage, ServiceSend,
-    storage::{Dest, ShardedStorageMessage, ShardedStorageSend, StorageState},
+    BigService, BigServiceLog, ServiceEffect, ServiceMessage,
+    storage::{Dest, ShardedStorageSend, StorageState},
 };
 
 struct ConnectionTables {
@@ -64,8 +64,7 @@ pub async fn run_service<
 where
     BigService<A, R, S>: ServiceState<
             A,
-            ServiceSend = ServiceSend<R, S>,
-            Output = Output,
+            ServiceEffect = ServiceEffect<R, S>,
             ServiceMessage = ServiceMessage<R::Message, S::Message>,
             Metadata = R::Metadata,
         >,
@@ -74,7 +73,7 @@ where
     S::Message: Decode<()>,
     Reply<A::Res, R::Metadata>: Encode,
     HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>:
-        PerformSend<R::Send> + PerformSend<S::Send>,
+        PerformSend<R::Effect> + PerformSend<S::StorageSend>,
     R::Message: Debug,
     S::Message: Debug,
 {
@@ -257,8 +256,8 @@ where
                 tracing::trace!(%replica_index, ?message);
                 service.receive(Message::Intermediate(ServiceMessage::Storage(message)))
             }
-            Event::StoreRead(key, value) => service.read_ok(key, value),
-            Event::StoreWrite(key) => service.write_ok(key),
+            Event::StoreRead(key, value) => service.put_complete(key, value),
+            Event::StoreWrite(key) => service.get_complete(key),
             Event::Tick => {}
         }
         tick_after = service_proceed(
@@ -315,26 +314,27 @@ async fn service_proceed<
     service: &mut BigService<A, R, S>,
     since_start: Duration,
     connection_tables: &ConnectionTables,
-    store_command_sender: &mpsc::Sender<StoreCommand>,
+    store_command_sender: &mpsc::Sender<Store>,
     write_tracker: &TaskTracker,
     cancel: &CancellationToken,
     send_reply: bool,
 ) -> anyhow::Result<Option<Duration>>
 where
     BigService<A, R, S>:
-        ServiceState<A, ServiceSend = ServiceSend<R, S>, Output = Output, Metadata = R::Metadata>,
+        ServiceState<A, ServiceEffect = ServiceEffect<R, S>, Metadata = R::Metadata>,
     Reply<A::Res, R::Metadata>: Encode,
     HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>:
-        PerformSend<R::Send> + PerformSend<S::Send>,
+        PerformSend<R::Effect> + PerformSend<S::StorageSend>,
 {
     loop {
         if cancel.is_cancelled() {
             break Ok(None); // consider better returned value
         }
         match service.proceed(since_start) {
-            Proceed::Pending(tick_after) => break Ok(tick_after),
-            Proceed::Send(Send::Reply(..)) if !send_reply => {}
-            Proceed::Send(Send::Reply(client_id, reply)) => {
+            Action::Pending(tick_after) => break Ok(tick_after),
+
+            Action::Perform(Effect::Reply(..)) if !send_reply => {}
+            Action::Perform(Effect::Reply(client_id, reply)) => {
                 let Some((connection, _)) = connection_tables.client.get(&client_id) else {
                     tracing::warn!(%client_id, "client connection not found");
                     continue;
@@ -347,27 +347,26 @@ where
                     ),
                 ));
             }
-            Proceed::Send(Send::Intermediate(ServiceSend::Replication(send))) => {
+
+            Action::Perform(Effect::Intermediate(ServiceEffect::Replication(send))) => {
                 connection_tables.replica.perform(send, write_tracker)?
             }
-            Proceed::Send(Send::Intermediate(ServiceSend::Storage(send))) => {
+            Action::Perform(Effect::Intermediate(ServiceEffect::StorageSend(send))) => {
                 connection_tables.storage.perform(send, write_tracker)?
             }
-            Proceed::Output(output) => {
+
+            Action::Perform(Effect::Intermediate(ServiceEffect::Store(store))) => {
                 if store_command_sender.capacity() == 0 {
                     tracing::warn!("store command sender congested");
                 }
-                store_command_sender.send(output).await?
+                store_command_sender.send(store).await?
             }
         }
         yield_now().await
     }
 }
 
-impl<T: ReplicaTable> PerformSend<ShardedStorageSend> for T
-where
-    ShardedStorageMessage: Encode,
-{
+impl<T: ReplicaTable> PerformSend<ShardedStorageSend> for T {
     fn perform(
         &self,
         (dest, message): ShardedStorageSend,
@@ -406,23 +405,21 @@ where
     }
 }
 
-type StoreCommand = Output;
-
 fn store_task(
     db: DB,
-    mut command_receiver: mpsc::Receiver<StoreCommand>,
+    mut command_receiver: mpsc::Receiver<Store>,
     event_sender: mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
     while let Some(command) = command_receiver.blocking_recv() {
         match command {
-            StoreCommand::Read(key) => {
+            Store::Get(key) => {
                 let Some(value) = db.get(&key)? else {
                     tracing::warn!(%key, "key not found");
                     continue;
                 };
                 event_sender.blocking_send(Event::StoreRead(key, value.into()))
             }
-            StoreCommand::Write(key, value) => {
+            Store::Put(key, value) => {
                 db.put(&key, value)?;
                 event_sender.blocking_send(Event::StoreWrite(key))
             }

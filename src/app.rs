@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     Never,
-    state::{Proceed, State},
+    state::{Action, State},
 };
 
 pub mod b_tree;
@@ -75,12 +75,12 @@ impl<A: AppState> From<A> for Buffered<A> {
 }
 
 impl<A: AppState> State for Buffered<A> {
-    type Send = Never;
+    type Effect = Never;
     type Output = A::Res;
-    fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, _since_start: Duration) -> Action<Self::Effect, Self::Output> {
         match self.ops.pop_front() {
-            Some(op) => Proceed::Output(self.app.execute(op)),
-            None => Proceed::Pending(None),
+            Some(op) => Action::Output(self.app.execute(op)),
+            None => Action::Pending(None),
         }
     }
 

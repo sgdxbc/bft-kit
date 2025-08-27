@@ -38,10 +38,12 @@ type S = ShardedStorage;
 type ServiceMessage = super::ServiceMessage<<R as State>::Message, <S as State>::Message>;
 
 struct SystemState {
-    hosts: Vec<(BigService<A, R>, HashMap<String, Bytes>)>,
+    hosts: Vec<SystemHost>,
     service_network: VecDeque<(ReplicaIndex, ServiceMessage)>,
     replies: Vec<(ClientId, Reply<KvRes, ()>)>,
 }
+
+type SystemHost = (BigService<A, R, S>, HashMap<String, Bytes>);
 
 #[test]
 fn idle_pending() {
@@ -70,7 +72,7 @@ fn idle_pending() {
     };
     let (service, _) = &mut state.hosts[0];
     let proceed = service.proceed(Duration::ZERO);
-    assert!(matches!(proceed, Proceed::Pending(None)));
+    assert!(matches!(proceed, Action::Pending(None)));
 }
 
 impl SystemState {
@@ -83,17 +85,20 @@ impl SystemState {
     fn proceed_service(&mut self, index: ReplicaIndex, since_start: Duration) -> Option<Duration> {
         loop {
             match self.hosts[index as usize].0.proceed(since_start) {
-                Proceed::Pending(tick_after) => break tick_after,
-                Proceed::Send(Send::Reply(client_id, reply)) => {
+                Action::Pending(tick_after) => break tick_after,
+                Action::Perform(Effect::Reply(client_id, reply)) => {
                     self.replies.push((client_id, reply))
                 }
-                Proceed::Send(Send::Intermediate(ServiceSend::Storage((
+
+                // remark: current implementation only works for 1-1 mapping of services and
+                // storage nodes
+                Action::Perform(Effect::Intermediate(ServiceEffect::StorageSend((
                     Dest::One(index),
                     message,
                 )))) => self
                     .service_network
                     .push_back((index, ServiceMessage::Storage(message))),
-                Proceed::Send(Send::Intermediate(ServiceSend::Storage((
+                Action::Perform(Effect::Intermediate(ServiceEffect::StorageSend((
                     Dest::Multi(indices),
                     message,
                 )))) => {
@@ -102,21 +107,28 @@ impl SystemState {
                             .push_back((index, ServiceMessage::Storage(message.clone())))
                     }
                 }
-                Proceed::Send(Send::Intermediate(ServiceSend::Storage((Dest::All, message)))) => {
+                Action::Perform(Effect::Intermediate(ServiceEffect::StorageSend((
+                    Dest::All,
+                    message,
+                )))) => {
                     for index in 0..self.hosts.len() {
                         self.service_network
                             .push_back((index as _, ServiceMessage::Storage(message.clone())))
                     }
                 }
-                Proceed::Output(Output::Read(key)) => {
+
+                Action::Perform(Effect::Intermediate(ServiceEffect::Store(Store::Get(key)))) => {
                     let (service, storage) = &mut self.hosts[index as usize];
                     let value = storage[&key].clone();
-                    service.read_ok(key, value)
+                    service.put_complete(key, value)
                 }
-                Proceed::Output(Output::Write(key, value)) => {
+                Action::Perform(Effect::Intermediate(ServiceEffect::Store(Store::Put(
+                    key,
+                    value,
+                )))) => {
                     let (service, storage) = &mut self.hosts[index as usize];
                     storage.insert(key.clone(), value);
-                    service.write_ok(key)
+                    service.get_complete(key)
                 }
             }
         }

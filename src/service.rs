@@ -1,26 +1,33 @@
 use bincode::{Decode, Encode};
 use tokio_util::bytes::Bytes;
 
-use crate::{app::AppProtocol, state::State};
+use crate::{Never, app::AppProtocol, state::State};
 
 pub mod big;
 pub mod unsharded;
 
 pub trait ServiceState<A: AppProtocol>:
     State<
-        Send = Send<Reply<A::Res, Self::Metadata>, Self::ServiceSend>,
+        Effect = Effect<Reply<A::Res, Self::Metadata>, Self::ServiceEffect>,
+        Output = Never,
         Message = Message<Request<A::Op>, Self::ServiceMessage>,
     >
 {
-    type ServiceSend;
+    type ServiceEffect;
     type ServiceMessage;
     type Metadata;
 
-    fn read_ok(&mut self, key: String, value: Bytes);
-    fn write_ok(&mut self, key: String);
+    #[allow(unused_variables)]
+    fn put_complete(&mut self, key: String, value: Bytes) {
+        unreachable!()
+    }
+    #[allow(unused_variables)]
+    fn get_complete(&mut self, key: String) {
+        unreachable!()
+    }
 }
 
-pub enum Send<R, S> {
+pub enum Effect<R, S> {
     Reply(ClientId, R),
     Intermediate(S),
 }
@@ -33,10 +40,12 @@ pub enum Dest {
     All,
 }
 
+pub type Send<M> = (Dest, M);
+
 #[derive(Debug)]
-pub enum Output {
-    Read(String),
-    Write(String, Bytes),
+pub enum Store {
+    Get(String),
+    Put(String, Bytes),
 }
 
 #[derive(Debug)]

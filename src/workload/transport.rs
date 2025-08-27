@@ -12,7 +12,7 @@ use crate::{
     crypto::cert::quinn::client_config,
     replication::{ReplicaIndex, transport::ReplicaTable},
     service::ClientId,
-    state::{Proceed, State},
+    state::{Action, State},
     transport::{BINCODE_CONFIG, PerformSend, read_loop, trace_error},
 };
 
@@ -26,7 +26,7 @@ pub async fn run_worker<S: State<Output = anyhow::Result<()>> + Into<NanoLatenci
 ) -> anyhow::Result<NanoLatencies>
 where
     S::Message: Decode<()>,
-    [Connection]: PerformSend<S::Send>,
+    [Connection]: PerformSend<S::Effect>,
 {
     let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
     endpoint.set_default_client_config(client_config());
@@ -93,19 +93,19 @@ fn worker_proceed<S: State<Output = anyhow::Result<()>>>(
     write_tracker: &TaskTracker,
 ) -> anyhow::Result<Option<Duration>>
 where
-    [Connection]: PerformSend<S::Send>,
+    [Connection]: PerformSend<S::Effect>,
 {
     loop {
         match worker.proceed(since_start) {
-            Proceed::Pending(tick_after) => {
+            Action::Pending(tick_after) => {
                 anyhow::ensure!(tick_after.is_some(), "workload halted without output");
                 if tick_after == Some(Duration::ZERO) {
                     tracing::warn!("zero interval tick detected, worker overloaded")
                 }
                 return Ok(tick_after);
             }
-            Proceed::Send(send) => connections.perform(send, write_tracker)?,
-            Proceed::Output(output) => {
+            Action::Perform(send) => connections.perform(send, write_tracker)?,
+            Action::Output(output) => {
                 output?;
                 return Ok(None);
             }

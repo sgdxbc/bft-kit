@@ -8,7 +8,7 @@ use hdrhistogram::Histogram;
 use crate::{
     app::AppProtocol,
     service::ClientSeq,
-    state::{Proceed, State, earliest},
+    state::{Action, State, earliest},
 };
 
 pub mod transport;
@@ -47,31 +47,31 @@ impl<W: WorkloadState, C> CloseLoopWorker<W, C> {
 }
 
 impl<C: ClientState<W>, W: WorkloadState> State for CloseLoopWorker<W, C> {
-    type Send = C::Send;
+    type Effect = C::Effect;
     type Output = anyhow::Result<()>;
 
-    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, since_start: Duration) -> Action<Self::Effect, Self::Output> {
         if self.submitted.is_none() {
             let Some((op, metadata)) = self.workload.next_op() else {
-                return Proceed::Output(Ok(()));
+                return Action::Output(Ok(()));
             };
             self.client.submit(op);
             self.submitted = Some(metadata)
         }
         match self.client.proceed(since_start) {
-            Proceed::Pending(tick_after) => {
+            Action::Pending(tick_after) => {
                 if tick_after.is_none() {
                     tracing::warn!("liveness issue detected in close loop worker")
                 }
-                Proceed::Pending(tick_after)
+                Action::Pending(tick_after)
             }
-            Proceed::Send(send) => Proceed::Send(send),
-            Proceed::Output((_, res)) => {
+            Action::Perform(send) => Action::Perform(send),
+            Action::Output((_, res)) => {
                 let Some(metadata) = self.submitted.take() else {
                     unimplemented!("multiple outputs to close loop worker")
                 };
                 if let Err(err) = self.workload.complete(metadata, res) {
-                    return Proceed::Output(Err(err));
+                    return Action::Output(Err(err));
                 }
                 self.proceed(since_start)
             }
@@ -105,10 +105,10 @@ impl<W: WorkloadState, C> OpenLoopWorker<W, C> {
 }
 
 impl<W: WorkloadState, C: ClientState<W>> State for OpenLoopWorker<W, C> {
-    type Send = C::Send;
+    type Effect = C::Effect;
     type Output = anyhow::Result<()>;
 
-    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, since_start: Duration) -> Action<Self::Effect, Self::Output> {
         if let Some(next_submit) = &mut self.next_submit {
             let now = Instant::now();
             while *next_submit <= now {
@@ -130,18 +130,18 @@ impl<W: WorkloadState, C: ClientState<W>> State for OpenLoopWorker<W, C> {
         // the only exception is when `self.workload` is running out of operations. we
         // just let `self.client` receives a false positive `proceed` call in this case
         match self.client.proceed(since_start) {
-            Proceed::Pending(tick_after) => Proceed::Pending(earliest([
+            Action::Pending(tick_after) => Action::Pending(earliest([
                 tick_after,
                 self.next_submit
                     .map(|at| at.saturating_duration_since(Instant::now())),
             ])),
-            Proceed::Send(send) => Proceed::Send(send),
-            Proceed::Output((seq, res)) => {
+            Action::Perform(send) => Action::Perform(send),
+            Action::Output((seq, res)) => {
                 let Some(metadata) = self.submitted.remove(&seq) else {
                     unimplemented!("output for unknown seq {seq}")
                 };
                 if let Err(err) = self.workload.complete(metadata, res) {
-                    return Proceed::Output(Err(err));
+                    return Action::Output(Err(err));
                 }
                 self.proceed(since_start)
             }

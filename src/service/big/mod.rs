@@ -9,19 +9,20 @@ use lru::LruCache;
 use tokio_util::bytes::Bytes;
 
 use crate::{
+    Never,
     app::DataShardingExecuteState,
     crypto::{DigestHash, UpdateHash},
     replication::ReplicationState,
-    state::{Proceed, State, earliest},
+    state::{Action, State, earliest},
     workload::NanoLatencies,
 };
 
 use crate::app::{DataShardingApp, DataShardingExecuteOutput};
 
-use self::storage::{Key, ShardedStorage, StateVersion, StorageState, StorageStateOutput};
+use self::storage::{Key, StateVersion, StorageState, StorageStateEffect, StorageStateOutput};
 
 use super::{
-    AppProtocol, ClientId, ClientSeq, Message, Output, Reply, Request, Send, ServiceState,
+    AppProtocol, ClientId, ClientSeq, Effect, Message, Reply, Request, ServiceState, Store,
 };
 
 pub mod storage;
@@ -32,11 +33,8 @@ mod tests;
 
 const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
-pub struct BigService<
-    A: DataShardingApp,
-    R: ReplicationState<BigServiceLog<A, S>>,
-    S: StorageState = ShardedStorage,
-> {
+pub struct BigService<A: DataShardingApp, R: ReplicationState<BigServiceLog<A, S>>, S: StorageState>
+{
     config: ServiceConfig,
     // generic sub states
     app: A,
@@ -64,7 +62,7 @@ pub struct ServiceConfig {
 
 pub enum BigServiceLog<A: AppProtocol, S: StorageState> {
     Request(Request<A::Op>),
-    StorageOrderedMessage(S::OrderedMessage),
+    StorageOrder(S::OrderedMessage),
 }
 
 struct Executing<E, M> {
@@ -99,9 +97,10 @@ impl<A: DataShardingApp, R: ReplicationState<BigServiceLog<A, S>>, S: StorageSta
     }
 }
 
-pub enum ServiceSend<R: State, S: State> {
-    Replication(R::Send),
-    Storage(S::Send),
+pub enum ServiceEffect<R: State, S: StorageState> {
+    Replication(R::Effect),
+    StorageSend(S::StorageSend),
+    Store(Store),
 }
 
 // direct generics (instead of R::Message, S::Message) because derive Encode and
@@ -122,16 +121,16 @@ where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
 {
-    type ServiceSend = ServiceSend<R, S>;
+    type ServiceEffect = ServiceEffect<R, S>;
     type ServiceMessage = ServiceMessage<R::Message, S::Message>;
     type Metadata = R::Metadata;
 
-    fn read_ok(&mut self, key: String, value: Bytes) {
-        self.storage.read_ok(key, value)
+    fn put_complete(&mut self, key: String, value: Bytes) {
+        self.storage.read_complete(key, value)
     }
 
-    fn write_ok(&mut self, key: String) {
-        self.storage.write_ok(key)
+    fn get_complete(&mut self, key: String) {
+        self.storage.write_complete(key)
     }
 }
 
@@ -143,25 +142,25 @@ where
     R::Metadata: Clone,
     Reply<A::Res, R::Metadata>: Clone,
 {
-    type Send = Send<Reply<A::Res, R::Metadata>, <Self as ServiceState<A>>::ServiceSend>;
-    type Output = Output;
-    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+    type Effect = Effect<Reply<A::Res, R::Metadata>, <Self as ServiceState<A>>::ServiceEffect>;
+    type Output = Never;
+    fn proceed(&mut self, since_start: Duration) -> Action<Self::Effect, Self::Output> {
         if let Some((client_id, reply)) = self.resend_replies.pop() {
-            return Proceed::Send(Send::Reply(client_id, reply));
+            return Action::Perform(Effect::Reply(client_id, reply));
         }
 
         let mut earliest_tick_after = None;
 
         while self.executing.len() <= self.config.executing_buffer_size {
             match self.replication.proceed(since_start) {
-                Proceed::Pending(tick_after) => {
+                Action::Pending(tick_after) => {
                     earliest_tick_after = earliest([tick_after, earliest_tick_after]);
                     break;
                 }
-                Proceed::Send(send) => {
-                    return Proceed::Send(Send::Intermediate(ServiceSend::Replication(send)));
+                Action::Perform(send) => {
+                    return Action::Perform(Effect::Intermediate(ServiceEffect::Replication(send)));
                 }
-                Proceed::Output(replicated) => {
+                Action::Output(replicated) => {
                     let start = Instant::now();
                     for log in replicated.logs {
                         match log {
@@ -181,7 +180,7 @@ where
                                     start,
                                 })
                             }
-                            BigServiceLog::StorageOrderedMessage(message) => {
+                            BigServiceLog::StorageOrder(message) => {
                                 self.storage.receive_ordered(message)
                             }
                         }
@@ -192,25 +191,22 @@ where
 
         loop {
             match self.storage.proceed(since_start) {
-                Proceed::Pending(tick_after) => {
+                Action::Pending(tick_after) => {
                     earliest_tick_after = earliest([tick_after, earliest_tick_after]);
                     break;
                 }
-                Proceed::Send(send) => {
-                    return Proceed::Send(Send::Intermediate(ServiceSend::Storage(send)));
+                Action::Perform(StorageStateEffect::Send(send)) => {
+                    return Action::Perform(Effect::Intermediate(ServiceEffect::StorageSend(send)));
                 }
-                Proceed::Output(StorageStateOutput::Read(key)) => {
-                    return Proceed::Output(Output::Read(key));
+                Action::Perform(StorageStateEffect::Store(store)) => {
+                    return Action::Perform(Effect::Intermediate(ServiceEffect::Store(store)));
                 }
-                Proceed::Output(StorageStateOutput::Write(key, value)) => {
-                    return Proceed::Output(Output::Write(key, value));
-                }
-                Proceed::Output(StorageStateOutput::OrderedSend(gossip)) => {
+                Action::Perform(StorageStateEffect::Order(message)) => {
                     self.replication
-                        .submit(BigServiceLog::StorageOrderedMessage(gossip));
+                        .submit(BigServiceLog::StorageOrder(message));
                     return self.proceed(since_start);
                 }
-                Proceed::Output(StorageStateOutput::Fetched(key, bytes)) => {
+                Action::Output(StorageStateOutput::Fetched(key, bytes)) => {
                     let value = bytes.map(|bytes| {
                         let (value, _len) =
                             bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
@@ -223,11 +219,11 @@ where
                         .execute
                         .install(key, value)
                 }
-                Proceed::Output(StorageStateOutput::Bumped) => {
+                Action::Output(StorageStateOutput::Bumped) => {
                     assert!(self.bumping);
                     self.bumping = false
                 }
-                Proceed::Output(StorageStateOutput::Skipped(num_skipped)) => {
+                Action::Output(StorageStateOutput::Skipped(num_skipped)) => {
                     self.num_skip += num_skipped
                 }
             }
@@ -293,12 +289,12 @@ where
                         metadata: executing.metadata,
                     };
                     self.replies.insert(executing.client_id, reply.clone());
-                    return Proceed::Send(Send::Reply(executing.client_id, reply));
+                    return Action::Perform(Effect::Reply(executing.client_id, reply));
                 }
             }
         }
 
-        Proceed::Pending(earliest_tick_after)
+        Action::Pending(earliest_tick_after)
     }
 
     type Message = Message<Request<A::Op>, <Self as ServiceState<A>>::ServiceMessage>;

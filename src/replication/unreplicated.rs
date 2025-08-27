@@ -4,7 +4,7 @@ use crate::{
     Never,
     app::AppProtocol,
     service::{ClientId, ClientSeq, Reply, Request},
-    state::{Proceed, State},
+    state::{Action, State},
     workload::ClientState,
 };
 
@@ -60,12 +60,12 @@ impl<A: AppProtocol> State for UnreplicatedClient<A>
 where
     A::Op: Clone,
 {
-    type Send = (Dest, Request<A::Op>);
+    type Effect = (Dest, Request<A::Op>);
     type Output = (ClientSeq, A::Res);
-    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, since_start: Duration) -> Action<Self::Effect, Self::Output> {
         if let Some(reply) = self.receive_buffer.pop() {
             match self.submits.remove(&reply.client_seq) {
-                Some(_) => return Proceed::Output((reply.client_seq, reply.res)),
+                Some(_) => return Action::Output((reply.client_seq, reply.res)),
                 None => return self.proceed(since_start),
             }
         }
@@ -83,17 +83,17 @@ where
                 client_seq: seq,
                 op,
             };
-            return Proceed::Send((Dest::One(0), request));
+            return Action::Perform((Dest::One(0), request));
         }
 
         loop {
             let Some((&seq, submit)) = self.submits.first_key_value() else {
-                break Proceed::Pending(None);
+                break Action::Pending(None);
             };
             if submit.timeout_at <= since_start {
                 self.submits.remove(&seq);
             } else {
-                break Proceed::Pending(Some(submit.timeout_at - since_start));
+                break Action::Pending(Some(submit.timeout_at - since_start));
             }
         }
     }
@@ -131,13 +131,13 @@ impl<T> ReplicationState<T> for UnreplicatedReplica<T> {
 }
 
 impl<T> State for UnreplicatedReplica<T> {
-    type Send = Never;
+    type Effect = Never;
     type Output = Replicated<T, ()>;
-    fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, _since_start: Duration) -> Action<Self::Effect, Self::Output> {
         if self.submit_buffer.is_empty() {
-            Proceed::Pending(None)
+            Action::Pending(None)
         } else {
-            Proceed::Output(Replicated {
+            Action::Output(Replicated {
                 logs: take(&mut self.submit_buffer),
                 metadata: (),
             })

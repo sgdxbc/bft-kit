@@ -15,8 +15,8 @@ use tokio_util::bytes::Bytes;
 use crate::{
     Never,
     replication::ReplicaIndex,
-    service::ServiceIndex,
-    state::{Proceed, State},
+    service::{ServiceIndex, Store},
+    state::{Action, State},
 };
 
 use super::BINCODE_CONFIG;
@@ -24,32 +24,38 @@ use super::BINCODE_CONFIG;
 pub type StateVersion = u64;
 pub type Key = H256;
 
-pub trait StorageState: State<Output = StorageStateOutput<Self::OrderedMessage>> {
+pub trait StorageState:
+    State<Effect = StorageStateEffect<Self>, Output = StorageStateOutput>
+{
+    type StorageSend;
+
     fn fetch(&mut self, key: Key);
     fn bump(&mut self, writes: HashMap<Key, Bytes>);
     #[allow(unused_variables)]
     fn will_fetch(&mut self, key: Key) {}
 
-    fn read_ok(&mut self, key: String, value: Bytes);
-    fn write_ok(&mut self, key: String);
+    fn read_complete(&mut self, key: String, value: Bytes);
+    fn write_complete(&mut self, key: String);
 
     type OrderedMessage;
     fn receive_ordered(&mut self, message: Self::OrderedMessage);
 }
 
-pub enum StorageStateOutput<G> {
+pub enum StorageStateEffect<S: StorageState + ?Sized> {
+    Send(S::StorageSend),
+    Order(S::OrderedMessage),
+    Store(Store),
+}
+
+pub enum StorageStateOutput {
     Fetched(Key, Option<Bytes>),
     Bumped,
     Skipped(StateVersion), // number of versions to skip execute
-
-    Read(String),
-    Write(String, Bytes),
-
-    OrderedSend(G),
 }
 
 pub struct FullReplicationStorage {
-    outputs: VecDeque<StorageStateOutput<Never>>,
+    outputs: VecDeque<StorageStateOutput>,
+    effects: Vec<StorageStateEffect<Self>>,
     keys: HashSet<Key>,
     writing_keys: HashSet<String>,
 }
@@ -58,6 +64,7 @@ impl FullReplicationStorage {
     pub fn new() -> Self {
         Self {
             outputs: Default::default(),
+            effects: Default::default(),
             keys: Default::default(),
             writing_keys: Default::default(),
         }
@@ -71,14 +78,16 @@ impl Default for FullReplicationStorage {
 }
 
 impl StorageState for FullReplicationStorage {
+    type StorageSend = Never;
+
     fn fetch(&mut self, key: Key) {
         if !self.keys.contains(&key) {
             self.outputs
                 .push_back(StorageStateOutput::Fetched(key, None));
             return;
         }
-        self.outputs
-            .push_back(StorageStateOutput::Read(format!("{key:x}")))
+        self.effects
+            .push(StorageStateEffect::Store(Store::Get(format!("{key:x}"))))
     }
 
     fn bump(&mut self, writes: HashMap<Key, Bytes>) {
@@ -86,22 +95,22 @@ impl StorageState for FullReplicationStorage {
             self.keys.insert(key);
             let key = format!("{key:x}");
             self.writing_keys.insert(key.clone());
-            self.outputs
-                .push_back(StorageStateOutput::Write(key, value))
+            self.effects
+                .push(StorageStateEffect::Store(Store::Put(key, value)))
         }
         if self.writing_keys.is_empty() {
             self.outputs.push_back(StorageStateOutput::Bumped)
         }
     }
 
-    fn read_ok(&mut self, key: String, value: Bytes) {
+    fn read_complete(&mut self, key: String, value: Bytes) {
         self.outputs.push_back(StorageStateOutput::Fetched(
             key.parse().unwrap(),
             Some(value),
         ))
     }
 
-    fn write_ok(&mut self, key: String) {
+    fn write_complete(&mut self, key: String) {
         let removed = self.writing_keys.remove(&key);
         assert!(removed);
         if self.writing_keys.is_empty() {
@@ -116,13 +125,16 @@ impl StorageState for FullReplicationStorage {
 }
 
 impl State for FullReplicationStorage {
-    type Send = Never;
-    type Output = StorageStateOutput<Never>;
+    type Effect = StorageStateEffect<Self>;
+    type Output = StorageStateOutput;
 
-    fn proceed(&mut self, _since_start: std::time::Duration) -> Proceed<Self::Send, Self::Output> {
-        match self.outputs.pop_front() {
-            Some(output) => Proceed::Output(output),
-            None => Proceed::Pending(None),
+    fn proceed(&mut self, _since_start: std::time::Duration) -> Action<Self::Effect, Self::Output> {
+        if let Some(output) = self.outputs.pop_front() {
+            return Action::Output(output);
+        }
+        match self.effects.pop() {
+            Some(effect) => Action::Perform(effect),
+            None => Action::Pending(None),
         }
     }
 
@@ -186,7 +198,7 @@ pub struct ShardedStorage {
     archive_writing: HashSet<String>, // in `{version}.{stripe_index}-{stripe_shard_index}` format
     reorder_archive_pushes: HashMap<(StateVersion, StripeIndex), Vec<message::ArchivePush>>,
 
-    proceeds: VecDeque<Proceed<ShardedStorageSend, StorageStateOutput<message::VoteArchive>>>,
+    actions: VecDeque<Action<StorageStateEffect<Self>, StorageStateOutput>>,
 }
 
 pub struct ShardedStorageConfig {
@@ -232,7 +244,7 @@ impl ShardedStorage {
             archive_reading: Default::default(),
             archive_writing: Default::default(),
             reorder_archive_pushes: Default::default(),
-            proceeds: Default::default(),
+            actions: Default::default(),
             config,
         }
     }
@@ -420,6 +432,8 @@ impl ShardedStorageConfig {
 }
 
 impl StorageState for ShardedStorage {
+    type StorageSend = ShardedStorageSend;
+
     fn fetch(&mut self, key: Key) {
         if self.should_store(&key) {
             self.read_key(self.node_index(), self.version, key)
@@ -432,8 +446,11 @@ impl StorageState for ShardedStorage {
                 node_index: self.node_index(),
             };
             let dest = Dest::Multi(self.config.nodes_of(&key).collect());
-            self.proceeds
-                .push_back(Proceed::Send((dest, ShardedStorageMessage::Query(query))))
+            self.actions
+                .push_back(Action::Perform(StorageStateEffect::Send((
+                    dest,
+                    ShardedStorageMessage::Query(query),
+                ))))
         }
     }
 
@@ -451,20 +468,22 @@ impl StorageState for ShardedStorage {
                 self.version_table.add(key, self.version, &self.config);
                 let key = format!("{key:x}.{}", self.version);
                 self.bump_writing.insert(key.clone());
-                self.proceeds
-                    .push_back(Proceed::Output(StorageStateOutput::Write(key, bytes)))
+                self.actions
+                    .push_back(Action::Perform(StorageStateEffect::Store(Store::Put(
+                        key, bytes,
+                    ))))
             }
         }
         if self.bump_writing.is_empty() {
-            self.proceeds
-                .push_back(Proceed::Output(StorageStateOutput::Bumped))
+            self.actions
+                .push_back(Action::Output(StorageStateOutput::Bumped))
         }
         if self.should_vote_archive() {
             self.vote_archive()
         }
     }
 
-    fn read_ok(&mut self, key: String, value: Bytes) {
+    fn read_complete(&mut self, key: String, value: Bytes) {
         let read_for = self.read_for.remove(&key);
         let archive_reading = self.archive_reading.remove(&key);
         let (key, _version) = key.split_once('.').unwrap();
@@ -472,21 +491,21 @@ impl StorageState for ShardedStorage {
 
         if let Some(targets) = read_for {
             for (node_index, version) in targets {
-                let proceed = if self.node_indices.contains(&node_index) {
+                let action = if self.node_indices.contains(&node_index) {
                     assert_eq!(version, self.version); // or relax on this, just continue?
-                    Proceed::Output(StorageStateOutput::Fetched(key, Some(value.clone())))
+                    Action::Output(StorageStateOutput::Fetched(key, Some(value.clone())))
                 } else {
                     let query_ok = message::QueryOk {
                         version,
                         key: key.0,
                         bytes: Some(value.to_vec()),
                     };
-                    Proceed::Send((
+                    Action::Perform(StorageStateEffect::Send((
                         Dest::One(node_index),
                         ShardedStorageMessage::QueryOk(query_ok),
-                    ))
+                    )))
                 };
-                self.proceeds.push_back(proceed)
+                self.actions.push_back(action)
             }
         }
 
@@ -509,24 +528,25 @@ impl StorageState for ShardedStorage {
                     group_index,
                     values: self.stripe_group_values[&group_index].clone(),
                 };
-                self.proceeds.push_back(Proceed::Send((
-                    Dest::Multi(
-                        self.config
-                            .archive_nodes_of_stripe(stripe_index)
-                            .filter(|node_index| !self.node_indices.contains(node_index))
-                            .collect(),
-                    ),
-                    ShardedStorageMessage::ArchivePush(archive_push),
-                )));
+                self.actions
+                    .push_back(Action::Perform(StorageStateEffect::Send((
+                        Dest::Multi(
+                            self.config
+                                .archive_nodes_of_stripe(stripe_index)
+                                .filter(|node_index| !self.node_indices.contains(node_index))
+                                .collect(),
+                        ),
+                        ShardedStorageMessage::ArchivePush(archive_push),
+                    ))));
                 self.may_finish_archive_stripe()
             }
         }
     }
 
-    fn write_ok(&mut self, key: String) {
+    fn write_complete(&mut self, key: String) {
         if self.bump_writing.remove(&key) && self.bump_writing.is_empty() {
-            self.proceeds
-                .push_back(Proceed::Output(StorageStateOutput::Bumped))
+            self.actions
+                .push_back(Action::Output(StorageStateOutput::Bumped))
         }
         if self.archive_writing.remove(&key) && self.archive_writing.is_empty() {
             self.may_finish_archive_stripe()
@@ -549,14 +569,14 @@ impl StorageState for ShardedStorage {
 }
 
 impl State for ShardedStorage {
-    type Send = ShardedStorageSend;
-    type Output = StorageStateOutput<message::VoteArchive>;
+    type Effect = StorageStateEffect<Self>;
+    type Output = StorageStateOutput;
 
-    fn proceed(&mut self, _since_start: Duration) -> Proceed<Self::Send, Self::Output> {
-        if let Some(proceed) = self.proceeds.pop_front() {
+    fn proceed(&mut self, _since_start: Duration) -> Action<Self::Effect, Self::Output> {
+        if let Some(proceed) = self.actions.pop_front() {
             return proceed;
         }
-        Proceed::Pending(None)
+        Action::Pending(None)
     }
 
     type Message = ShardedStorageMessage;
@@ -571,8 +591,8 @@ impl State for ShardedStorage {
             ShardedStorageMessage::QueryOk(fetch_ok) => {
                 let key = fetch_ok.key.into();
                 if fetch_ok.version == self.version && self.querying.remove(&key) {
-                    self.proceeds
-                        .push_back(Proceed::Output(StorageStateOutput::Fetched(
+                    self.actions
+                        .push_back(Action::Output(StorageStateOutput::Fetched(
                             key,
                             fetch_ok.bytes.map(Into::into),
                         )))
@@ -637,28 +657,28 @@ impl ShardedStorage {
 
     fn read_key(&mut self, node_index: NodeIndex, version: StateVersion, key: Key) {
         let Some(found_version) = self.version_table.find(&key, version, &self.config) else {
-            let proceed = if self.node_indices.contains(&node_index) {
-                Proceed::Output(StorageStateOutput::Fetched(key, None))
+            let action = if self.node_indices.contains(&node_index) {
+                Action::Output(StorageStateOutput::Fetched(key, None))
             } else {
                 let query_ok = message::QueryOk {
                     version,
                     key: key.0,
                     bytes: None,
                 };
-                Proceed::Send((
+                Action::Perform(StorageStateEffect::Send((
                     Dest::One(node_index),
                     ShardedStorageMessage::QueryOk(query_ok),
-                ))
+                )))
             };
-            self.proceeds.push_back(proceed);
+            self.actions.push_back(action);
             return;
         };
 
         let key = format!("{found_version}.{key:x}");
         let targets = self.read_for.entry(key.clone()).or_default();
         if targets.is_empty() {
-            self.proceeds
-                .push_back(Proceed::Output(StorageStateOutput::Read(key)))
+            self.actions
+                .push_back(Action::Perform(StorageStateEffect::Store(Store::Get(key))))
         }
 
         let previous_version = targets.entry(node_index).or_default();
@@ -675,10 +695,8 @@ impl ShardedStorage {
             version: self.version,
             node_indices: self.node_indices.clone(),
         };
-        self.proceeds
-            .push_back(Proceed::Output(StorageStateOutput::OrderedSend(
-                vote_archive,
-            )));
+        self.actions
+            .push_back(Action::Perform(StorageStateEffect::Order(vote_archive)));
         for &node_index in &self.node_indices {
             self.node_vote_archive_versions[node_index as usize] = self.version
         }
@@ -735,8 +753,8 @@ impl ShardedStorage {
             }
             let key = format!("{version}.{key:x}");
             self.archive_reading.insert(key.clone());
-            self.proceeds
-                .push_back(Proceed::Output(StorageStateOutput::Read(key)))
+            self.actions
+                .push_back(Action::Perform(StorageStateEffect::Store(Store::Get(key))))
         }
         self.may_finish_archive_stripe()
     }
@@ -783,11 +801,11 @@ impl ShardedStorage {
                     self.archiving_version, self.archiving_stripe_index
                 );
                 self.archive_writing.insert(key.clone());
-                self.proceeds
-                    .push_back(Proceed::Output(StorageStateOutput::Write(
+                self.actions
+                    .push_back(Action::Perform(StorageStateEffect::Store(Store::Put(
                         key,
                         Bytes::copy_from_slice(shards[shard_index]),
-                    )))
+                    ))))
             }
             if !parity_indices.is_empty() {
                 let mut encoder = ReedSolomonEncoder::new(
@@ -809,11 +827,11 @@ impl ShardedStorage {
                         self.archiving_version, self.archiving_stripe_index
                     );
                     self.archive_writing.insert(key.clone());
-                    self.proceeds
-                        .push_back(Proceed::Output(StorageStateOutput::Write(
+                    self.actions
+                        .push_back(Action::Perform(StorageStateEffect::Store(Store::Put(
                             key,
                             Bytes::copy_from_slice(parity_shard),
-                        )))
+                        ))))
                 }
             }
         } else {
@@ -827,10 +845,11 @@ impl ShardedStorage {
                 version: self.archiving_version,
                 node_indices: self.node_indices.clone(),
             };
-            self.proceeds.push_back(Proceed::Send((
-                Dest::All,
-                ShardedStorageMessage::Archived(archived),
-            )));
+            self.actions
+                .push_back(Action::Perform(StorageStateEffect::Send((
+                    Dest::All,
+                    ShardedStorageMessage::Archived(archived),
+                ))));
             for &node_index in &self.node_indices {
                 self.node_archived_versions[node_index as usize] = self.archiving_version
             }
@@ -854,8 +873,8 @@ impl ShardedStorage {
         self.quorum_archived_version = quorum_archived_version;
 
         if self.quorum_archived_version > self.version {
-            self.proceeds
-                .push_back(Proceed::Output(StorageStateOutput::Skipped(
+            self.actions
+                .push_back(Action::Output(StorageStateOutput::Skipped(
                     self.quorum_archived_version - self.version,
                 )));
             self.version = self.quorum_archived_version

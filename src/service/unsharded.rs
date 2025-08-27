@@ -3,15 +3,13 @@ use std::{
     time::Duration,
 };
 
-use tokio_util::bytes::Bytes;
-
 use crate::{
     Never,
     app::AppState,
-    state::{Proceed, State},
+    state::{Action, State},
 };
 
-use super::{AppProtocol, ClientId, Message, Send, ServiceState};
+use super::{AppProtocol, ClientId, Effect, Message, ServiceState};
 
 type Request<A> = super::Request<<A as AppProtocol>::Op>;
 type Reply<A, R> = super::Reply<
@@ -30,7 +28,7 @@ pub struct UnshardedService<A: AppState, R: ReplicationState<A>> {
     replicated: Option<Replicated<A, R>>,
 
     submit_buffer: Vec<Request<A>>,
-    send_buffer: Vec<Send<Reply<A, R>, R::Send>>,
+    send_buffer: Vec<Effect<Reply<A, R>, R::Effect>>,
 }
 
 type Replicated<A, R> = (
@@ -56,17 +54,9 @@ where
     R::Metadata: Clone,
     Reply<A, R>: Clone,
 {
-    type ServiceSend = R::Send;
+    type ServiceEffect = R::Effect;
     type ServiceMessage = R::Message;
     type Metadata = R::Metadata;
-
-    fn read_ok(&mut self, _key: String, _value: Bytes) {
-        unreachable!()
-    }
-
-    fn write_ok(&mut self, _key: String) {
-        unreachable!()
-    }
 }
 
 impl<A: AppState, R: ReplicationState<A>> State for UnshardedService<A, R>
@@ -75,11 +65,11 @@ where
     Reply<A, R>: Clone,
     // ServiceMessage<R, A>: std::fmt::Debug,
 {
-    type Send = Send<Reply<A, R>, R::Send>;
+    type Effect = Effect<Reply<A, R>, R::Effect>;
     type Output = Never;
-    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output> {
+    fn proceed(&mut self, since_start: Duration) -> Action<Self::Effect, Self::Output> {
         if let Some(send) = self.send_buffer.pop() {
-            return Proceed::Send(send);
+            return Action::Perform(send);
         }
 
         if let Some((requests, metadata)) = &mut self.replicated {
@@ -101,16 +91,16 @@ where
             // in some cases `replicated` may contain plenty of requests, also, some kinds
             // of the `execute` above could be costly
             // return immediately without any batch processing to optimize for latency
-            return Proceed::Send(Send::Reply(request.client_id, reply));
+            return Action::Perform(Effect::Reply(request.client_id, reply));
         }
 
         while let Some(request) = self.submit_buffer.pop() {
             self.replication.submit(request)
         }
         match self.replication.proceed(since_start) {
-            Proceed::Pending(tick_after) => Proceed::Pending(tick_after),
-            Proceed::Send(send) => Proceed::Send(Send::Intermediate(send)),
-            Proceed::Output(replicated) => {
+            Action::Pending(tick_after) => Action::Pending(tick_after),
+            Action::Perform(send) => Action::Perform(Effect::Intermediate(send)),
+            Action::Output(replicated) => {
                 let replaced = self
                     .replicated
                     .replace((replicated.logs.into(), replicated.metadata));
@@ -128,7 +118,7 @@ where
                 Some(reply) if reply.client_seq > request.client_seq => {}
                 Some(reply) if reply.client_seq == request.client_seq => self
                     .send_buffer
-                    .push(Send::Reply(request.client_id, reply.clone())),
+                    .push(Effect::Reply(request.client_id, reply.clone())),
                 _ => self.submit_buffer.push(request),
             },
             Message::Intermediate(message) => self.replication.receive(message),
@@ -156,7 +146,7 @@ pub mod transport {
         app::AppState,
         crypto::cert::quinn::{client_config, server_config},
         replication::ReplicaIndex,
-        state::Proceed,
+        state::Action,
         transport::{BINCODE_CONFIG, PerformSend, read_loop, run_write, trace_error},
     };
 
@@ -171,7 +161,7 @@ pub mod transport {
     where
         UnshardedService<A, R>: ServiceState<
                 A,
-                ServiceSend = R::Send,
+                ServiceEffect = R::Effect,
                 Output = Never,
                 ServiceMessage = R::Message,
                 Metadata = R::Metadata,
@@ -179,7 +169,7 @@ pub mod transport {
         Request<A>: Decode<()>,
         R::Message: Decode<()>,
         Reply<A, R>: Encode,
-        HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
+        HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Effect>,
     {
         let mut endpoint = Endpoint::server(server_config(), addrs[replica_index as usize])?;
         endpoint.set_default_client_config(client_config());
@@ -342,14 +332,14 @@ pub mod transport {
     ) -> anyhow::Result<Option<Duration>>
     where
         UnshardedService<A, R>:
-            ServiceState<A, ServiceSend = R::Send, Output = Never, Metadata = R::Metadata>,
+            ServiceState<A, ServiceEffect = R::Effect, Output = Never, Metadata = R::Metadata>,
         Reply<A, R>: Encode,
-        HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Send>,
+        HashMap<ReplicaIndex, (Connection, JoinHandle<()>)>: PerformSend<R::Effect>,
     {
         loop {
             match service.proceed(since_start) {
-                Proceed::Pending(tick_after) => break Ok(tick_after),
-                Proceed::Send(Send::Reply(client_id, reply)) => {
+                Action::Pending(tick_after) => break Ok(tick_after),
+                Action::Perform(Effect::Reply(client_id, reply)) => {
                     let Some((connection, _)) = client_table.get(&client_id) else {
                         tracing::warn!(%client_id, "client connection not found");
                         continue;
@@ -362,7 +352,7 @@ pub mod transport {
                         ),
                     ));
                 }
-                Proceed::Send(Send::Intermediate(send)) => {
+                Action::Perform(Effect::Intermediate(send)) => {
                     replica_table.perform(send, write_tracker)?
                 }
             }

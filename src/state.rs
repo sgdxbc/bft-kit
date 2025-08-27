@@ -3,17 +3,17 @@ use std::time::Duration;
 use crate::Never;
 
 pub trait State {
-    type Send;
+    type Effect;
     type Output;
-    fn proceed(&mut self, since_start: Duration) -> Proceed<Self::Send, Self::Output>;
+    fn proceed(&mut self, since_start: Duration) -> Action<Self::Effect, Self::Output>;
 
     type Message;
     fn receive(&mut self, message: Self::Message);
 }
 
-pub enum Proceed<S, O = Never> {
+pub enum Action<E, O = Never> {
     Pending(Option<Duration>),
-    Send(S),
+    Perform(E),
     Output(O),
 }
 
