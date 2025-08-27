@@ -174,6 +174,7 @@ dependencies = [
  "rand 0.9.0",
  "rand_distr",
  "rcgen",
+ "reed-solomon-simd",
  "rocksdb",
  "secp256k1",
  "sha2",
@@ -931,6 +932,12 @@ dependencies = [
  "rustc-hex",
  "static_assertions",
 ]
+
+[[package]]
+name = "fixedbitset"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
 name = "flate2"
@@ -2082,12 +2089,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "readme-rustdocifier"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ad765b21a08b1a8e5cdce052719188a23772bcbefb3c439f0baaf62c56ceac"
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b8c0c260b63a8219631167be35e6a988e9554dbd323f8bd08439c8ed1302bd1"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "reed-solomon-simd"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab6badd4f4b9c93832eb3707431e8e7bea282fae96801312f0990d48b030f8c5"
+dependencies = [
+ "fixedbitset",
+ "readme-rustdocifier",
 ]
 
 [[package]]

@@ -14,17 +14,16 @@ fn print_active_placement() {
         num_faulty_node: 3,
         num_active_copy: 7,
         num_stripe: 1000,
-        repair_threshold: 1,
         bypass_vote: true,
     };
-    println!("{:?}", config.nodes_of_stripe(0));
-    println!("{:?}", config.nodes_of_stripe(1));
-    println!("{:?}", config.nodes_of_stripe(2));
-    println!("{:?}", config.nodes_of_stripe(3));
+    println!("{:?}", config.nodes_of_group(0).collect::<Vec<_>>());
+    println!("{:?}", config.nodes_of_group(1).collect::<Vec<_>>());
+    println!("{:?}", config.nodes_of_group(2).collect::<Vec<_>>());
+    println!("{:?}", config.nodes_of_group(3).collect::<Vec<_>>());
 
     let mut node_overheads = [0; 10];
     for index in 0..1000 {
-        for node_index in config.nodes_of_stripe(index) {
+        for node_index in config.nodes_of_group(index) {
             node_overheads[node_index as usize] += 1
         }
     }
@@ -52,10 +51,9 @@ fn idle_pending() {
         num_faulty_node: 0,
         num_active_copy: 1,
         num_stripe: 1,
-        repair_threshold: 1,
         bypass_vote: false,
     };
-    let storage = ShardedStorage::new(storage_config, 0, [0].into());
+    let storage = ShardedStorage::new(storage_config, [0].into());
     let service = BigService::new(
         app,
         UnreplicatedReplica::new(),
@@ -163,10 +161,9 @@ fn one_service() {
         num_faulty_node: 0,
         num_active_copy: 1,
         num_stripe: 1,
-        repair_threshold: 1,
         bypass_vote: false,
     };
-    let storage = ShardedStorage::new(storage_config, 0, [0].into());
+    let storage = ShardedStorage::new(storage_config, [0].into());
     let service = BigService::new(
         app,
         UnreplicatedReplica::new(),
@@ -208,10 +205,9 @@ impl SystemState {
                         num_faulty_node: num_faulty,
                         num_active_copy: 1,
                         num_stripe: 1,
-                        repair_threshold: 1,
                         bypass_vote: true,
                     };
-                    let storage = ShardedStorage::new(storage_config, index, [index].into());
+                    let storage = ShardedStorage::new(storage_config, [index].into());
                     (
                         BigService::new(
                             app,

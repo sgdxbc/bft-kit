@@ -168,7 +168,7 @@ async fn service_big(
             logs.map(BigServiceLog::Request),
             configs.get("in-memory.batch-size")?,
         );
-        let storage = ShardedStorage::new(configs.extract()?, index, [index].into());
+        let storage = ShardedStorage::new(configs.extract()?, [index].into());
         let service = BigService::new(app, replica, storage, service_config);
         big::transport::run_service(service, index, addrs, cancel, false).await
     } else {
