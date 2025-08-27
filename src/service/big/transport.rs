@@ -30,7 +30,7 @@ use crate::{
 
 use super::{
     BigService, BigServiceLog, ServiceEffect, ServiceMessage,
-    storage::{Dest, ShardedStorageSend, StorageState},
+    storage::{Dest, ShardedStorageSend, StorageState, StorageStateEffect},
 };
 
 struct ConnectionTables {
@@ -256,8 +256,8 @@ where
                 tracing::trace!(%replica_index, ?message);
                 service.receive(Message::Intermediate(ServiceMessage::Storage(message)))
             }
-            Event::StoreRead(key, value) => service.put_complete(key, value),
-            Event::StoreWrite(key) => service.get_complete(key),
+            Event::StoreRead(key, value) => service.get_complete(key, value),
+            Event::StoreWrite(key) => service.put_complete(key),
             Event::Tick => {}
         }
         tick_after = service_proceed(
@@ -351,11 +351,13 @@ where
             Action::Perform(Effect::Intermediate(ServiceEffect::Replication(send))) => {
                 connection_tables.replica.perform(send, write_tracker)?
             }
-            Action::Perform(Effect::Intermediate(ServiceEffect::StorageSend(send))) => {
-                connection_tables.storage.perform(send, write_tracker)?
-            }
+            Action::Perform(Effect::Intermediate(ServiceEffect::Storage(
+                StorageStateEffect::Send(send),
+            ))) => connection_tables.storage.perform(send, write_tracker)?,
 
-            Action::Perform(Effect::Intermediate(ServiceEffect::Store(store))) => {
+            Action::Perform(Effect::Intermediate(ServiceEffect::Storage(
+                StorageStateEffect::Store(store),
+            ))) => {
                 if store_command_sender.capacity() == 0 {
                     tracing::warn!("store command sender congested");
                 }
@@ -366,6 +368,8 @@ where
     }
 }
 
+// remark: current implementation only works for 1-1 mapping of replicas and
+// storage nodes; it uses the replica index as the storage node index
 impl<T: ReplicaTable> PerformSend<ShardedStorageSend> for T {
     fn perform(
         &self,

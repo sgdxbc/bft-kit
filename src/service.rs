@@ -18,11 +18,11 @@ pub trait ServiceState<A: AppProtocol>:
     type Metadata;
 
     #[allow(unused_variables)]
-    fn put_complete(&mut self, key: String, value: Bytes) {
+    fn get_complete(&mut self, key: String, value: Bytes) {
         unreachable!()
     }
     #[allow(unused_variables)]
-    fn get_complete(&mut self, key: String) {
+    fn put_complete(&mut self, key: String) {
         unreachable!()
     }
 }
@@ -39,8 +39,6 @@ pub enum Dest {
     Multi(Vec<ServiceIndex>),
     All,
 }
-
-pub type Send<M> = (Dest, M);
 
 #[derive(Debug)]
 pub enum Store {

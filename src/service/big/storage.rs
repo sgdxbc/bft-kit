@@ -25,7 +25,10 @@ pub type StateVersion = u64;
 pub type Key = H256;
 
 pub trait StorageState:
-    State<Effect = StorageStateEffect<Self>, Output = StorageStateOutput>
+    State<
+        Effect = StorageStateEffect<Self::StorageSend>,
+        Output = StorageStateOutput<Self::OrderedMessage>,
+    >
 {
     type StorageSend;
 
@@ -34,28 +37,28 @@ pub trait StorageState:
     #[allow(unused_variables)]
     fn will_fetch(&mut self, key: Key) {}
 
-    fn read_complete(&mut self, key: String, value: Bytes);
-    fn write_complete(&mut self, key: String);
+    fn get_complete(&mut self, key: String, value: Bytes);
+    fn put_complete(&mut self, key: String);
 
     type OrderedMessage;
     fn receive_ordered(&mut self, message: Self::OrderedMessage);
 }
 
-pub enum StorageStateEffect<S: StorageState + ?Sized> {
-    Send(S::StorageSend),
-    Order(S::OrderedMessage),
+pub enum StorageStateEffect<S> {
+    Send(S),
     Store(Store),
 }
 
-pub enum StorageStateOutput {
+pub enum StorageStateOutput<M> {
     Fetched(Key, Option<Bytes>),
     Bumped,
     Skipped(StateVersion), // number of versions to skip execute
+    Order(M),
 }
 
 pub struct FullReplicationStorage {
-    outputs: VecDeque<StorageStateOutput>,
-    effects: Vec<StorageStateEffect<Self>>,
+    outputs: VecDeque<StorageStateOutput<Never>>,
+    effects: Vec<StorageStateEffect<Never>>,
     keys: HashSet<Key>,
     writing_keys: HashSet<String>,
 }
@@ -103,14 +106,14 @@ impl StorageState for FullReplicationStorage {
         }
     }
 
-    fn read_complete(&mut self, key: String, value: Bytes) {
+    fn get_complete(&mut self, key: String, value: Bytes) {
         self.outputs.push_back(StorageStateOutput::Fetched(
             key.parse().unwrap(),
             Some(value),
         ))
     }
 
-    fn write_complete(&mut self, key: String) {
+    fn put_complete(&mut self, key: String) {
         let removed = self.writing_keys.remove(&key);
         assert!(removed);
         if self.writing_keys.is_empty() {
@@ -125,8 +128,8 @@ impl StorageState for FullReplicationStorage {
 }
 
 impl State for FullReplicationStorage {
-    type Effect = StorageStateEffect<Self>;
-    type Output = StorageStateOutput;
+    type Effect = StorageStateEffect<<Self as StorageState>::StorageSend>;
+    type Output = StorageStateOutput<<Self as StorageState>::OrderedMessage>;
 
     fn proceed(&mut self, _since_start: std::time::Duration) -> Action<Self::Effect, Self::Output> {
         if let Some(output) = self.outputs.pop_front() {
@@ -198,7 +201,9 @@ pub struct ShardedStorage {
     archive_writing: HashSet<String>, // in `{version}.{stripe_index}-{stripe_shard_index}` format
     reorder_archive_pushes: HashMap<(StateVersion, StripeIndex), Vec<message::ArchivePush>>,
 
-    actions: VecDeque<Action<StorageStateEffect<Self>, StorageStateOutput>>,
+    actions: VecDeque<
+        Action<StorageStateEffect<ShardedStorageSend>, StorageStateOutput<message::VoteArchive>>,
+    >,
 }
 
 pub struct ShardedStorageConfig {
@@ -267,7 +272,7 @@ impl ShardedStorageConfig {
         node_indices.iter().copied()
     }
 
-    pub fn nodes_of_group(&self, index: ActiveGroupIndex) -> impl Iterator<Item = NodeIndex> {
+    fn nodes_of_group(&self, index: ActiveGroupIndex) -> impl Iterator<Item = NodeIndex> {
         let sampled = (0..self.num_node - 1).choose_multiple(
             &mut StdRng::seed_from_u64(index as _),
             self.num_active_copy - 1,
@@ -466,7 +471,7 @@ impl StorageState for ShardedStorage {
         for (key, bytes) in writes {
             if self.should_store(&key) {
                 self.version_table.add(key, self.version, &self.config);
-                let key = format!("{key:x}.{}", self.version);
+                let key = format!("{}.{key:x}", self.version);
                 self.bump_writing.insert(key.clone());
                 self.actions
                     .push_back(Action::Perform(StorageStateEffect::Store(Store::Put(
@@ -487,10 +492,10 @@ impl StorageState for ShardedStorage {
     // a sub state machine dedicated for archiving
     // well, if major revision is unfortunately taking place, will do so
 
-    fn read_complete(&mut self, key: String, value: Bytes) {
+    fn get_complete(&mut self, key: String, value: Bytes) {
         let read_for = self.read_for.remove(&key);
         let archive_reading = self.archive_reading.remove(&key);
-        let (key, _version) = key.split_once('.').unwrap();
+        let (_version, key) = key.split_once('.').unwrap();
         let key = key.parse().unwrap();
 
         if let Some(targets) = read_for {
@@ -547,7 +552,7 @@ impl StorageState for ShardedStorage {
         }
     }
 
-    fn write_complete(&mut self, key: String) {
+    fn put_complete(&mut self, key: String) {
         if self.bump_writing.remove(&key) && self.bump_writing.is_empty() {
             self.actions
                 .push_back(Action::Output(StorageStateOutput::Bumped))
@@ -573,8 +578,8 @@ impl StorageState for ShardedStorage {
 }
 
 impl State for ShardedStorage {
-    type Effect = StorageStateEffect<Self>;
-    type Output = StorageStateOutput;
+    type Effect = StorageStateEffect<<Self as StorageState>::StorageSend>;
+    type Output = StorageStateOutput<<Self as StorageState>::OrderedMessage>;
 
     fn proceed(&mut self, _since_start: Duration) -> Action<Self::Effect, Self::Output> {
         if let Some(proceed) = self.actions.pop_front() {
@@ -700,7 +705,7 @@ impl ShardedStorage {
             node_indices: self.node_indices.clone(),
         };
         self.actions
-            .push_back(Action::Perform(StorageStateEffect::Order(vote_archive)));
+            .push_back(Action::Output(StorageStateOutput::Order(vote_archive)));
         for &node_index in &self.node_indices {
             self.node_vote_archive_versions[node_index as usize] = self.version
         }
@@ -954,6 +959,38 @@ mod parse {
                 num_stripe: configs.get("big.num-stripe")?,
                 bypass_vote: configs.get("big.bypass-vote")?,
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_active_placement() {
+        let config = ShardedStorageConfig {
+            num_node: 1000,
+            num_faulty_node: 3,
+            num_active_copy: 7,
+            num_stripe: 1000,
+            bypass_vote: true,
+        };
+        println!("{:?}", config.nodes_of_group(0).collect::<Vec<_>>());
+        println!("{:?}", config.nodes_of_group(1).collect::<Vec<_>>());
+        println!("{:?}", config.nodes_of_group(2).collect::<Vec<_>>());
+        println!("{:?}", config.nodes_of_group(3).collect::<Vec<_>>());
+
+        let mut node_overheads = [0; 10];
+        for index in 0..config.num_active_group() {
+            for node_index in config.nodes_of_group(index) {
+                if let Some(count) = node_overheads.get_mut(node_index as usize) {
+                    *count += 1
+                }
+            }
+        }
+        for (node_index, num_key) in node_overheads.into_iter().enumerate() {
+            println!("Node {node_index} has {num_key} shards")
         }
     }
 }

@@ -3,34 +3,10 @@ use test_log::test;
 use crate::{
     app::kv::{Kv, KvOp, KvRes},
     replication::{ReplicaIndex, unreplicated::UnreplicatedReplica},
+    service::Store,
 };
 
 use super::{storage::*, *};
-
-#[test]
-fn print_active_placement() {
-    let config = ShardedStorageConfig {
-        num_node: 10,
-        num_faulty_node: 3,
-        num_active_copy: 7,
-        num_stripe: 1000,
-        bypass_vote: true,
-    };
-    println!("{:?}", config.nodes_of_group(0).collect::<Vec<_>>());
-    println!("{:?}", config.nodes_of_group(1).collect::<Vec<_>>());
-    println!("{:?}", config.nodes_of_group(2).collect::<Vec<_>>());
-    println!("{:?}", config.nodes_of_group(3).collect::<Vec<_>>());
-
-    let mut node_overheads = [0; 10];
-    for index in 0..1000 {
-        for node_index in config.nodes_of_group(index) {
-            node_overheads[node_index as usize] += 1
-        }
-    }
-    for (node_index, num_key) in node_overheads.into_iter().enumerate() {
-        println!("Node {node_index} has {num_key} shards")
-    }
-}
 
 type A = Kv;
 type R = UnreplicatedReplica<BigServiceLog<A, S>>;
@@ -84,7 +60,8 @@ impl SystemState {
 
     fn proceed_service(&mut self, index: ReplicaIndex, since_start: Duration) -> Option<Duration> {
         loop {
-            match self.hosts[index as usize].0.proceed(since_start) {
+            let (service, storage) = &mut self.hosts[index as usize];
+            match service.proceed(since_start) {
                 Action::Pending(tick_after) => break tick_after,
                 Action::Perform(Effect::Reply(client_id, reply)) => {
                     self.replies.push((client_id, reply))
@@ -92,72 +69,58 @@ impl SystemState {
 
                 // remark: current implementation only works for 1-1 mapping of services and
                 // storage nodes
-                Action::Perform(Effect::Intermediate(ServiceEffect::StorageSend((
-                    Dest::One(index),
-                    message,
-                )))) => self
+                Action::Perform(Effect::Intermediate(ServiceEffect::Storage(
+                    StorageStateEffect::Send((Dest::One(index), message)),
+                ))) => self
                     .service_network
                     .push_back((index, ServiceMessage::Storage(message))),
-                Action::Perform(Effect::Intermediate(ServiceEffect::StorageSend((
-                    Dest::Multi(indices),
-                    message,
-                )))) => {
+                Action::Perform(Effect::Intermediate(ServiceEffect::Storage(
+                    StorageStateEffect::Send((Dest::Multi(indices), message)),
+                ))) => {
                     for index in indices {
                         self.service_network
                             .push_back((index, ServiceMessage::Storage(message.clone())))
                     }
                 }
-                Action::Perform(Effect::Intermediate(ServiceEffect::StorageSend((
-                    Dest::All,
-                    message,
-                )))) => {
+                Action::Perform(Effect::Intermediate(ServiceEffect::Storage(
+                    StorageStateEffect::Send((Dest::All, message)),
+                ))) => {
                     for index in 0..self.hosts.len() {
                         self.service_network
                             .push_back((index as _, ServiceMessage::Storage(message.clone())))
                     }
                 }
 
-                Action::Perform(Effect::Intermediate(ServiceEffect::Store(Store::Get(key)))) => {
-                    let (service, storage) = &mut self.hosts[index as usize];
+                Action::Perform(Effect::Intermediate(ServiceEffect::Storage(
+                    StorageStateEffect::Store(Store::Get(key)),
+                ))) => {
                     let value = storage[&key].clone();
-                    service.put_complete(key, value)
+                    service.get_complete(key, value)
                 }
-                Action::Perform(Effect::Intermediate(ServiceEffect::Store(Store::Put(
-                    key,
-                    value,
-                )))) => {
-                    let (service, storage) = &mut self.hosts[index as usize];
+                Action::Perform(Effect::Intermediate(ServiceEffect::Storage(
+                    StorageStateEffect::Store(Store::Put(key, value)),
+                ))) => {
                     storage.insert(key.clone(), value);
-                    service.get_complete(key)
+                    service.put_complete(key)
                 }
-                Action::Perform(Effect::Intermediate(ServiceEffect::Store(Store::Delete(key)))) => {
-                    let (_service, storage) = &mut self.hosts[index as usize];
+                Action::Perform(Effect::Intermediate(ServiceEffect::Storage(
+                    StorageStateEffect::Store(Store::Delete(key)),
+                ))) => {
                     storage.remove(&key);
                 }
             }
         }
     }
 
-    fn deliver_proceed(
-        &mut self,
-        index: ReplicaIndex,
-        message: ServiceMessage,
-        since_start: Duration,
-    ) -> Option<Duration> {
-        self.deliver(index, message);
-        self.proceed_service(index, since_start)
-    }
-
     fn run(&mut self, since_start: Duration) -> Option<Duration> {
-        let mut tick_after = None;
+        let mut earliest_tick_after = None;
         while let Some((index, message)) = self.service_network.pop_front() {
             tracing::trace!(%index, ?message);
-            tick_after = earliest([
-                self.deliver_proceed(index, message, since_start),
-                tick_after,
-            ])
+            self.deliver(index, message);
+            let tick_after = self.proceed_service(index, since_start);
+            earliest_tick_after = earliest([tick_after, earliest_tick_after])
         }
-        tick_after
+        earliest_tick_after
     }
 }
 
@@ -244,12 +207,13 @@ impl SystemState {
     }
 
     fn receive(&mut self, request: Request<KvOp>, since_start: Duration) -> Option<Duration> {
-        earliest((0..self.hosts.len()).map(|index| {
+        let tick_afters = (0..self.hosts.len()).map(|index| {
             self.hosts[index]
                 .0
                 .receive(Message::Request(request.clone()));
             self.proceed_service(index as _, since_start)
-        }))
+        });
+        earliest(tick_afters)
     }
 }
 

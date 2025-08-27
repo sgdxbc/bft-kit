@@ -19,11 +19,9 @@ use crate::{
 
 use crate::app::{DataShardingApp, DataShardingExecuteOutput};
 
-use self::storage::{Key, StateVersion, StorageState, StorageStateEffect, StorageStateOutput};
+use self::storage::{Key, StateVersion, StorageState, StorageStateOutput};
 
-use super::{
-    AppProtocol, ClientId, ClientSeq, Effect, Message, Reply, Request, ServiceState, Store,
-};
+use super::{AppProtocol, ClientId, ClientSeq, Effect, Message, Reply, Request, ServiceState};
 
 pub mod storage;
 pub mod transport;
@@ -99,8 +97,7 @@ impl<A: DataShardingApp, R: ReplicationState<BigServiceLog<A, S>>, S: StorageSta
 
 pub enum ServiceEffect<R: State, S: StorageState> {
     Replication(R::Effect),
-    StorageSend(S::StorageSend),
-    Store(Store),
+    Storage(S::Effect),
 }
 
 // direct generics (instead of R::Message, S::Message) because derive Encode and
@@ -125,12 +122,12 @@ where
     type ServiceMessage = ServiceMessage<R::Message, S::Message>;
     type Metadata = R::Metadata;
 
-    fn put_complete(&mut self, key: String, value: Bytes) {
-        self.storage.read_complete(key, value)
+    fn get_complete(&mut self, key: String, value: Bytes) {
+        self.storage.get_complete(key, value)
     }
 
-    fn get_complete(&mut self, key: String) {
-        self.storage.write_complete(key)
+    fn put_complete(&mut self, key: String) {
+        self.storage.put_complete(key)
     }
 }
 
@@ -160,6 +157,7 @@ where
                 Action::Perform(send) => {
                     return Action::Perform(Effect::Intermediate(ServiceEffect::Replication(send)));
                 }
+
                 Action::Output(replicated) => {
                     let start = Instant::now();
                     for log in replicated.logs {
@@ -195,13 +193,11 @@ where
                     earliest_tick_after = earliest([tick_after, earliest_tick_after]);
                     break;
                 }
-                Action::Perform(StorageStateEffect::Send(send)) => {
-                    return Action::Perform(Effect::Intermediate(ServiceEffect::StorageSend(send)));
+                Action::Perform(effect) => {
+                    return Action::Perform(Effect::Intermediate(ServiceEffect::Storage(effect)));
                 }
-                Action::Perform(StorageStateEffect::Store(store)) => {
-                    return Action::Perform(Effect::Intermediate(ServiceEffect::Store(store)));
-                }
-                Action::Perform(StorageStateEffect::Order(message)) => {
+
+                Action::Output(StorageStateOutput::Order(message)) => {
                     self.replication
                         .submit(BigServiceLog::StorageOrder(message));
                     return self.proceed(since_start);
