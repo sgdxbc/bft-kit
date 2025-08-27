@@ -250,6 +250,92 @@ impl ShardedStorage {
     }
 }
 
+impl ShardedStorageConfig {
+    // active tier
+    fn num_active_group(&self) -> ActiveGroupIndex {
+        self.num_node
+    }
+
+    fn primary_node_of_group(&self, index: ActiveGroupIndex) -> NodeIndex {
+        index
+    }
+
+    fn is_primary_of(
+        &self,
+        node_indices: &HashSet<NodeIndex>,
+    ) -> impl Iterator<Item = ActiveGroupIndex> {
+        node_indices.iter().copied()
+    }
+
+    pub fn nodes_of_group(&self, index: ActiveGroupIndex) -> impl Iterator<Item = NodeIndex> {
+        let sampled = (0..self.num_node - 1).choose_multiple(
+            &mut StdRng::seed_from_u64(index as _),
+            self.num_active_copy - 1,
+        );
+        let node_index = self.primary_node_of_group(index);
+        once(node_index).chain(
+            sampled
+                .into_iter()
+                .map(move |i| if i >= node_index { i + 1 } else { i }),
+        )
+    }
+
+    fn group_of(&self, key: &Key) -> ActiveGroupIndex {
+        StdRng::from_seed(key.0).random_range(0..self.num_active_group())
+    }
+
+    fn nodes_of(&self, key: &Key) -> impl Iterator<Item = NodeIndex> {
+        self.nodes_of_group(self.group_of(key))
+    }
+
+    fn groups_of_nodes(
+        &self,
+        node_indices: &HashSet<NodeIndex>,
+    ) -> impl Iterator<Item = ActiveGroupIndex> {
+        (0..self.num_active_group()).filter(|&index| {
+            self.nodes_of_group(index)
+                .any(|node_index| node_indices.contains(&node_index))
+        })
+    }
+
+    // archive tier
+    fn repair_threshold(&self) -> NodeIndex {
+        self.num_faulty_node + 1 // make this configurable only if needed
+    }
+
+    fn stripe_width(&self) -> NodeIndex {
+        self.repair_threshold() + self.num_faulty_node * 2
+    }
+
+    fn stripe_of(&self, key: &Key) -> StripeIndex {
+        // assuming the keys are uniformly distributed, by hashing
+        (key.to_low_u64_le() % self.num_stripe as u64) as _
+    }
+
+    fn archive_nodes_of_stripe(&self, index: StripeIndex) -> impl Iterator<Item = NodeIndex> {
+        (index..)
+            .take(self.stripe_width() as _)
+            .map(|index| (index % self.num_node as StripeIndex) as _)
+    }
+
+    fn archive_placements(
+        &self,
+        node_index: NodeIndex,
+    ) -> impl Iterator<Item = (StripeIndex, StripeShardIndex)> {
+        (0..self.num_stripe).filter_map(move |stripe_index| {
+            self.archive_nodes_of_stripe(stripe_index)
+                .enumerate()
+                .find_map(|(shard_index, placed_node_index)| {
+                    if placed_node_index == node_index {
+                        Some((stripe_index, shard_index))
+                    } else {
+                        None
+                    }
+                })
+        })
+    }
+}
+
 impl VersionTable {
     fn new(num_stripe: StripeIndex) -> Self {
         Self {
@@ -345,92 +431,6 @@ pub enum Dest {
 
 pub type ShardedStorageSend = (Dest, ShardedStorageMessage);
 
-impl ShardedStorageConfig {
-    // active tier
-    fn num_active_group(&self) -> ActiveGroupIndex {
-        self.num_node
-    }
-
-    fn primary_node_of_group(&self, index: ActiveGroupIndex) -> NodeIndex {
-        index
-    }
-
-    fn is_primary_of(
-        &self,
-        node_indices: &HashSet<NodeIndex>,
-    ) -> impl Iterator<Item = ActiveGroupIndex> {
-        node_indices.iter().copied()
-    }
-
-    pub fn nodes_of_group(&self, index: ActiveGroupIndex) -> impl Iterator<Item = NodeIndex> {
-        let sampled = (0..self.num_node - 1).choose_multiple(
-            &mut StdRng::seed_from_u64(index as _),
-            self.num_active_copy - 1,
-        );
-        let node_index = self.primary_node_of_group(index);
-        once(node_index).chain(
-            sampled
-                .into_iter()
-                .map(move |i| if i >= node_index { i + 1 } else { i }),
-        )
-    }
-
-    fn group_of(&self, key: &Key) -> ActiveGroupIndex {
-        StdRng::from_seed(key.0).random_range(0..self.num_active_group())
-    }
-
-    fn nodes_of(&self, key: &Key) -> impl Iterator<Item = NodeIndex> {
-        self.nodes_of_group(self.group_of(key))
-    }
-
-    fn groups_of_nodes(
-        &self,
-        node_indices: &HashSet<NodeIndex>,
-    ) -> impl Iterator<Item = ActiveGroupIndex> {
-        (0..self.num_active_group()).filter(|&index| {
-            self.nodes_of_group(index)
-                .any(|node_index| node_indices.contains(&node_index))
-        })
-    }
-
-    // archive tier
-    fn repair_threshold(&self) -> NodeIndex {
-        self.num_faulty_node + 1 // make this configurable only if needed
-    }
-
-    fn stripe_width(&self) -> NodeIndex {
-        self.repair_threshold() + self.num_faulty_node * 2
-    }
-
-    fn stripe_of(&self, key: &Key) -> StripeIndex {
-        // assuming the keys are uniformly distributed, by hashing
-        (key.to_low_u64_le() % self.num_stripe as u64) as _
-    }
-
-    fn archive_nodes_of_stripe(&self, index: StripeIndex) -> impl Iterator<Item = NodeIndex> {
-        (index..)
-            .take(self.stripe_width() as _)
-            .map(|index| (index % self.num_node as StripeIndex) as _)
-    }
-
-    fn archive_placements(
-        &self,
-        node_index: NodeIndex,
-    ) -> impl Iterator<Item = (StripeIndex, StripeShardIndex)> {
-        (0..self.num_stripe).filter_map(move |stripe_index| {
-            self.archive_nodes_of_stripe(stripe_index)
-                .enumerate()
-                .find_map(|(shard_index, placed_node_index)| {
-                    if placed_node_index == node_index {
-                        Some((stripe_index, shard_index))
-                    } else {
-                        None
-                    }
-                })
-        })
-    }
-}
-
 impl StorageState for ShardedStorage {
     type StorageSend = ShardedStorageSend;
 
@@ -482,6 +482,10 @@ impl StorageState for ShardedStorage {
             self.vote_archive()
         }
     }
+
+    // by looking at the following two 2-part methods, the second thought is to have
+    // a sub state machine dedicated for archiving
+    // well, if major revision is unfortunately taking place, will do so
 
     fn read_complete(&mut self, key: String, value: Bytes) {
         let read_for = self.read_for.remove(&key);
@@ -548,8 +552,8 @@ impl StorageState for ShardedStorage {
             self.actions
                 .push_back(Action::Output(StorageStateOutput::Bumped))
         }
-        if self.archive_writing.remove(&key) && self.archive_writing.is_empty() {
-            self.may_finish_archive_stripe()
+        if self.archive_writing.remove(&key) {
+            self.may_finish_archive()
         }
     }
 
@@ -841,22 +845,30 @@ impl ShardedStorage {
 
         self.archiving_stripe_index += 1;
         if self.archiving_stripe_index == self.config.num_stripe {
-            let archived = message::Archived {
-                version: self.archiving_version,
-                node_indices: self.node_indices.clone(),
-            };
-            self.actions
-                .push_back(Action::Perform(StorageStateEffect::Send((
-                    Dest::All,
-                    ShardedStorageMessage::Archived(archived),
-                ))));
-            for &node_index in &self.node_indices {
-                self.node_archived_versions[node_index as usize] = self.archiving_version
-            }
-            self.may_collect()
+            self.may_finish_archive()
         } else {
             self.prepare_archive_stripe()
         }
+    }
+
+    fn may_finish_archive(&mut self) {
+        if !self.archive_writing.is_empty() {
+            return;
+        }
+
+        let archived = message::Archived {
+            version: self.archiving_version,
+            node_indices: self.node_indices.clone(),
+        };
+        self.actions
+            .push_back(Action::Perform(StorageStateEffect::Send((
+                Dest::All,
+                ShardedStorageMessage::Archived(archived),
+            ))));
+        for &node_index in &self.node_indices {
+            self.node_archived_versions[node_index as usize] = self.archiving_version
+        }
+        self.may_collect()
     }
 
     fn may_collect(&mut self) {
