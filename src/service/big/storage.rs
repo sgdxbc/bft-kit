@@ -868,7 +868,11 @@ impl ShardedStorage {
         }
 
         for (key, version) in self.version_table.collect(quorum_archived_version) {
-            // TODO
+            let key = format!("{version}.{key:x}");
+            self.actions
+                .push_back(Action::Perform(StorageStateEffect::Store(Store::Delete(
+                    key,
+                ))))
         }
         self.quorum_archived_version = quorum_archived_version;
 

@@ -130,6 +130,10 @@ impl SystemState {
                     storage.insert(key.clone(), value);
                     service.get_complete(key)
                 }
+                Action::Perform(Effect::Intermediate(ServiceEffect::Store(Store::Delete(key)))) => {
+                    let (_service, storage) = &mut self.hosts[index as usize];
+                    storage.remove(&key);
+                }
             }
         }
     }

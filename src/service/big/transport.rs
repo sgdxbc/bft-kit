@@ -411,20 +411,26 @@ fn store_task(
     event_sender: mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
     while let Some(command) = command_receiver.blocking_recv() {
-        match command {
+        let event = match command {
             Store::Get(key) => {
                 let Some(value) = db.get(&key)? else {
                     tracing::warn!(%key, "key not found");
                     continue;
                 };
-                event_sender.blocking_send(Event::StoreRead(key, value.into()))
+                Event::StoreRead(key, value.into())
             }
             Store::Put(key, value) => {
                 db.put(&key, value)?;
-                event_sender.blocking_send(Event::StoreWrite(key))
+                Event::StoreWrite(key)
             }
-        }
-        .map_err(|_| anyhow::format_err!("store read event channel closed, stopping"))?
+            Store::Delete(key) => {
+                db.delete(key)?;
+                continue;
+            }
+        };
+        event_sender
+            .blocking_send(event)
+            .map_err(|_| anyhow::format_err!("store read event channel closed, stopping"))?
     }
     let total_size = db.property_int_value(LIVE_SST_FILES_SIZE)?;
     tracing::info!(?total_size, "live SST files size");

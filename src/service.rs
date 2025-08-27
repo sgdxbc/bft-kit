@@ -44,8 +44,9 @@ pub type Send<M> = (Dest, M);
 
 #[derive(Debug)]
 pub enum Store {
-    Get(String),
     Put(String, Bytes),
+    Get(String),
+    Delete(String),
 }
 
 #[derive(Debug)]
