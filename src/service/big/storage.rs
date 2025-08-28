@@ -8,15 +8,15 @@ use std::{
 
 use bincode::{Decode, Encode};
 use primitive_types::H256;
-use rand::{Rng, SeedableRng as _, rngs::StdRng, seq::IteratorRandom};
+use rand::{rngs::StdRng, seq::IteratorRandom, Rng, SeedableRng as _};
 use reed_solomon_simd::ReedSolomonEncoder;
 use tokio_util::bytes::Bytes;
 
 use crate::{
-    Never,
     replication::ReplicaIndex,
     service::{ServiceIndex, Store},
     state::{Action, State},
+    Never,
 };
 
 use super::BINCODE_CONFIG;
@@ -26,9 +26,9 @@ pub type Key = H256;
 
 pub trait StorageState:
     State<
-        Effect = StorageStateEffect<Self::StorageSend>,
-        Output = StorageStateOutput<Self::OrderedMessage>,
-    >
+    Effect = StorageStateEffect<Self::StorageSend>,
+    Output = StorageStateOutput<Self::OrderedMessage>,
+>
 {
     type StorageSend;
 
@@ -198,7 +198,7 @@ pub struct ShardedStorage {
     // inserted, values of other groups are pushed by the corresponded primary nodes
     stripe_group_values: HashMap<ActiveGroupIndex, HashMap<[u8; 32], Vec<u8>>>,
     archive_reading: HashSet<String>, // in `{version}.{key:x}` format
-    archive_writing: HashSet<String>, // in `{version}.{stripe_index}-{stripe_shard_index}` format
+    archive_writing: HashSet<String>, // in `{stripe_index}-{stripe_shard_index}` format
     reorder_archive_pushes: HashMap<(StateVersion, StripeIndex), Vec<message::ArchivePush>>,
 
     actions: VecDeque<
@@ -206,6 +206,7 @@ pub struct ShardedStorage {
     >,
 }
 
+#[derive(Debug, Clone)]
 pub struct ShardedStorageConfig {
     pub num_node: NodeIndex, // virtual "storage node"
     pub num_faulty_node: NodeIndex,
@@ -480,10 +481,8 @@ impl StorageState for ShardedStorage {
         }
         if self.bump_writing.is_empty() {
             self.actions
-                .push_back(Action::Output(StorageStateOutput::Bumped))
-        }
-        if self.should_vote_archive() {
-            self.vote_archive()
+                .push_back(Action::Output(StorageStateOutput::Bumped));
+            self.may_vote_archive()
         }
     }
 
@@ -528,6 +527,9 @@ impl StorageState for ShardedStorage {
                 .insert(key.into(), value.into());
 
             if self.archive_reading.is_empty() {
+                tracing::info!(
+                    ?self.node_indices, %self.archiving_version, %self.archiving_stripe_index,
+                    "finish reading for archive stripe");
                 for group_index in self.config.is_primary_of(&self.node_indices) {
                     let archive_push = message::ArchivePush {
                         version: self.archiving_version,
@@ -554,7 +556,8 @@ impl StorageState for ShardedStorage {
     fn put_complete(&mut self, key: String) {
         if self.bump_writing.remove(&key) && self.bump_writing.is_empty() {
             self.actions
-                .push_back(Action::Output(StorageStateOutput::Bumped))
+                .push_back(Action::Output(StorageStateOutput::Bumped));
+            self.may_vote_archive()
         }
         if self.archive_writing.remove(&key) {
             self.may_finish_archive()
@@ -686,14 +689,16 @@ impl ShardedStorage {
         *previous_version = (*previous_version).max(version)
     }
 
-    fn should_vote_archive(&self) -> bool {
-        // there are higher versions for us to vote
-        self.version > self.node_vote_archive_versions[self.node_index() as usize]
+    fn may_vote_archive(&mut self) {
+        if !(
+            // there are higher versions for us to vote
+            self.version > self.node_vote_archive_versions[self.node_index() as usize]
         // previous archiving is done
             && self.archiving_version == self.node_archived_versions[self.node_index() as usize]
-    }
+        ) {
+            return;
+        }
 
-    fn vote_archive(&mut self) {
         if self.config.bypass_vote {
             self.enter_archiving(self.version);
             return;
@@ -724,6 +729,7 @@ impl ShardedStorage {
     }
 
     fn enter_archiving(&mut self, version: StateVersion) {
+        tracing::info!(?self.node_indices, %version, "enter archiving");
         if self.archiving_stripe_index != self.config.num_stripe {
             tracing::warn!(
                 ?self.node_indices, %version, %self.archiving_version, %self.archiving_stripe_index,
@@ -748,6 +754,9 @@ impl ShardedStorage {
     }
 
     fn prepare_archive_stripe(&mut self) {
+        tracing::info!(
+            ?self.node_indices, %self.archiving_version, %self.archiving_stripe_index,
+            "prepare archive stripe");
         assert!(self.stripe_group_values.is_empty());
         for &group_index in &self.groups {
             self.stripe_group_values
@@ -788,6 +797,9 @@ impl ShardedStorage {
             return;
         }
 
+        tracing::info!(
+            ?self.node_indices, %self.archiving_version, %self.archiving_stripe_index,
+            "finish archive stripe");
         if let Some(shard_indices) = self.archive_placements.get(&self.archiving_stripe_index) {
             let mut stripe =
                 bincode::encode_to_vec(take(&mut self.stripe_group_values), BINCODE_CONFIG)
@@ -803,10 +815,7 @@ impl ShardedStorage {
             let mut shard_indices = shard_indices.clone();
             let parity_indices = shard_indices.split_off(&(self.config.repair_threshold() as _));
             for shard_index in shard_indices {
-                let key = format!(
-                    "{}.{}-{shard_index}",
-                    self.archiving_version, self.archiving_stripe_index
-                );
+                let key = format!("{}-{shard_index}", self.archiving_stripe_index);
                 self.archive_writing.insert(key.clone());
                 self.actions
                     .push_back(Action::Perform(StorageStateEffect::Store(Store::Put(
@@ -829,10 +838,7 @@ impl ShardedStorage {
                     let parity_shard = parity_shards
                         .recovery(parity_index - self.config.repair_threshold() as usize)
                         .unwrap();
-                    let key = format!(
-                        "{}.{}-{parity_index}",
-                        self.archiving_version, self.archiving_stripe_index
-                    );
+                    let key = format!("{}-{parity_index}", self.archiving_stripe_index);
                     self.archive_writing.insert(key.clone());
                     self.actions
                         .push_back(Action::Perform(StorageStateEffect::Store(Store::Put(
@@ -859,6 +865,7 @@ impl ShardedStorage {
             return;
         }
 
+        tracing::info!(?self.node_indices, %self.archiving_version, "finish archiving");
         let archived = message::Archived {
             version: self.archiving_version,
             node_indices: self.node_indices.clone(),
@@ -882,6 +889,7 @@ impl ShardedStorage {
             return;
         }
 
+        tracing::info!(?self.node_indices, %quorum_archived_version, "collect");
         for (key, version) in self.version_table.collect(quorum_archived_version) {
             let key = format!("{version}.{key:x}");
             self.actions

@@ -52,12 +52,6 @@ fn idle_pending() {
 }
 
 impl SystemState {
-    fn deliver(&mut self, index: ReplicaIndex, message: ServiceMessage) {
-        self.hosts[index as usize]
-            .0
-            .receive(Message::Intermediate(message))
-    }
-
     fn proceed_service(&mut self, index: ReplicaIndex, since_start: Duration) -> Option<Duration> {
         loop {
             let (service, storage) = &mut self.hosts[index as usize];
@@ -116,7 +110,9 @@ impl SystemState {
         let mut earliest_tick_after = None;
         while let Some((index, message)) = self.service_network.pop_front() {
             tracing::trace!(%index, ?message);
-            self.deliver(index, message);
+            self.hosts[index as usize]
+                .0
+                .receive(Message::Intermediate(message));
             let tick_after = self.proceed_service(index, since_start);
             earliest_tick_after = earliest([tick_after, earliest_tick_after])
         }
@@ -174,19 +170,12 @@ fn one_service() {
 }
 
 impl SystemState {
-    fn new(num_service: ReplicaIndex, num_faulty: ReplicaIndex) -> Self {
+    fn with_config(config: ShardedStorageConfig) -> Self {
         Self {
-            hosts: (0..num_service)
+            hosts: (0..config.num_node)
                 .map(|index| {
                     let app = Kv;
-                    let storage_config = ShardedStorageConfig {
-                        num_node: num_service,
-                        num_faulty_node: num_faulty,
-                        num_active_copy: 1,
-                        num_stripe: 1,
-                        bypass_vote: true,
-                    };
-                    let storage = ShardedStorage::new(storage_config, [index].into());
+                    let storage = ShardedStorage::new(config.clone(), [index].into());
                     (
                         BigService::new(
                             app,
@@ -204,6 +193,16 @@ impl SystemState {
             service_network: Default::default(),
             replies: Default::default(),
         }
+    }
+
+    fn new(num_service: ReplicaIndex, num_faulty: ReplicaIndex) -> Self {
+        Self::with_config(ShardedStorageConfig {
+            num_node: num_service,
+            num_faulty_node: num_faulty,
+            num_active_copy: 1,
+            num_stripe: 1,
+            bypass_vote: true,
+        })
     }
 
     fn receive(&mut self, request: Request<KvOp>, since_start: Duration) -> Option<Duration> {
@@ -226,4 +225,53 @@ fn multiple_services() {
     );
     state.run(Duration::ZERO);
     assert_eq!(state.replies.len(), 2);
+}
+
+fn garbage_collect(config: ShardedStorageConfig) {
+    let mut state = SystemState::with_config(config.clone());
+    for i in 0..3 {
+        state.receive(
+            request(2 * i + 1, KvOp::Put("k".into(), format!("v{i}"))),
+            Duration::ZERO,
+        );
+        state.receive(request(2 * i + 2, KvOp::Get("k".into())), Duration::ZERO);
+    }
+    state.run(Duration::ZERO);
+    assert_eq!(state.replies.len(), 6 * config.num_node as usize);
+    for i in 0..3 {
+        let count = state
+            .replies
+            .iter()
+            .filter(|(_, reply)| match &reply.res {
+                KvRes::Put | KvRes::Get(None) => false,
+                KvRes::Get(Some(v)) => v == &format!("v{i}"),
+            })
+            .count();
+        assert_eq!(count, config.num_node as usize)
+    }
+    for (_, storage) in &state.hosts {
+        assert_eq!(storage.len(), 1 + config.num_stripe as usize)
+    }
+}
+
+#[test]
+fn garbage_collect1() {
+    garbage_collect(ShardedStorageConfig {
+        num_node: 1,
+        num_faulty_node: 0,
+        num_stripe: 1,
+        num_active_copy: 1,
+        bypass_vote: true,
+    })
+}
+
+#[test]
+fn garbage_collect4() {
+    garbage_collect(ShardedStorageConfig {
+        num_node: 4,
+        num_faulty_node: 1,
+        num_stripe: 1,
+        num_active_copy: 1,
+        bypass_vote: true,
+    })
 }
