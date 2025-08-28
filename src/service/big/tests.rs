@@ -71,17 +71,23 @@ impl SystemState {
                 Action::Perform(Effect::Intermediate(ServiceEffect::Storage(
                     StorageStateEffect::Send((Dest::Multi(indices), message)),
                 ))) => {
-                    for index in indices {
+                    for node_index in indices {
+                        if node_index == index {
+                            continue;
+                        }
                         self.service_network
-                            .push_back((index, ServiceMessage::Storage(message.clone())))
+                            .push_back((node_index, ServiceMessage::Storage(message.clone())))
                     }
                 }
                 Action::Perform(Effect::Intermediate(ServiceEffect::Storage(
                     StorageStateEffect::Send((Dest::All, message)),
                 ))) => {
-                    for index in 0..self.hosts.len() {
+                    for node_index in 0..self.hosts.len() {
+                        if node_index as ReplicaIndex == index {
+                            continue;
+                        }
                         self.service_network
-                            .push_back((index as _, ServiceMessage::Storage(message.clone())))
+                            .push_back((node_index as _, ServiceMessage::Storage(message.clone())))
                     }
                 }
 
@@ -249,9 +255,13 @@ fn garbage_collect(config: ShardedStorageConfig) {
             .count();
         assert_eq!(count, config.num_node as usize)
     }
+    let mut active_count = 0;
     for (_, storage) in &state.hosts {
-        assert_eq!(storage.len(), 1 + config.num_stripe as usize)
+        active_count += storage.iter().filter(|(k, _)| k.contains('.')).count();
+        let archive_count = storage.iter().filter(|(k, _)| k.contains('-')).count();
+        assert_eq!(archive_count, config.num_stripe as usize)
     }
+    assert_eq!(active_count, 1)
 }
 
 #[test]
