@@ -33,6 +33,8 @@ big.executing-buffer-size   0
 big.num-stripe          4
 big.bypass-vote         true
 
+in-memory.batch-size    1
+
 ycsb.num-key            100
 ycsb.value-len          10
     ",
@@ -62,7 +64,7 @@ ycsb.value-len          10
             });
         let service = BigService::new(
             app,
-            ReplayReplica::new(logs, 1),
+            ReplayReplica::new(logs, configs.get("in-memory.batch-size")?),
             storage,
             configs.extract()?,
         );

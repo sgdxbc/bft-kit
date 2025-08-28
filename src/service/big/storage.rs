@@ -481,7 +481,7 @@ impl StorageState for ShardedStorage {
                     ))))
             }
         }
-        self.may_bumped();
+        self.may_bumped()
     }
 
     // by looking at the following two 2-part methods, the second thought is to have
@@ -568,6 +568,8 @@ impl State for ShardedStorage {
         match message {
             ShardedStorageMessage::Query(fetch) => {
                 if fetch.version < self.quorum_archived_version {
+                    tracing::warn!(?self.node_indices, %fetch.version, %self.quorum_archived_version,
+                        "stale fetch request");
                     return;
                 }
                 if fetch.version > self.version {
@@ -591,8 +593,7 @@ impl State for ShardedStorage {
             }
             ShardedStorageMessage::ArchivePush(archive_push) => {
                 self.handle_archive_push(archive_push);
-                // check for archive_reading is very nonlocal. any better flow?
-                if self.is_archiving() && self.archive_reading.is_empty() {
+                if self.archiving_stripe_index < self.config.num_stripe {
                     self.may_finish_archive_stripe()
                 }
             }
@@ -669,11 +670,16 @@ impl ShardedStorage {
     }
 
     fn is_archiving(&mut self) -> bool {
-        self.archiving_stripe_index != self.config.num_stripe
+        self.archiving_stripe_index != self.config.num_stripe || !self.archive_writing.is_empty()
     }
 
     fn may_vote_archive(&mut self) {
-        if self.is_archiving() {
+        // if self.version < self.archiving_version + 10000 {
+        //     return;
+        // }
+
+        // archiving should not overlap
+        if self.is_archiving() && self.archiving_version > self.quorum_archived_version {
             return;
         }
         // if we cannot serve a new version for archiving
@@ -724,7 +730,7 @@ impl ShardedStorage {
 
     fn enter_archiving(&mut self, version: StateVersion) {
         tracing::info!(?self.node_indices, %version, "enter archiving");
-        if self.archiving_stripe_index != self.config.num_stripe {
+        if self.is_archiving() {
             tracing::warn!(
                 ?self.node_indices, %version, %self.archiving_version, %self.archiving_stripe_index,
                 "enter archiving without finishing previous round");
@@ -765,7 +771,7 @@ impl ShardedStorage {
             return;
         }
 
-        tracing::debug!(
+        tracing::trace!(
             ?self.node_indices, %self.archiving_version, %self.archiving_stripe_index,
             "archive push");
         for group_index in self.config.is_primary_of(&self.node_indices) {
@@ -816,7 +822,7 @@ impl ShardedStorage {
                     self.insert_archive_push(archive_push.group_index, archive_push.values)
                 }
             }
-        } else if !self.is_archiving()
+        } else if self.archiving_stripe_index == self.config.num_stripe
             || self
                 .stripe_group_values
                 .contains_key(&archive_push.group_index)
@@ -845,7 +851,10 @@ impl ShardedStorage {
     }
 
     fn may_finish_archive_stripe(&mut self) {
-        assert!(self.is_archiving());
+        assert!(self.archiving_stripe_index < self.config.num_stripe);
+        if !self.archive_reading.is_empty() {
+            return;
+        }
         if self
             .archive_placements
             .contains_key(&self.archiving_stripe_index)
@@ -919,7 +928,7 @@ impl ShardedStorage {
     }
 
     fn may_finish_archive(&mut self) {
-        if !self.archive_writing.is_empty() {
+        if self.is_archiving() {
             return;
         }
 

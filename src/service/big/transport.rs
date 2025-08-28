@@ -328,10 +328,10 @@ where
 {
     loop {
         if cancel.is_cancelled() {
-            break Ok(None); // consider better returned value
+            return Ok(None); // consider better returned value
         }
         match service.proceed(since_start) {
-            Action::Pending(tick_after) => break Ok(tick_after),
+            Action::Pending(tick_after) => return Ok(tick_after),
 
             Action::Perform(Effect::Reply(..)) if !send_reply => {}
             Action::Perform(Effect::Reply(client_id, reply)) => {
@@ -361,6 +361,8 @@ where
                 if store_command_sender.capacity() == 0 {
                     tracing::warn!("store command sender congested");
                 }
+                // a decent implementation should eliminate this awaiting point and turn the
+                // proceed loop into synchronous code
                 store_command_sender.send(store).await?
             }
         }
