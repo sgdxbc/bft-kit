@@ -285,14 +285,6 @@ impl ShardedStorageConfig {
         )
     }
 
-    fn group_of(&self, key: &Key) -> ActiveGroupIndex {
-        StdRng::from_seed(key.0).random_range(0..self.num_active_group())
-    }
-
-    fn nodes_of(&self, key: &Key) -> impl Iterator<Item = NodeIndex> {
-        self.nodes_of_group(self.group_of(key))
-    }
-
     fn groups_of_nodes(
         &self,
         node_indices: &HashSet<NodeIndex>,
@@ -303,9 +295,17 @@ impl ShardedStorageConfig {
         })
     }
 
+    fn group_of(&self, key: &Key) -> ActiveGroupIndex {
+        StdRng::from_seed(key.0).random_range(0..self.num_active_group())
+    }
+
+    fn nodes_of(&self, key: &Key) -> impl Iterator<Item = NodeIndex> {
+        self.nodes_of_group(self.group_of(key))
+    }
+
     // archive tier
     fn repair_threshold(&self) -> NodeIndex {
-        self.num_faulty_node + 1 // make this configurable only if needed
+        self.num_faulty_node + 1 // make this configurable only if needed (probably for performance)
     }
 
     fn stripe_width(&self) -> NodeIndex {
@@ -400,8 +400,7 @@ impl VersionTable {
                 // (which should not return None)
 
                 // doing so implies that for each key there is a version (i.e. the `version`
-                // passed into this method) that is both archived and not collected by the
-                // active tier (i.e. actively served)
+                // passed into this method) that is both archived and active
                 // this design ensures that the system _never_ need to read from archive tier
                 // as long as active tier is not compromised (by `r` random (faulty) replicas),
                 // even when the system is just started or reactivated after an idle period,
@@ -520,33 +519,33 @@ impl StorageState for ShardedStorage {
 
         if archive_reading {
             let group_index = self.config.group_of(&key);
-            assert!(
-                self.node_indices
-                    .contains(&self.config.primary_node_of_group(group_index))
-            );
+            assert!(self.groups.contains(&group_index));
             let stripe_index = self.config.stripe_of(&key);
             assert_eq!(stripe_index, self.archiving_stripe_index);
             self.stripe_group_values
                 .get_mut(&group_index)
                 .unwrap()
                 .insert(key.into(), value.into());
+
             if self.archive_reading.is_empty() {
-                let archive_push = message::ArchivePush {
-                    version: self.archiving_version,
-                    stripe_index,
-                    group_index,
-                    values: self.stripe_group_values[&group_index].clone(),
-                };
-                self.actions
-                    .push_back(Action::Perform(StorageStateEffect::Send((
-                        Dest::Multi(
-                            self.config
-                                .archive_nodes_of_stripe(stripe_index)
-                                .filter(|node_index| !self.node_indices.contains(node_index))
-                                .collect(),
-                        ),
-                        ShardedStorageMessage::ArchivePush(archive_push),
-                    ))));
+                for group_index in self.config.is_primary_of(&self.node_indices) {
+                    let archive_push = message::ArchivePush {
+                        version: self.archiving_version,
+                        stripe_index,
+                        group_index,
+                        values: self.stripe_group_values[&group_index].clone(),
+                    };
+                    let archive_node_indices = self
+                        .config
+                        .archive_nodes_of_stripe(stripe_index)
+                        .filter(|node_index| !self.node_indices.contains(node_index))
+                        .collect();
+                    self.actions
+                        .push_back(Action::Perform(StorageStateEffect::Send((
+                            Dest::Multi(archive_node_indices),
+                            ShardedStorageMessage::ArchivePush(archive_push),
+                        ))))
+                }
                 self.may_finish_archive_stripe()
             }
         }
@@ -657,13 +656,6 @@ impl ShardedStorage {
         self.groups.contains(&self.config.group_of(key))
     }
 
-    fn should_vote_archive(&self) -> bool {
-        // there are higher versions for us to vote
-        self.version > self.node_vote_archive_versions[self.node_index() as usize]
-        // previous archiving is done
-            && self.archiving_version == self.node_archived_versions[self.node_index() as usize]
-    }
-
     fn read_key(&mut self, node_index: NodeIndex, version: StateVersion, key: Key) {
         let Some(found_version) = self.version_table.find(&key, version, &self.config) else {
             let action = if self.node_indices.contains(&node_index) {
@@ -692,6 +684,13 @@ impl ShardedStorage {
 
         let previous_version = targets.entry(node_index).or_default();
         *previous_version = (*previous_version).max(version)
+    }
+
+    fn should_vote_archive(&self) -> bool {
+        // there are higher versions for us to vote
+        self.version > self.node_vote_archive_versions[self.node_index() as usize]
+        // previous archiving is done
+            && self.archiving_version == self.node_archived_versions[self.node_index() as usize]
     }
 
     fn vote_archive(&mut self) {
@@ -726,7 +725,9 @@ impl ShardedStorage {
 
     fn enter_archiving(&mut self, version: StateVersion) {
         if self.archiving_stripe_index != self.config.num_stripe {
-            tracing::warn!(?self.node_indices, %version, %self.archiving_version, %self.archiving_stripe_index, "enter archiving without finishing previous round");
+            tracing::warn!(
+                ?self.node_indices, %version, %self.archiving_version, %self.archiving_stripe_index,
+                "enter archiving without finishing previous round");
             self.stripe_group_values.clear();
             self.archive_reading.clear();
             self.archive_writing.clear()
@@ -735,6 +736,7 @@ impl ShardedStorage {
         self.archiving_stripe_index = 0;
 
         self.prepare_archive_stripe();
+
         if let Some(pushes) = self
             .reorder_archive_pushes
             .remove(&(self.archiving_version, self.archiving_stripe_index))
@@ -747,7 +749,7 @@ impl ShardedStorage {
 
     fn prepare_archive_stripe(&mut self) {
         assert!(self.stripe_group_values.is_empty());
-        for group_index in self.config.is_primary_of(&self.node_indices) {
+        for &group_index in &self.groups {
             self.stripe_group_values
                 .insert(group_index, Default::default());
         }
@@ -756,10 +758,6 @@ impl ShardedStorage {
             self.archiving_version,
             &self.config,
         ) {
-            let group_index = self.config.group_of(key);
-            if !self.stripe_group_values.contains_key(&group_index) {
-                continue;
-            }
             let key = format!("{version}.{key:x}");
             self.archive_reading.insert(key.clone());
             self.actions
