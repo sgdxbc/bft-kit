@@ -469,11 +469,10 @@ impl StorageState for ShardedStorage {
             self.querying.clear()
         }
 
-        self.version += 1;
         for (key, bytes) in writes {
             if self.should_store(&key) {
-                self.version_table.add(key, self.version, &self.config);
-                let key = format!("{}.{key:x}", self.version);
+                self.version_table.add(key, self.version + 1, &self.config);
+                let key = format!("{}.{key:x}", self.version + 1);
                 self.bump_writing.insert(key.clone());
                 self.actions
                     .push_back(Action::Perform(StorageStateEffect::Store(Store::Put(
@@ -657,6 +656,7 @@ impl ShardedStorage {
             return;
         }
 
+        self.version += 1;
         self.actions
             .push_back(Action::Output(StorageStateOutput::Bumped));
 
@@ -674,9 +674,9 @@ impl ShardedStorage {
     }
 
     fn may_vote_archive(&mut self) {
-        // if self.version < self.archiving_version + 10000 {
-        //     return;
-        // }
+        if self.version < self.archiving_version + 10000 {
+            return;
+        }
 
         // archiving should not overlap
         if self.is_archiving() && self.archiving_version > self.quorum_archived_version {

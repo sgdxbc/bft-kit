@@ -3,7 +3,7 @@ use std::{
     fmt::Debug,
     future::pending,
     net::SocketAddr,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -13,7 +13,7 @@ use rocksdb::{DB, properties::LIVE_SST_FILES_SIZE};
 use tokio::{
     select, spawn,
     sync::mpsc,
-    task::{JoinHandle, spawn_blocking, yield_now},
+    task::{JoinHandle, yield_now},
     time::{Instant, sleep},
     try_join,
 };
@@ -178,10 +178,7 @@ where
     tracing::info!("store initialized");
 
     let (store_command_sender, store_command_receiver) = mpsc::channel(100);
-    let store_task = spawn_blocking({
-        let event_sender = event_sender.clone();
-        move || store_task(db, store_command_receiver, event_sender)
-    });
+    let store_task = spawn(store_task(db, store_command_receiver, event_sender.clone()));
 
     let write_tracker = TaskTracker::new();
     let start = Instant::now();
@@ -411,34 +408,53 @@ impl<T: ReplicaTable> PerformSend<ShardedStorageSend> for T {
     }
 }
 
-fn store_task(
+async fn store_task(
     db: DB,
     mut command_receiver: mpsc::Receiver<Store>,
     event_sender: mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
-    while let Some(command) = command_receiver.blocking_recv() {
-        let event = match command {
-            Store::Get(key) => {
-                let Some(value) = db.get(&key)? else {
-                    tracing::warn!(%key, "key not found");
-                    continue;
-                };
-                Event::StoreRead(key, value.into())
+    let db = Arc::new(db);
+    let tracker = TaskTracker::new();
+    while let Some(command) = command_receiver.recv().await {
+        let db = db.clone();
+        let event_sender = event_sender.clone();
+        tracker.spawn_blocking(move || {
+            if let Err(err) = perform_store(db, command, event_sender) {
+                tracing::warn!(%err)
             }
-            Store::Put(key, value) => {
-                db.put(&key, value)?;
-                Event::StoreWrite(key)
-            }
-            Store::Delete(key) => {
-                db.delete(key)?;
-                continue;
-            }
-        };
-        event_sender
-            .blocking_send(event)
-            .map_err(|_| anyhow::format_err!("store read event channel closed, stopping"))?
+        });
     }
+    tracker.close();
+    tracker.wait().await;
     let total_size = db.property_int_value(LIVE_SST_FILES_SIZE)?;
     tracing::info!(?total_size, "live SST files size");
+    Ok(())
+}
+
+fn perform_store(
+    db: Arc<DB>,
+    command: Store,
+    event_sender: mpsc::Sender<Event>,
+) -> anyhow::Result<()> {
+    let event = match command {
+        Store::Get(key) => {
+            let Some(value) = db.get(&key)? else {
+                tracing::warn!(%key, "key not found");
+                return Ok(());
+            };
+            Event::StoreRead(key, value.into())
+        }
+        Store::Put(key, value) => {
+            db.put(&key, value)?;
+            Event::StoreWrite(key)
+        }
+        Store::Delete(key) => {
+            db.delete(key)?;
+            return Ok(());
+        }
+    };
+    event_sender
+        .blocking_send(event)
+        .map_err(|_| anyhow::format_err!("store read event channel closed"))?;
     Ok(())
 }
