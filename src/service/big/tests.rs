@@ -1,3 +1,5 @@
+use std::{collections::HashSet, iter::repeat};
+
 use test_log::test;
 
 use crate::{
@@ -233,18 +235,21 @@ fn multiple_services() {
     assert_eq!(state.replies.len(), 2);
 }
 
-fn garbage_collect(config: ShardedStorageConfig) {
+fn garbage_collect(config: ShardedStorageConfig, keys: impl IntoIterator<Item = String> + Clone) {
     let mut state = SystemState::with_config(config.clone());
-    for i in 0..3 {
+    let mut seq = 0;
+    for (i, key) in keys.clone().into_iter().enumerate() {
+        seq += 1;
         state.receive(
-            request(2 * i + 1, KvOp::Put("k".into(), format!("v{i}"))),
+            request(seq, KvOp::Put(key.clone(), format!("v{i}"))),
             Duration::ZERO,
         );
-        state.receive(request(2 * i + 2, KvOp::Get("k".into())), Duration::ZERO);
+        seq += 1;
+        state.receive(request(seq, KvOp::Get(key)), Duration::ZERO);
     }
     state.run(Duration::ZERO);
     assert_eq!(state.replies.len(), 6 * config.num_node as usize);
-    for i in 0..3 {
+    for i in 0..keys.clone().into_iter().count() {
         let count = state
             .replies
             .iter()
@@ -253,7 +258,7 @@ fn garbage_collect(config: ShardedStorageConfig) {
                 KvRes::Get(Some(v)) => v == &format!("v{i}"),
             })
             .count();
-        assert_eq!(count, config.num_node as usize)
+        assert_eq!(count, config.num_node as usize, "v{i}")
     }
     let mut active_count = 0;
     for (_, storage) in &state.hosts {
@@ -261,27 +266,64 @@ fn garbage_collect(config: ShardedStorageConfig) {
         let archive_count = storage.iter().filter(|(k, _)| k.contains('-')).count();
         assert_eq!(archive_count, config.num_stripe as usize)
     }
-    assert_eq!(active_count, 1)
+    assert_eq!(
+        active_count,
+        HashSet::<String>::from_iter(keys.into_iter()).len()
+    )
 }
 
 #[test]
 fn garbage_collect1() {
-    garbage_collect(ShardedStorageConfig {
-        num_node: 1,
-        num_faulty_node: 0,
-        num_stripe: 1,
-        num_active_copy: 1,
-        bypass_vote: true,
-    })
+    garbage_collect(
+        ShardedStorageConfig {
+            num_node: 1,
+            num_faulty_node: 0,
+            num_stripe: 1,
+            num_active_copy: 1,
+            bypass_vote: true,
+        },
+        repeat("k".into()).take(3),
+    )
 }
 
 #[test]
 fn garbage_collect4() {
-    garbage_collect(ShardedStorageConfig {
-        num_node: 4,
-        num_faulty_node: 1,
-        num_stripe: 1,
-        num_active_copy: 1,
-        bypass_vote: true,
-    })
+    garbage_collect(
+        ShardedStorageConfig {
+            num_node: 4,
+            num_faulty_node: 1,
+            num_stripe: 1,
+            num_active_copy: 1,
+            bypass_vote: true,
+        },
+        repeat("k".into()).take(3),
+    )
+}
+
+#[test]
+fn garbage_collect4_stripe2() {
+    garbage_collect(
+        ShardedStorageConfig {
+            num_node: 4,
+            num_faulty_node: 1,
+            num_stripe: 2,
+            num_active_copy: 1,
+            bypass_vote: true,
+        },
+        repeat("k".into()).take(3),
+    )
+}
+
+#[test]
+fn garbage_collect4_key3() {
+    garbage_collect(
+        ShardedStorageConfig {
+            num_node: 4,
+            num_faulty_node: 1,
+            num_stripe: 1,
+            num_active_copy: 1,
+            bypass_vote: true,
+        },
+        (0..3).map(|i| format!("k{i}")),
+    )
 }

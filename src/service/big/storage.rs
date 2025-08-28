@@ -35,7 +35,7 @@ pub trait StorageState:
     fn fetch(&mut self, key: Key);
     fn bump(&mut self, writes: HashMap<Key, Bytes>);
     #[allow(unused_variables)]
-    fn will_fetch(&mut self, key: Key) {}
+    fn prefetch(&mut self, key: Key) {}
 
     fn get_complete(&mut self, key: String, value: Bytes);
     fn put_complete(&mut self, key: String);
@@ -187,6 +187,7 @@ pub struct ShardedStorage {
     read_for: HashMap<String, HashMap<ReplicaIndex, StateVersion>>,
     querying: HashSet<Key>, // for tolerating multiple QueryOk
     bump_writing: HashSet<String>,
+    reorder_queries: HashMap<StateVersion, Vec<message::Query>>,
 
     node_vote_archive_versions: Vec<StateVersion>,
     archiving_version: StateVersion,
@@ -242,6 +243,7 @@ impl ShardedStorage {
             read_for: Default::default(),
             querying: Default::default(),
             bump_writing: Default::default(),
+            reorder_queries: Default::default(),
             node_vote_archive_versions: vec![0; config.num_node as _],
             archiving_version: 0,
             node_archived_versions: vec![0; config.num_node as _],
@@ -479,11 +481,7 @@ impl StorageState for ShardedStorage {
                     ))))
             }
         }
-        if self.bump_writing.is_empty() {
-            self.actions
-                .push_back(Action::Output(StorageStateOutput::Bumped));
-            self.may_vote_archive()
-        }
+        self.may_bumped();
     }
 
     // by looking at the following two 2-part methods, the second thought is to have
@@ -531,10 +529,8 @@ impl StorageState for ShardedStorage {
     }
 
     fn put_complete(&mut self, key: String) {
-        if self.bump_writing.remove(&key) && self.bump_writing.is_empty() {
-            self.actions
-                .push_back(Action::Output(StorageStateOutput::Bumped));
-            self.may_vote_archive()
+        if self.bump_writing.remove(&key) {
+            self.may_bumped()
         }
         if self.archive_writing.remove(&key) {
             self.may_finish_archive()
@@ -572,6 +568,13 @@ impl State for ShardedStorage {
         match message {
             ShardedStorageMessage::Query(fetch) => {
                 if fetch.version < self.quorum_archived_version {
+                    return;
+                }
+                if fetch.version > self.version {
+                    self.reorder_queries
+                        .entry(fetch.version)
+                        .or_default()
+                        .push(fetch);
                     return;
                 }
                 self.read_key(fetch.node_index, fetch.version, fetch.key.into())
@@ -647,6 +650,23 @@ impl ShardedStorage {
         *previous_version = (*previous_version).max(version)
     }
 
+    fn may_bumped(&mut self) {
+        if !self.bump_writing.is_empty() {
+            return;
+        }
+
+        self.actions
+            .push_back(Action::Output(StorageStateOutput::Bumped));
+
+        if let Some(queries) = self.reorder_queries.remove(&self.version) {
+            for query in queries {
+                self.read_key(query.node_index, query.version, query.key.into())
+            }
+        }
+
+        self.may_vote_archive()
+    }
+
     fn is_archiving(&mut self) -> bool {
         self.archiving_stripe_index != self.config.num_stripe
     }
@@ -703,7 +723,7 @@ impl ShardedStorage {
     }
 
     fn prepare_archive_stripe(&mut self) {
-        tracing::info!(
+        tracing::debug!(
             ?self.node_indices, %self.archiving_version, %self.archiving_stripe_index,
             "archiving stripe");
         assert!(self.stripe_group_values.is_empty());
@@ -729,7 +749,7 @@ impl ShardedStorage {
             return;
         }
 
-        tracing::info!(
+        tracing::debug!(
             ?self.node_indices, %self.archiving_version, %self.archiving_stripe_index,
             "archive push");
         for group_index in self.config.is_primary_of(&self.node_indices) {
@@ -819,7 +839,7 @@ impl ShardedStorage {
             return;
         }
 
-        tracing::info!(
+        tracing::debug!(
             ?self.node_indices, %self.archiving_version, %self.archiving_stripe_index,
             "stripe archived");
         if let Some(shard_indices) = self.archive_placements.get(&self.archiving_stripe_index) {

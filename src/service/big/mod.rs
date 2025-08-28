@@ -167,7 +167,7 @@ where
                                 if let DataShardingExecuteOutput::Pending(keys) = execute.proceed()
                                 {
                                     for key in keys {
-                                        self.storage.will_fetch(key.digest().0.into())
+                                        self.storage.prefetch(key.digest().0.into())
                                     }
                                 }
                                 self.executing.push_back(Executing {
