@@ -1,4 +1,4 @@
-use std::{collections::HashSet, iter::repeat};
+use std::{collections::HashSet, iter::repeat_n};
 
 use test_log::test;
 
@@ -203,16 +203,6 @@ impl SystemState {
         }
     }
 
-    fn new(num_service: ReplicaIndex, num_faulty: ReplicaIndex) -> Self {
-        Self::with_config(ShardedStorageConfig {
-            num_node: num_service,
-            num_faulty_node: num_faulty,
-            num_active_copy: 1,
-            num_stripe: 1,
-            bypass_vote: true,
-        })
-    }
-
     fn receive(&mut self, request: Request<KvOp>, since_start: Duration) -> Option<Duration> {
         let tick_afters = (0..self.hosts.len()).map(|index| {
             self.hosts[index]
@@ -226,7 +216,13 @@ impl SystemState {
 
 #[test]
 fn multiple_services() {
-    let mut state = SystemState::new(2, 0);
+    let mut state = SystemState::with_config(ShardedStorageConfig {
+        num_node: 2,
+        num_faulty_node: 0,
+        num_stripe: 2,
+        num_active_copy: 1,
+        bypass_vote: true,
+    });
     state.receive(
         request(1, KvOp::Put("k".into(), "v".into())),
         Duration::ZERO,
@@ -282,7 +278,7 @@ fn garbage_collect1() {
             num_active_copy: 1,
             bypass_vote: true,
         },
-        repeat("k".into()).take(3),
+        repeat_n("k".into(), 3),
     )
 }
 
@@ -296,7 +292,7 @@ fn garbage_collect4() {
             num_active_copy: 1,
             bypass_vote: true,
         },
-        repeat("k".into()).take(3),
+        repeat_n("k".into(), 3),
     )
 }
 
@@ -310,7 +306,7 @@ fn garbage_collect4_stripe2() {
             num_active_copy: 1,
             bypass_vote: true,
         },
-        repeat("k".into()).take(3),
+        repeat_n("k".into(), 3),
     )
 }
 

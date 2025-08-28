@@ -29,9 +29,8 @@ big.num-node            4
 big.num-faulty-node     1
 big.num-active-copy     1
 big.num-cached-value    0
-big.num-max-will-fetch  0
-big.num-stripe          1
-big.num-shard-per-stripe    2
+big.executing-buffer-size   0
+big.num-stripe          4
 big.bypass-vote         true
 
 ycsb.num-key            100

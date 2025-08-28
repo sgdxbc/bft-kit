@@ -322,7 +322,7 @@ mod parse {
         fn extract(configs: &Configs) -> anyhow::Result<Self> {
             Ok(Self {
                 num_cached_value: configs.get("big.num-cached-value")?,
-                executing_buffer_size: configs.get("big.num-max-will-fetch")?,
+                executing_buffer_size: configs.get("big.executing-buffer-size")?,
             })
         }
     }

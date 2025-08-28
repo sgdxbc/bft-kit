@@ -591,7 +591,8 @@ impl State for ShardedStorage {
             }
             ShardedStorageMessage::ArchivePush(archive_push) => {
                 self.handle_archive_push(archive_push);
-                if self.is_archiving() {
+                // check for archive_reading is very nonlocal. any better flow?
+                if self.is_archiving() && self.archive_reading.is_empty() {
                     self.may_finish_archive_stripe()
                 }
             }
@@ -672,7 +673,22 @@ impl ShardedStorage {
     }
 
     fn may_vote_archive(&mut self) {
-        if self.is_archiving() || self.version == self.archiving_version {
+        if self.is_archiving() {
+            return;
+        }
+        // if we cannot serve a new version for archiving
+        if !self.config.bypass_vote && self.version == self.archiving_version
+        // if unsynced, other nodes may have archived on some lower (but >= quorum 
+        // archived) version while we were archiving on archiving_version. so assist
+        // their archiving with same pushes again
+        // remark: if a node has nothing to do during an archiving, i.e., it is not
+        // among the placement of any stripe, this may become an endless `proceed` loop:
+        // the node vote for `self.version`, bypass the voting and start to archive,
+        // immediately finish the archive and go back here again. currently just don't
+        // use the triggering configuration combinations: either set num_node to 3f + 1
+        // or set num_stripe to >= num_node
+            || self.version == self.quorum_archived_version
+        {
             return;
         }
 
@@ -759,13 +775,17 @@ impl ShardedStorage {
                 group_index,
                 values: self.stripe_group_values[&group_index].clone(),
             };
-            let archive_node_indices = self
+            let push_node_indices = &self
                 .config
                 .archive_nodes_of_stripe(self.archiving_stripe_index)
-                .collect();
+                .collect::<HashSet<_>>()
+                - &self
+                    .config
+                    .nodes_of_group(group_index)
+                    .collect::<HashSet<_>>();
             self.actions
                 .push_back(Action::Perform(StorageStateEffect::Send((
-                    Dest::Multi(archive_node_indices),
+                    Dest::Multi(push_node_indices.into_iter().collect()),
                     ShardedStorageMessage::ArchivePush(archive_push),
                 ))))
         }
@@ -796,27 +816,17 @@ impl ShardedStorage {
                     self.insert_archive_push(archive_push.group_index, archive_push.values)
                 }
             }
+        } else if !self.is_archiving()
+            || self
+                .stripe_group_values
+                .contains_key(&archive_push.group_index)
+        {
+            self.reorder_archive_pushes
+                .entry(archive_push.stripe_index)
+                .or_default()
+                .push(archive_push)
         } else {
-            // we accept unaligned archiving version...
-            // ...as long as it would not roll back the archived version
-            if archive_push.version < self.node_archived_versions[self.node_index() as usize] {
-                tracing::warn!(?self.node_indices, "ignore stall ArchivePush");
-                return;
-            }
-            if !self.is_archiving() {
-                self.reorder_archive_pushes
-                    .entry(archive_push.stripe_index)
-                    .or_default()
-                    .push(archive_push)
-            } else {
-                if self.archiving_version < archive_push.version {
-                    tracing::debug!(?self.node_indices, %self.archiving_version, %archive_push.version, "accept unaligned (higher) ArchivePush version");
-                } else if archive_push.version < self.archiving_version {
-                    tracing::debug!(?self.node_indices, %self.archiving_version, %archive_push.version, "align archiving version to incoming ArchivePush");
-                    self.archiving_version = archive_push.version
-                }
-                self.insert_archive_push(archive_push.group_index, archive_push.values)
-            }
+            self.insert_archive_push(archive_push.group_index, archive_push.values)
         }
     }
 
@@ -826,7 +836,12 @@ impl ShardedStorage {
         group_index: ActiveGroupIndex,
         values: HashMap<[u8; 32], Vec<u8>>,
     ) {
-        self.stripe_group_values.insert(group_index, values);
+        let replaced = self.stripe_group_values.insert(group_index, values);
+        if replaced.is_some() {
+            tracing::warn!(
+                ?self.node_indices, %self.archiving_version, %self.archiving_stripe_index, %group_index,
+                "duplicate insertion of ArchivePush")
+        }
     }
 
     fn may_finish_archive_stripe(&mut self) {
