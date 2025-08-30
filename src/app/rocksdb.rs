@@ -26,7 +26,7 @@ impl Rocksdb {
                 YcsbRes::Ok
             }
             YcsbOp::Get(key) => match self.0.get(key)? {
-                Some(value) => YcsbRes::Get(String::from_utf8(value).unwrap_or_default()),
+                Some(value) => YcsbRes::Get(String::from_utf8(value).unwrap()),
                 None => YcsbRes::NotFound,
             },
             YcsbOp::Scan(prefix, limit) => {
@@ -37,8 +37,8 @@ impl Rocksdb {
                     .map(|result| {
                         let (k, v) = result?;
                         Ok((
-                            String::from_utf8(k.to_vec()).unwrap_or_default(),
-                            String::from_utf8(v.to_vec()).unwrap_or_default(),
+                            String::from_utf8(k.to_vec()).unwrap(),
+                            String::from_utf8(v.to_vec()).unwrap(),
                         ))
                     })
                     .collect::<Result<_, Error>>()?;
