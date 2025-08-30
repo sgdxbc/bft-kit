@@ -5,6 +5,7 @@ use crate::{Never, app::AppProtocol, state::State};
 
 pub mod big;
 pub mod unsharded;
+pub mod unsharded2;
 
 pub trait ServiceState<A: AppProtocol>:
     State<
