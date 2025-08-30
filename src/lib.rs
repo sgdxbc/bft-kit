@@ -6,6 +6,7 @@ pub mod service;
 pub mod state;
 pub mod transport;
 pub mod workload;
+pub mod worker2;
 
 #[derive(Debug, bincode::Encode, bincode::Decode)]
 pub enum Never {}
