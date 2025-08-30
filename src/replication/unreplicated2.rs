@@ -1,7 +1,7 @@
 use std::{collections::HashMap, mem::take, time::Duration};
 
 use bincode::{Decode, Encode};
-use quinn::{Connection, RecvStream};
+use quinn::Connection;
 use tokio::{
     select,
     sync::{
@@ -14,7 +14,7 @@ use tokio::{
 
 use crate::{
     app::AppProtocol,
-    service::{ClientId, ClientSeq, Reply, Request},
+    service::{ClientId, Reply, Request},
     transport::BINCODE_CONFIG,
 };
 
@@ -34,10 +34,10 @@ where
     let mut senders = HashMap::new();
     let mut timeouts = JoinSet::new();
     loop {
-        enum Event<I> {
+        enum Event<I, A, T> {
             Invoke(I),
-            Accept(RecvStream),
-            Timeout(ClientSeq),
+            Accept(A),
+            Timeout(T),
         }
         match select! {
             invoke = invoke_receiver.recv() => Event::Invoke(invoke),

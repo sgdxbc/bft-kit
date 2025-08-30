@@ -11,7 +11,7 @@ use bft_kit::{
     workload::{OpLatency, Take},
 };
 use quinn::Endpoint;
-use tokio::{spawn, sync::mpsc::channel};
+use tokio::{spawn, sync::mpsc::channel, time::sleep};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -63,6 +63,8 @@ async fn main() -> anyhow::Result<()> {
     if let Err(err) = client.await.map_err(Into::into).and_then(identity) {
         tracing::error!("client error: {err}")
     }
+    sleep(Duration::from_millis(10)).await;
+
     service_endpoint.close(0u32.into(), b"service shutdown");
     if let Err(err) = service.await.map_err(Into::into).and_then(identity) {
         tracing::error!("service error: {err}")

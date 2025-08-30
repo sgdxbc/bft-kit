@@ -1,7 +1,7 @@
 use std::{collections::HashMap, convert::identity};
 
 use bincode::{Decode, Encode};
-use quinn::{Connection, Endpoint, Incoming, RecvStream};
+use quinn::{Connection, ConnectionError, Endpoint};
 use tokio::{
     select,
     sync::mpsc::{Receiver, Sender, channel},
@@ -26,9 +26,9 @@ where
     Reply<A::Res, RD>: Send + Encode + Clone + 'static,
     RD: Clone,
 {
-    enum Event<R> {
-        Accept(Option<Box<Incoming>>),
-        Close(ClientId),
+    enum Event<A, C, R> {
+        Accept(Option<Box<A>>),
+        Close(C),
         Replicated(R),
     }
     let mut client_loops = JoinSet::new();
@@ -118,15 +118,15 @@ where
 {
     let mut last_reply = Option::<Reply<A::Res, RD>>::None;
     loop {
-        enum Event<R> {
-            Accept(RecvStream),
+        enum Event<A, R> {
+            Accept(A),
             Reply(R),
         }
         match select! {
-            stream = connection.accept_uni() => Event::Accept(stream?),
+            stream = connection.accept_uni() => Event::Accept(stream),
             reply = reply_receiver.recv() => Event::Reply(reply),
         } {
-            Event::Accept(mut stream) => {
+            Event::Accept(Ok(mut stream)) => {
                 let bytes = stream.read_to_end(4 << 10).await?;
                 let (request, _len) =
                     bincode::decode_from_slice::<Request<A::Op>, _>(&bytes, BINCODE_CONFIG)?;
@@ -150,7 +150,17 @@ where
                     break;
                 }
             }
-            Event::Reply(None) => break,
+            Event::Reply(None) => {
+                break;
+            }
+            Event::Accept(Err(err)) => match err {
+                ConnectionError::ApplicationClosed(_) => break,
+                ConnectionError::LocallyClosed => {
+                    tracing::warn!("client connection closed locally");
+                    break;
+                }
+                err => anyhow::bail!(err),
+            },
             Event::Reply(Some(reply)) => {
                 let bytes = bincode::encode_to_vec(&reply, BINCODE_CONFIG)?;
                 connection.open_uni().await?.write_all(&bytes).await?;
