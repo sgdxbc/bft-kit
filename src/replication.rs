@@ -3,6 +3,7 @@ use crate::state::State;
 pub mod replay;
 pub mod transport;
 pub mod unreplicated;
+pub mod unreplicated2;
 
 pub type ReplicaIndex = crate::service::ServiceIndex;
 

@@ -15,7 +15,7 @@ use crate::{
     transport::BINCODE_CONFIG,
 };
 
-pub async fn unsharded_service_loop<A: AppState + 'static, RD>(
+pub async fn unsharded_loop<A: AppState + 'static, RD>(
     endpoint: Endpoint,
     mut app: A,
     submit_sender: Sender<Request<A::Op>>,
