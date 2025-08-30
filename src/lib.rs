@@ -3,6 +3,7 @@ pub mod crypto;
 pub mod parse;
 pub mod replication;
 pub mod service;
+pub mod service2;
 pub mod state;
 pub mod transport;
 pub mod workload;
