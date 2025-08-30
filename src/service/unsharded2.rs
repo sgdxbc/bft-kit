@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, convert::identity};
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, Endpoint, Incoming, RecvStream};
@@ -100,7 +100,9 @@ where
     }
     drop(client_reply_senders);
     while let Some(client_id) = client_loops.join_next().await {
-        client_id??;
+        if let Err(err) = client_id.map_err(Into::into).and_then(identity) {
+            tracing::warn!("service client loop error: {err}")
+        }
     }
     Ok(())
 }
@@ -126,7 +128,8 @@ where
         } {
             Event::Accept(mut stream) => {
                 let bytes = stream.read_to_end(4 << 10).await?;
-                let (request, _len) = bincode::decode_from_slice::<Request<A::Op>, _>(&bytes, BINCODE_CONFIG)?;
+                let (request, _len) =
+                    bincode::decode_from_slice::<Request<A::Op>, _>(&bytes, BINCODE_CONFIG)?;
                 // anyhow::ensure!(len == bytes.len());
                 if let Some(reply) = &last_reply {
                     if reply.client_seq > request.client_seq {

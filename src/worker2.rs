@@ -10,32 +10,29 @@ use tokio_util::sync::CancellationToken;
 
 use crate::workload::{NanoLatencies, WorkloadState};
 
-pub async fn close_loop<W: WorkloadState>(
+pub async fn close_loop<W: WorkloadState + Into<NanoLatencies>>(
     mut workload: W,
     invoke_sender: Sender<(W::Op, oneshot::Sender<W::Res>)>,
     cancel: CancellationToken,
 ) -> anyhow::Result<NanoLatencies> {
-    let mut latencies = NanoLatencies::new(3).unwrap();
     let fut = async {
         while let Some((op, metadata)) = workload.next_op() {
             let (res_sender, res_receiver) = oneshot::channel();
             if invoke_sender.send((op, res_sender)).await.is_err() {
                 anyhow::bail!("invoke channel closed")
             }
-            let start = Instant::now();
             let res = res_receiver.await?;
             workload.complete(metadata, res)?;
-            latencies += start.elapsed().as_nanos() as u64
         }
         Ok(())
     };
     if let Some(result) = cancel.run_until_cancelled(fut).await {
         result?
     }
-    Ok(latencies)
+    Ok(workload.into())
 }
 
-pub async fn open_loop<W: WorkloadState>(
+pub async fn open_loop<W: WorkloadState + Into<NanoLatencies>>(
     mut workload: W,
     target_tput: f32, // ops/sec
     invoke_sender: Sender<(W::Op, oneshot::Sender<W::Res>)>,
@@ -45,7 +42,6 @@ where
     W::Res: Send + 'static,
     W::Metadata: Send + 'static,
 {
-    let mut latencies = NanoLatencies::new(3).unwrap();
     let mut sleep = pin!(sleep(Duration::ZERO));
     let mut res_waits = JoinSet::new();
     let mut all_invoked = false;
@@ -69,21 +65,17 @@ where
                 if invoke_sender.send((op, res_sender)).await.is_err() {
                     anyhow::bail!("invoke channel closed")
                 }
-                let start = Instant::now();
                 res_waits.spawn(async move {
                     let res = res_receiver.await?;
-                    anyhow::Ok((start.elapsed(), metadata, res))
+                    anyhow::Ok((metadata, res))
                 });
                 sleep
                     .as_mut()
                     .reset(Instant::now() + Duration::from_secs_f32(1.0 / target_tput))
             }
-            Event::Waited((latency, metadata, res)) => {
-                workload.complete(metadata, res)?;
-                latencies += latency.as_nanos() as u64
-            }
+            Event::Waited((metadata, res)) => workload.complete(metadata, res)?,
             Event::Cancel => break,
         }
     }
-    Ok(latencies)
+    Ok(workload.into())
 }
