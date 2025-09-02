@@ -3,9 +3,8 @@ use std::sync::Arc;
 use primitive_types::H256;
 use rocksdb::{DB, WriteBatch};
 use tokio::{
-    select,
     sync::{mpsc::Receiver, oneshot},
-    task::JoinSet,
+    task::spawn_blocking,
 };
 
 pub type StorageKey = H256;
@@ -20,33 +19,29 @@ pub async fn full_replication_loop(
     mut invoke_receiver: Receiver<Invoke>,
 ) -> anyhow::Result<()> {
     let db = Arc::new(db);
-    let mut db_workers = JoinSet::new();
-    loop {
-        enum Event<I, W> {
-            Invoke(I),
-            Worker(W),
-        }
-        match select! {
-            invoke = invoke_receiver.recv() => Event::Invoke(invoke),
-            Some(worker) = db_workers.join_next() => Event::Worker(worker),
-        } {
-            Event::Invoke(None) => break,
-            Event::Invoke(Some(Invoke::Get(keys, res_sender))) => {
+    // though supportable, the big service does not issue concurrent invocations, i.e., the invoke
+    // receiver will not receive next Invoke before sending result for the previous one. so we don't
+    // spawn database tasks in a JoinSet, since we won't benefit from its concurrency
+    // on the other hand, the invocation interface still need to be channel based instead of async
+    // methods that taking &mut self. (while full replication implementation does not require,) this
+    // is for the sharded implementation to integrate invocation rounds into a big event loop that
+    // selects on more kinds of events
+    while let Some(invoke) = invoke_receiver.recv().await {
+        match invoke {
+            Invoke::Get(keys, res_sender) => {
                 let db = db.clone();
-                db_workers.spawn_blocking(move || {
-                    let values = db
-                        .multi_get(keys)
-                        .into_iter()
-                        .collect::<Result<Vec<_>, _>>()?;
+                spawn_blocking(move || {
+                    let values = db.multi_get(keys).into_iter().collect::<Result<_, _>>()?;
                     if res_sender.send(values).is_err() {
                         tracing::error!("result channel closed")
                     }
                     anyhow::Ok(())
-                });
+                })
+                .await??
             }
-            Event::Invoke(Some(Invoke::Put(updates, res_sender))) => {
+            Invoke::Put(updates, res_sender) => {
                 let db = db.clone();
-                db_workers.spawn_blocking(move || {
+                spawn_blocking(move || {
                     let mut batch = WriteBatch::new();
                     for (key, value) in updates {
                         batch.put(key, value)
@@ -56,10 +51,9 @@ pub async fn full_replication_loop(
                         tracing::error!("result channel closed")
                     }
                     anyhow::Ok(())
-                });
+                })
+                .await??
             }
-            Event::Worker(Ok(Ok(()))) => {}
-            Event::Worker(err) => err??,
         }
     }
     Ok(())
