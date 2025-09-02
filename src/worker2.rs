@@ -76,14 +76,17 @@ where
                     tracing::error!("invoke channel closed");
                     break;
                 }
-                let wait_sender = waited_sender.clone();
+                let waited_sender = waited_sender.clone();
                 res_tracker.spawn(async move {
                     let Ok(res) = res_receiver.await else {
                         tracing::error!("result channel closed");
                         return;
                     };
-                    if wait_sender.send((metadata, res)).await.is_err() {
-                        tracing::error!("wait channel closed")
+                    if waited_sender.capacity() == 0 {
+                        tracing::warn!("waited channel congested")
+                    }
+                    if waited_sender.send((metadata, res)).await.is_err() {
+                        tracing::error!("waited channel closed")
                     }
                 });
                 sleep
