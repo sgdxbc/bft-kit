@@ -1,4 +1,4 @@
-use std::{convert::identity, time::Duration};
+use std::time::Duration;
 
 use bft_kit::{
     app::null::Null,
@@ -7,11 +7,12 @@ use bft_kit::{
     parse::Configs,
     replication::unreplicated2::{self, unreplicated_loop},
     service::unsharded2::unsharded_loop,
-    worker2::close_loop,
+    // worker2::{close_loop, open_loop},
+    worker2::open_loop,
     workload::{OpLatency, Take},
 };
 use quinn::Endpoint;
-use tokio::{spawn, sync::mpsc::channel, time::sleep};
+use tokio::{join, spawn, sync::mpsc::channel, time::sleep};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -43,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .write_all(&0u32.to_le_bytes())
         .await?;
+
     let (invoke_sender, invoke_receiver) = channel(100);
     let client = spawn(unreplicated2::client_loop::<Null>(
         0,
@@ -51,26 +53,19 @@ async fn main() -> anyhow::Result<()> {
         invoke_receiver,
     ));
     let workload = OpLatency::new(Take::new(Null, 100));
-    let worker = close_loop(workload, invoke_sender, CancellationToken::new());
-    match worker.await {
-        Ok(latencies) => {
-            println!("latency: {:?}", Duration::from_nanos(latencies.min()))
-        }
-        Err(err) => {
-            tracing::error!("worker error: {err}")
-        }
-    }
-    if let Err(err) = client.await.map_err(Into::into).and_then(identity) {
-        tracing::error!("client error: {err}")
-    }
-    sleep(Duration::from_millis(10)).await;
+    // let worker = close_loop(workload, invoke_sender, CancellationToken::new());
+    let worker = open_loop(workload, 100.0, invoke_sender, CancellationToken::new());
 
+    let worker_result = join!(worker, client);
+    sleep(Duration::from_millis(10)).await;
     service_endpoint.close(0u32.into(), b"service shutdown");
-    if let Err(err) = service.await.map_err(Into::into).and_then(identity) {
-        tracing::error!("service error: {err}")
+    let service_result = join!(service, replication);
+    match worker_result {
+        (Ok(latencies), Ok(Ok(()))) => {
+            println!("latency: {:?}", Duration::from_nanos(latencies.mean() as _))
+        }
+        result => tracing::error!(?result, "worker"),
     }
-    if let Err(err) = replication.await.map_err(Into::into).and_then(identity) {
-        tracing::error!("replication error: {err}")
-    }
+    tracing::info!(result = ?service_result, "service");
     Ok(())
 }

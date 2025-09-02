@@ -32,7 +32,8 @@ where
 {
     let mut seq = 0;
     let mut senders = HashMap::new();
-    let mut timeouts = JoinSet::new();
+    let mut timeouts = JoinSet::new(); // instead of TaskTracker to abort on exit
+    let mut timeout_handles = HashMap::new();
     loop {
         enum Event<I, A, T> {
             Invoke(I),
@@ -42,7 +43,7 @@ where
         match select! {
             invoke = invoke_receiver.recv() => Event::Invoke(invoke),
             stream = connection.accept_uni() => Event::Accept(stream?),
-            Some(timeout) = timeouts.join_next() => Event::Timeout(timeout?),
+            Some(timeout) = timeouts.join_next() => Event::Timeout(timeout),
         } {
             Event::Invoke(None) => break,
             Event::Invoke(Some((op, res_sender))) => {
@@ -55,26 +56,30 @@ where
                 let bytes = bincode::encode_to_vec(request, BINCODE_CONFIG)?;
                 connection.open_uni().await?.write_all(&bytes).await?;
                 senders.insert(seq, res_sender);
-                timeouts.spawn(async move {
+                let handle = timeouts.spawn(async move {
                     sleep(timeout).await;
                     seq
                 });
+                timeout_handles.insert(seq, handle);
             }
             Event::Accept(mut stream) => {
                 let bytes = stream.read_to_end(4 << 10).await?;
                 let (reply, _) =
                     bincode::decode_from_slice::<Reply<A::Res, ()>, _>(&bytes, BINCODE_CONFIG)?;
                 let Some(sender) = senders.remove(&reply.client_seq) else {
-                    anyhow::bail!("invalid seq in reply");
+                    anyhow::bail!("invalid seq in Reply")
                 };
                 if sender.send(reply.res).is_err() {
                     tracing::error!("reply sender closed");
                     break;
                 }
+                timeout_handles.remove(&reply.client_seq).unwrap().abort()
             }
-            Event::Timeout(seq) => {
-                tracing::warn!("request timed out: {seq}");
+            Event::Timeout(Err(err)) => assert!(err.is_cancelled()), // propagate if panicked
+            Event::Timeout(Ok(seq)) => {
+                tracing::warn!("request timed out: seq {seq}");
                 senders.remove(&seq); // implicitly close the result channel
+                timeout_handles.remove(&seq);
             }
         }
     }

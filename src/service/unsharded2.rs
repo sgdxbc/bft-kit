@@ -1,4 +1,4 @@
-use std::{collections::HashMap, convert::identity};
+use std::collections::HashMap;
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint};
@@ -38,6 +38,10 @@ where
         match select! {
             connecting = endpoint.accept() => Event::Accept(connecting.map(Into::into)),
             replicated = replicated_receiver.recv() => Event::Replicated(replicated),
+            // strict rule: fail to handle any client gracefully is considered as a fatal
+            // error of the whole service
+            // good for prototyping and reveal unnoticeable issues but probably not suitable
+            // for production
             Some(client_id) = client_loops.join_next() => Event::Close(client_id??),
         } {
             Event::Accept(None) => {
@@ -92,16 +96,20 @@ where
                         tracing::warn!("reply channel congested")
                     }
                     if reply_sender.send(reply).await.is_err() {
-                        tracing::warn!("failed to send reply")
+                        tracing::warn!("reply channel closed")
                     }
                 }
             }
         }
     }
-    drop(client_reply_senders);
-    while let Some(client_id) = client_loops.join_next().await {
-        if let Err(err) = client_id.map_err(Into::into).and_then(identity) {
-            tracing::warn!("service client loop error: {err}")
+    if !client_loops.is_empty() {
+        tracing::warn!(
+            "service shutdown with {} active client loops",
+            client_loops.len()
+        );
+        drop(client_reply_senders);
+        while let Some(client_id) = client_loops.join_next().await {
+            client_id??;
         }
     }
     Ok(())
@@ -150,21 +158,21 @@ where
                     break;
                 }
             }
-            Event::Reply(None) => {
-                break;
-            }
             Event::Accept(Err(err)) => match err {
                 ConnectionError::ApplicationClosed(_) => break,
                 ConnectionError::LocallyClosed => {
+                    // probably should not happen; not drop or close the connection anywhere
+                    // currently
                     tracing::warn!("client connection closed locally");
                     break;
                 }
                 err => anyhow::bail!(err),
             },
+            Event::Reply(None) => break,
             Event::Reply(Some(reply)) => {
                 let bytes = bincode::encode_to_vec(&reply, BINCODE_CONFIG)?;
                 connection.open_uni().await?.write_all(&bytes).await?;
-                last_reply = Some(reply.clone());
+                last_reply = Some(reply.clone())
             }
         }
     }
