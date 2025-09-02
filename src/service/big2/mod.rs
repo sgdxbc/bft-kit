@@ -4,29 +4,37 @@ use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint};
 use tokio::{
     select,
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::{
+        mpsc::{Receiver, Sender, channel},
+        oneshot,
+    },
     task::JoinSet,
 };
 
 use crate::{
-    app::{AppProtocol, AppState},
+    app::{AppProtocol, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState},
+    crypto::{DigestHash, UpdateHash},
     replication::Replicated,
     service::{ClientId, Reply, Request},
     transport::BINCODE_CONFIG,
 };
 
+use self::storage::StorageKey;
+
+use super::ClientSeq;
+
 pub mod storage;
 
-pub async fn big_loop<A: AppState + 'static, RD>(
+pub async fn big_loop<A: DataShardingApp + 'static, RD: Clone>(
     endpoint: Endpoint,
-    mut app: A,
+    app: A,
     submit_sender: Sender<Request<A::Op>>,
     mut replicated_receiver: Receiver<Replicated<Request<A::Op>, RD>>,
+    execute_request_sender: Sender<ExecuteRequest<A, RD>>,
 ) -> anyhow::Result<()>
 where
     Request<A::Op>: Send + Decode<()> + 'static,
     Reply<A::Res, RD>: Send + Encode + Clone + 'static,
-    RD: Clone,
 {
     enum Event<A, C, R> {
         Accept(Option<Box<A>>),
@@ -85,20 +93,18 @@ where
                         continue;
                     }
                     client_seqs.insert(request.client_id, request.client_seq);
-                    let reply = Reply {
+                    let execute_request = ExecuteRequest {
+                        state: app.new_execute(request.op),
                         client_seq: request.client_seq,
-                        res: app.execute(request.op),
                         metadata: replicated.metadata.clone(),
+                        reply_sender: client_reply_senders.get(&request.client_id).cloned(),
                     };
-                    let Some(reply_sender) = client_reply_senders.get(&request.client_id) else {
-                        tracing::warn!("no reply sender for client");
-                        continue;
-                    };
-                    if reply_sender.capacity() == 0 {
-                        tracing::warn!("reply channel congested")
+                    if execute_request_sender.capacity() == 0 {
+                        tracing::warn!("execute request channel congested")
                     }
-                    if reply_sender.send(reply).await.is_err() {
-                        tracing::warn!("reply channel closed")
+                    if execute_request_sender.send(execute_request).await.is_err() {
+                        tracing::error!("execute request channel closed");
+                        break;
                     }
                 }
             }
@@ -175,6 +181,87 @@ where
                 let bytes = bincode::encode_to_vec(&reply, BINCODE_CONFIG)?;
                 connection.open_uni().await?.write_all(&bytes).await?;
                 last_reply = Some(reply.clone())
+            }
+        }
+    }
+    Ok(())
+}
+
+pub struct StorageHandle(pub Sender<storage::Invoke>);
+
+impl StorageHandle {
+    async fn put(&self, updates: Vec<(StorageKey, Vec<u8>)>) -> anyhow::Result<()> {
+        let (res_sender, res_receiver) = oneshot::channel();
+        self.0
+            .send(storage::Invoke::Put(updates, res_sender))
+            .await?;
+        res_receiver.await?;
+        Ok(())
+    }
+
+    async fn get(&self, keys: Vec<StorageKey>) -> anyhow::Result<Vec<Option<Vec<u8>>>> {
+        let (res_sender, res_receiver) = oneshot::channel();
+        self.0.send(storage::Invoke::Get(keys, res_sender)).await?;
+        Ok(res_receiver.await?)
+    }
+}
+
+pub struct ExecuteRequest<A: DataShardingApp, RD> {
+    state: A::ExecuteState,
+    client_seq: ClientSeq,
+    metadata: RD,
+    reply_sender: Option<Sender<Reply<A::Res, RD>>>,
+}
+
+pub async fn execute_loop<A: DataShardingApp, RD>(
+    mut execute_request_receiver: Receiver<ExecuteRequest<A, RD>>,
+    storage_handle: StorageHandle,
+) -> anyhow::Result<()>
+where
+    A::Key: UpdateHash,
+    A::Value: Encode + Decode<()>,
+{
+    while let Some(mut execute_request) = execute_request_receiver.recv().await {
+        loop {
+            match execute_request.state.proceed() {
+                DataShardingExecuteOutput::Pending(keys) => {
+                    let storage_keys = keys
+                        .iter()
+                        .map(|key| StorageKey::from(key.digest().0))
+                        .collect();
+                    let values = storage_handle.get(storage_keys).await?;
+                    for (key, value) in keys.into_iter().zip(values) {
+                        let value = value.map(|bytes| {
+                            let (value, len) =
+                                bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
+                            assert_eq!(len, bytes.len());
+                            value
+                        });
+                        execute_request.state.install(key, value)
+                    }
+                }
+                DataShardingExecuteOutput::Complete(res, updates) => {
+                    let reply = Reply {
+                        client_seq: execute_request.client_seq,
+                        res,
+                        metadata: execute_request.metadata,
+                    };
+                    if let Some(reply_sender) = execute_request.reply_sender {
+                        let result = reply_sender.send(reply).await;
+                        if result.is_err() {
+                            tracing::warn!("reply channel closed")
+                        }
+                    }
+                    let updates = updates
+                        .iter()
+                        .map(|(k, v)| {
+                            let bytes = bincode::encode_to_vec(v, BINCODE_CONFIG).unwrap();
+                            (StorageKey::from(k.digest().0), bytes)
+                        })
+                        .collect();
+                    storage_handle.put(updates).await?;
+                    break;
+                }
             }
         }
     }
