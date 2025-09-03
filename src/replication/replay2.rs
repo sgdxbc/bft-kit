@@ -30,10 +30,10 @@ pub async fn replay_loop<L>(
         anyhow::bail!("all logs have been replayed")
     };
     let receive = async {
-        while let Some(_) = submit_receiver.recv().await {
-            anyhow::bail!("not supported")
+        match submit_receiver.recv().await {
+            Some(_) => anyhow::bail!("not supported"),
+            None => Ok(()),
         }
-        Ok(())
     };
     select! {
         res = replicate => res,

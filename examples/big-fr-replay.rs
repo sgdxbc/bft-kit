@@ -50,6 +50,7 @@ ycsb.value-len          4096
             })
         });
     let temp_dir = tempdir()?;
+    println!("{}", temp_dir.path().display());
     let db = Arc::new(DB::open_default(temp_dir.path())?);
 
     let (submit_sender, submit_receiver) = channel(100);
