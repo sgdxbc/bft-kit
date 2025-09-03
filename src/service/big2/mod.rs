@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint};
+use rocksdb::DB;
 use tokio::{
-    select,
+    select, spawn,
     sync::{
         mpsc::{Receiver, Sender, channel},
         oneshot,
@@ -25,17 +26,31 @@ use super::ClientSeq;
 
 pub mod storage;
 
-pub async fn big_loop<A: DataShardingApp + 'static, RD: Clone>(
+struct StorageHandle(Sender<storage::Invoke>);
+
+pub async fn big_loop<A: DataShardingApp + 'static, RD: Clone + Send + 'static>(
     endpoint: Endpoint,
     app: A,
+    db: DB,
     submit_sender: Sender<Request<A::Op>>,
     mut replicated_receiver: Receiver<Replicated<Request<A::Op>, RD>>,
-    execute_request_sender: Sender<ExecuteRequest<A, RD>>,
 ) -> anyhow::Result<()>
 where
     Request<A::Op>: Send + Decode<()> + 'static,
     Reply<A::Res, RD>: Send + Encode + Clone + 'static,
+    A::Key: UpdateHash + Send,
+    A::Value: Encode + Decode<()> + Send,
+    A::ExecuteState: Send + 'static,
+    A::Res: Send + 'static,
 {
+    let (storage_invoke_sender, storage_invoke_receiver) = channel(100);
+    let storage = spawn(storage::full_replication_loop(db, storage_invoke_receiver));
+    let (execute_request_sender, execute_request_receiver) = channel(100);
+    let execute = spawn(execute_loop::<A, _>(
+        execute_request_receiver,
+        StorageHandle(storage_invoke_sender),
+    ));
+
     enum Event<A, C, R> {
         Accept(Option<Box<A>>),
         Close(C),
@@ -44,10 +59,19 @@ where
     let mut client_loops = JoinSet::new();
     let mut client_seqs = HashMap::new();
     let mut client_reply_senders = HashMap::new();
+
     loop {
         match select! {
             connecting = endpoint.accept() => Event::Accept(connecting.map(Into::into)),
-            replicated = replicated_receiver.recv() => Event::Replicated(replicated),
+            replicated = replicated_receiver.recv(),
+            // it should still work even if we don't apply back pressure here but rely on
+            // the `send` call below; however, we will work with replaying replication which
+            // will definitely overwhelm execution loop (by design), so back pressure a bit
+            // more actively is desired
+            // this rule is of its simplest possible form and may seem too strict, but
+            // should not affect performance
+            // p.s., why only receiver has `len` method but not sender?
+                if execute_request_sender.capacity() < execute_request_sender.max_capacity() => Event::Replicated(replicated),
             // strict rule: fail to handle any client gracefully is considered as a fatal
             // error of the whole service
             // good for prototyping and reveal unnoticeable issues but probably not suitable
@@ -110,6 +134,9 @@ where
             }
         }
     }
+    drop(execute_request_sender);
+    execute.await??;
+    storage.await??;
     if !client_loops.is_empty() {
         tracing::warn!(
             "service shutdown with {} active client loops",
@@ -187,8 +214,6 @@ where
     Ok(())
 }
 
-pub struct StorageHandle(pub Sender<storage::Invoke>);
-
 impl StorageHandle {
     async fn put(&self, updates: Vec<(StorageKey, Vec<u8>)>) -> anyhow::Result<()> {
         let (res_sender, res_receiver) = oneshot::channel();
@@ -206,14 +231,14 @@ impl StorageHandle {
     }
 }
 
-pub struct ExecuteRequest<A: DataShardingApp, RD> {
+struct ExecuteRequest<A: DataShardingApp, RD> {
     state: A::ExecuteState,
     client_seq: ClientSeq,
     metadata: RD,
     reply_sender: Option<Sender<Reply<A::Res, RD>>>,
 }
 
-pub async fn execute_loop<A: DataShardingApp, RD>(
+async fn execute_loop<A: DataShardingApp, RD>(
     mut execute_request_receiver: Receiver<ExecuteRequest<A, RD>>,
     storage_handle: StorageHandle,
 ) -> anyhow::Result<()>
