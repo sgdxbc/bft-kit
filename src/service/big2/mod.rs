@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint};
@@ -9,6 +9,7 @@ use tokio::{
         oneshot,
     },
     task::JoinSet,
+    time::Instant,
 };
 
 use crate::{
@@ -17,6 +18,7 @@ use crate::{
     replication::Replicated,
     service::{ClientId, Reply, Request},
     transport::BINCODE_CONFIG,
+    workload::NanoLatencies,
 };
 
 use self::storage::StorageKey;
@@ -26,7 +28,7 @@ use super::ClientSeq;
 pub mod storage;
 
 #[derive(Debug, Clone)]
-pub struct StorageHandle(Sender<storage::Invoke>);
+pub struct StorageHandle(pub Sender<storage::Invoke>);
 
 pub enum BigServiceLog<Op, M> {
     Request(Request<Op>),
@@ -40,9 +42,9 @@ pub async fn big_loop<
 >(
     endpoint: Endpoint,
     app: A,
-    storage_handle: StorageHandle,
     submit_sender: Sender<BigServiceLog<A::Op, SM>>,
     mut replicated_receiver: Receiver<Replicated<BigServiceLog<A::Op, SM>, RD>>,
+    storage_handle: StorageHandle,
     mut storage_order_receiver: Receiver<SM>,
 ) -> anyhow::Result<()>
 where
@@ -77,15 +79,7 @@ where
             // good for prototyping and reveal unnoticeable issues but probably not suitable
             // for production
             Some(client_id) = client_loops.join_next() => Event::Close(client_id??),
-            replicated = replicated_receiver.recv(),
-            // it should still work even if we don't apply back pressure here but rely on
-            // the `send` call below; however, we will work with replaying replication which
-            // will definitely overwhelm execution loop (by design), so back pressure a bit
-            // more actively is desired
-            // this rule is of its simplest possible form and may seem too strict, but
-            // should not affect performance
-            // p.s., why only receiver has `len` method but not sender?
-                if execute_request_sender.capacity() < execute_request_sender.max_capacity() => Event::Replicated(replicated),
+            replicated = replicated_receiver.recv() => Event::Replicated(replicated),
             // it is fine if storage implementation does not use ordered messages and close
             // the channel
             Some(message) = storage_order_receiver.recv() => Event::StorageOrder(message),
@@ -138,9 +132,9 @@ where
                                 metadata: replicated.metadata.clone(),
                                 reply_sender: client_reply_senders.get(&request.client_id).cloned(),
                             };
-                            if execute_request_sender.capacity() == 0 {
-                                tracing::warn!("execute request channel congested")
-                            }
+                            // if execute_request_sender.capacity() == 0 {
+                            //     tracing::warn!("execute request channel congested")
+                            // }
                             if execute_request_sender.send(execute_request).await.is_err() {
                                 tracing::error!("execute request channel closed");
                                 break 'outer;
@@ -276,7 +270,10 @@ where
     A::Key: UpdateHash,
     A::Value: Encode + Decode<()>,
 {
+    let start = Instant::now();
+    let mut execute_latencies = NanoLatencies::new(3).unwrap();
     while let Some(mut execute_request) = execute_request_receiver.recv().await {
+        let start = Instant::now();
         loop {
             match execute_request.state.proceed() {
                 DataShardingExecuteOutput::Pending(keys) => {
@@ -319,6 +316,13 @@ where
                 }
             }
         }
+        execute_latencies += start.elapsed().as_nanos() as u64
     }
+
+    tracing::info!(
+        "execute tput: {} ops/sec, mean latency: {:?}",
+        execute_latencies.len() as f32 / start.elapsed().as_secs_f32(),
+        Duration::from_nanos(execute_latencies.mean() as _),
+    );
     Ok(())
 }

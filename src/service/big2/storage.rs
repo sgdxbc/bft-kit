@@ -15,10 +15,10 @@ pub enum Invoke {
 }
 
 pub async fn full_replication_loop(
-    db: DB,
+    db: impl Into<Arc<DB>>,
     mut invoke_receiver: Receiver<Invoke>,
 ) -> anyhow::Result<()> {
-    let db = Arc::new(db);
+    let db = db.into();
     // though supportable, the big service does not issue concurrent invocations, i.e., the invoke
     // receiver will not receive next Invoke before sending result for the previous one. so we don't
     // spawn database tasks in a JoinSet, since we won't benefit from its concurrency
