@@ -21,7 +21,7 @@ use crate::{
     workload::NanoLatencies,
 };
 
-use self::storage::StorageKey;
+use self::storage::{FetchResult, StorageKey};
 
 use super::ClientSeq;
 
@@ -46,6 +46,7 @@ pub async fn big_loop<
     mut replicated_receiver: Receiver<Replicated<BigServiceLog<A::Op, SM>, RD>>,
     storage_handle: StorageHandle,
     mut storage_order_receiver: Receiver<SM>,
+    storage_ordered_receive_sender: Sender<SM>,
 ) -> anyhow::Result<()>
 where
     Request<A::Op>: Send + Decode<()> + 'static,
@@ -58,7 +59,7 @@ where
     let (execute_request_sender, execute_request_receiver) = channel(100);
     let execute = spawn(execute_loop::<A, _>(
         execute_request_receiver,
-        storage_handle,
+        storage_handle.clone(),
     ));
 
     enum Event<A, C, R, S> {
@@ -117,7 +118,12 @@ where
             Event::Replicated(Some(replicated)) => {
                 for log in replicated.logs {
                     match log {
-                        BigServiceLog::StorageOrder(message) => todo!(),
+                        BigServiceLog::StorageOrder(message) => {
+                            if storage_ordered_receive_sender.send(message).await.is_err() {
+                                tracing::error!("storage ordered receive channel closed");
+                                break;
+                            }
+                        }
                         BigServiceLog::Request(request) => {
                             if let Some(&seq) = client_seqs.get(&request.client_id)
                                 && seq >= request.client_seq
@@ -246,18 +252,22 @@ struct ExecuteRequest<A: DataShardingApp, RD> {
 }
 
 impl StorageHandle {
-    async fn put(&self, updates: Vec<(StorageKey, Vec<u8>)>) -> anyhow::Result<()> {
+    async fn bump(&self, updates: Vec<(StorageKey, Vec<u8>)>) -> anyhow::Result<()> {
         let (res_sender, res_receiver) = oneshot::channel();
         self.0
-            .send(storage::Invoke::Put(updates, res_sender))
-            .await?;
+            .send(storage::Invoke::Bump(updates, res_sender))
+            .await
+            .map_err(|_| anyhow::format_err!("invoke channel closed"))?;
         res_receiver.await?;
         Ok(())
     }
 
-    async fn get(&self, keys: Vec<StorageKey>) -> anyhow::Result<Vec<Option<Vec<u8>>>> {
+    async fn fetch(&self, keys: Vec<StorageKey>) -> anyhow::Result<FetchResult> {
         let (res_sender, res_receiver) = oneshot::channel();
-        self.0.send(storage::Invoke::Get(keys, res_sender)).await?;
+        self.0
+            .send(storage::Invoke::Fetch(keys, res_sender))
+            .await
+            .map_err(|_| anyhow::format_err!("invoke channel closed"))?;
         Ok(res_receiver.await?)
     }
 }
@@ -271,8 +281,14 @@ where
     A::Value: Encode + Decode<()>,
 {
     let start = Instant::now();
+    let mut num_skip_version = 0;
     let mut execute_latencies = NanoLatencies::new(3).unwrap();
-    while let Some(mut execute_request) = execute_request_receiver.recv().await {
+    'outer: while let Some(mut execute_request) = execute_request_receiver.recv().await {
+        if num_skip_version > 0 {
+            num_skip_version -= 1;
+            continue;
+        }
+
         let start = Instant::now();
         loop {
             match execute_request.state.proceed() {
@@ -281,15 +297,22 @@ where
                         .iter()
                         .map(|key| StorageKey::from(key.digest().0))
                         .collect();
-                    let values = storage_handle.get(storage_keys).await?;
-                    for (key, value) in keys.into_iter().zip(values) {
-                        let value = value.map(|bytes| {
-                            let (value, len) =
-                                bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
-                            assert_eq!(len, bytes.len());
-                            value
-                        });
-                        execute_request.state.install(key, value)
+                    match storage_handle.fetch(storage_keys).await? {
+                        FetchResult::Values(values) => {
+                            for (key, value) in keys.into_iter().zip(values) {
+                                let value = value.map(|bytes| {
+                                    let (value, len) =
+                                        bincode::decode_from_slice(&bytes, BINCODE_CONFIG).unwrap();
+                                    assert_eq!(len, bytes.len());
+                                    value
+                                });
+                                execute_request.state.install(key, value)
+                            }
+                        }
+                        FetchResult::Skip(num_version) => {
+                            num_skip_version = num_version - 1; // minus the current one
+                            continue 'outer;
+                        }
                     }
                 }
                 DataShardingExecuteOutput::Complete(res, updates) => {
@@ -311,7 +334,7 @@ where
                             (StorageKey::from(k.digest().0), bytes)
                         })
                         .collect();
-                    storage_handle.put(updates).await?;
+                    storage_handle.bump(updates).await?;
                     break;
                 }
             }

@@ -57,6 +57,7 @@ ycsb.value-len          4096
     let (replicated_sender, replicated_receiver) = channel(100);
     let (storage_invoke_sender, storage_invoke_receiver) = channel(100);
     let (_storage_order_sender, storage_order_receiver) = channel(100);
+    let (storage_ordered_receive_sender, _storage_ordered_receive_receiver) = channel(100);
     let service = big_loop(
         endpoint.clone(),
         Kv,
@@ -64,6 +65,7 @@ ycsb.value-len          4096
         replicated_receiver,
         StorageHandle(storage_invoke_sender),
         storage_order_receiver,
+        storage_ordered_receive_sender,
     );
     let replication = replay_loop(
         logs,
