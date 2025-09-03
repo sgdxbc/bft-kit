@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint};
-use rocksdb::DB;
 use tokio::{
     select, spawn,
     sync::{
@@ -26,14 +25,25 @@ use super::ClientSeq;
 
 pub mod storage;
 
-struct StorageHandle(Sender<storage::Invoke>);
+#[derive(Debug, Clone)]
+pub struct StorageHandle(Sender<storage::Invoke>);
 
-pub async fn big_loop<A: DataShardingApp + 'static, RD: Clone + Send + 'static>(
+pub enum BigServiceLog<Op, M> {
+    Request(Request<Op>),
+    StorageOrder(M),
+}
+
+pub async fn big_loop<
+    A: DataShardingApp + 'static,
+    SM: Send + 'static,
+    RD: Clone + Send + 'static,
+>(
     endpoint: Endpoint,
     app: A,
-    db: DB,
-    submit_sender: Sender<Request<A::Op>>,
-    mut replicated_receiver: Receiver<Replicated<Request<A::Op>, RD>>,
+    storage_handle: StorageHandle,
+    submit_sender: Sender<BigServiceLog<A::Op, SM>>,
+    mut replicated_receiver: Receiver<Replicated<BigServiceLog<A::Op, SM>, RD>>,
+    mut storage_order_receiver: Receiver<SM>,
 ) -> anyhow::Result<()>
 where
     Request<A::Op>: Send + Decode<()> + 'static,
@@ -43,26 +53,30 @@ where
     A::ExecuteState: Send + 'static,
     A::Res: Send + 'static,
 {
-    let (storage_invoke_sender, storage_invoke_receiver) = channel(100);
-    let storage = spawn(storage::full_replication_loop(db, storage_invoke_receiver));
     let (execute_request_sender, execute_request_receiver) = channel(100);
     let execute = spawn(execute_loop::<A, _>(
         execute_request_receiver,
-        StorageHandle(storage_invoke_sender),
+        storage_handle,
     ));
 
-    enum Event<A, C, R> {
+    enum Event<A, C, R, S> {
         Accept(Option<Box<A>>),
         Close(C),
         Replicated(R),
+        StorageOrder(S),
     }
     let mut client_loops = JoinSet::new();
     let mut client_seqs = HashMap::new();
     let mut client_reply_senders = HashMap::new();
 
-    loop {
+    'outer: loop {
         match select! {
             connecting = endpoint.accept() => Event::Accept(connecting.map(Into::into)),
+            // strict rule: fail to handle any client gracefully is considered as a fatal
+            // error of the whole service
+            // good for prototyping and reveal unnoticeable issues but probably not suitable
+            // for production
+            Some(client_id) = client_loops.join_next() => Event::Close(client_id??),
             replicated = replicated_receiver.recv(),
             // it should still work even if we don't apply back pressure here but rely on
             // the `send` call below; however, we will work with replaying replication which
@@ -72,11 +86,9 @@ where
             // should not affect performance
             // p.s., why only receiver has `len` method but not sender?
                 if execute_request_sender.capacity() < execute_request_sender.max_capacity() => Event::Replicated(replicated),
-            // strict rule: fail to handle any client gracefully is considered as a fatal
-            // error of the whole service
-            // good for prototyping and reveal unnoticeable issues but probably not suitable
-            // for production
-            Some(client_id) = client_loops.join_next() => Event::Close(client_id??),
+            // it is fine if storage implementation does not use ordered messages and close
+            // the channel
+            Some(message) = storage_order_receiver.recv() => Event::StorageOrder(message),
         } {
             Event::Accept(None) => {
                 tracing::info!("endpoint closed; service shutting down");
@@ -94,7 +106,7 @@ where
 
                 let (reply_sender, reply_receiver) = channel(100);
                 let client_loop =
-                    client_loop::<A, _>(connection, submit_sender.clone(), reply_receiver);
+                    client_loop::<A, _, _>(connection, submit_sender.clone(), reply_receiver);
                 client_loops.spawn(async move {
                     client_loop.await?;
                     anyhow::Ok(client_id)
@@ -109,34 +121,48 @@ where
                 break;
             }
             Event::Replicated(Some(replicated)) => {
-                for request in replicated.logs {
-                    if let Some(&seq) = client_seqs.get(&request.client_id)
-                        && seq >= request.client_seq
-                    {
-                        tracing::warn!("ignoring out of order request");
-                        continue;
+                for log in replicated.logs {
+                    match log {
+                        BigServiceLog::StorageOrder(message) => todo!(),
+                        BigServiceLog::Request(request) => {
+                            if let Some(&seq) = client_seqs.get(&request.client_id)
+                                && seq >= request.client_seq
+                            {
+                                tracing::warn!("ignoring out of order request");
+                                continue;
+                            }
+                            client_seqs.insert(request.client_id, request.client_seq);
+                            let execute_request = ExecuteRequest {
+                                state: app.new_execute(request.op),
+                                client_seq: request.client_seq,
+                                metadata: replicated.metadata.clone(),
+                                reply_sender: client_reply_senders.get(&request.client_id).cloned(),
+                            };
+                            if execute_request_sender.capacity() == 0 {
+                                tracing::warn!("execute request channel congested")
+                            }
+                            if execute_request_sender.send(execute_request).await.is_err() {
+                                tracing::error!("execute request channel closed");
+                                break 'outer;
+                            }
+                        }
                     }
-                    client_seqs.insert(request.client_id, request.client_seq);
-                    let execute_request = ExecuteRequest {
-                        state: app.new_execute(request.op),
-                        client_seq: request.client_seq,
-                        metadata: replicated.metadata.clone(),
-                        reply_sender: client_reply_senders.get(&request.client_id).cloned(),
-                    };
-                    if execute_request_sender.capacity() == 0 {
-                        tracing::warn!("execute request channel congested")
-                    }
-                    if execute_request_sender.send(execute_request).await.is_err() {
-                        tracing::error!("execute request channel closed");
-                        break;
-                    }
+                }
+            }
+            Event::StorageOrder(message) => {
+                if submit_sender
+                    .send(BigServiceLog::StorageOrder(message))
+                    .await
+                    .is_err()
+                {
+                    tracing::error!("submit channel closed");
+                    break;
                 }
             }
         }
     }
     drop(execute_request_sender);
     execute.await??;
-    storage.await??;
     if !client_loops.is_empty() {
         tracing::warn!(
             "service shutdown with {} active client loops",
@@ -150,9 +176,9 @@ where
     Ok(())
 }
 
-async fn client_loop<A: AppProtocol, RD>(
+async fn client_loop<A: AppProtocol, SM, RD>(
     connection: Connection,
-    submit_sender: Sender<Request<A::Op>>,
+    submit_sender: Sender<BigServiceLog<A::Op, SM>>,
     mut reply_receiver: Receiver<Reply<A::Res, RD>>,
 ) -> anyhow::Result<()>
 where
@@ -188,7 +214,11 @@ where
                 if submit_sender.capacity() == 0 {
                     tracing::warn!("submit channel congested")
                 }
-                if submit_sender.send(request).await.is_err() {
+                if submit_sender
+                    .send(BigServiceLog::Request(request))
+                    .await
+                    .is_err()
+                {
                     tracing::error!("submit channel closed");
                     break;
                 }
@@ -214,6 +244,13 @@ where
     Ok(())
 }
 
+struct ExecuteRequest<A: DataShardingApp, RD> {
+    state: A::ExecuteState,
+    client_seq: ClientSeq,
+    metadata: RD,
+    reply_sender: Option<Sender<Reply<A::Res, RD>>>,
+}
+
 impl StorageHandle {
     async fn put(&self, updates: Vec<(StorageKey, Vec<u8>)>) -> anyhow::Result<()> {
         let (res_sender, res_receiver) = oneshot::channel();
@@ -229,13 +266,6 @@ impl StorageHandle {
         self.0.send(storage::Invoke::Get(keys, res_sender)).await?;
         Ok(res_receiver.await?)
     }
-}
-
-struct ExecuteRequest<A: DataShardingApp, RD> {
-    state: A::ExecuteState,
-    client_seq: ClientSeq,
-    metadata: RD,
-    reply_sender: Option<Sender<Reply<A::Res, RD>>>,
 }
 
 async fn execute_loop<A: DataShardingApp, RD>(
