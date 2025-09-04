@@ -3,14 +3,14 @@ use std::{collections::HashMap, time::Duration};
 use bincode::{Decode, Encode};
 use quinn::{Connection, ConnectionError, Endpoint};
 use tokio::{
-    select, spawn,
+    select,
     sync::{
         mpsc::{Receiver, Sender, channel},
         oneshot,
     },
-    task::JoinSet,
     time::Instant,
 };
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     app::{AppProtocol, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState},
@@ -45,8 +45,7 @@ pub async fn big_loop<
     submit_sender: Sender<BigServiceLog<A::Op, SM>>,
     mut replicated_receiver: Receiver<Replicated<BigServiceLog<A::Op, SM>, RD>>,
     storage_handle: StorageHandle,
-    mut storage_order_receiver: Receiver<SM>,
-    storage_ordered_receive_sender: Sender<SM>,
+    storage_ordered_message_sender: Sender<SM>,
 ) -> anyhow::Result<()>
 where
     Request<A::Op>: Send + Decode<()> + 'static,
@@ -56,39 +55,39 @@ where
     A::ExecuteState: Send + 'static,
     A::Res: Send + 'static,
 {
-    let (execute_request_sender, execute_request_receiver) = channel(100);
-    let execute = spawn(execute_loop::<A, _>(
-        execute_request_receiver,
-        storage_handle.clone(),
-    ));
+    let tracker = TaskTracker::new();
+    let cancel = CancellationToken::new();
 
-    enum Event<A, C, R, S> {
-        Accept(Option<Box<A>>),
-        Close(C),
-        Replicated(R),
-        StorageOrder(S),
-    }
-    let mut client_loops = JoinSet::new();
+    let (execute_request_sender, execute_request_receiver) = channel(100);
+    tracker.spawn({
+        let cancel = cancel.clone();
+        async move {
+            if let Err(err) = execute_loop::<A, _>(execute_request_receiver, storage_handle).await {
+                tracing::error!(%err);
+                cancel.cancel()
+            }
+        }
+    });
+
     let mut client_seqs = HashMap::new();
     let mut client_reply_senders = HashMap::new();
 
+    let (close_sender, mut close_receiver) = channel(100);
+
     'outer: loop {
+        enum Event<A, C, R> {
+            Accept(Option<Box<A>>),
+            Close(C),
+            Replicated(R),
+            Cancel,
+        }
         match select! {
             connecting = endpoint.accept() => Event::Accept(connecting.map(Into::into)),
-            // strict rule: fail to handle any client gracefully is considered as a fatal
-            // error of the whole service
-            // good for prototyping and reveal unnoticeable issues but probably not suitable
-            // for production
-            Some(client_id) = client_loops.join_next() => Event::Close(client_id??),
+            Some(client_id) = close_receiver.recv() => Event::Close(client_id),
             replicated = replicated_receiver.recv() => Event::Replicated(replicated),
-            // it is fine if storage implementation does not use ordered messages and close
-            // the channel
-            Some(message) = storage_order_receiver.recv() => Event::StorageOrder(message),
+            () = cancel.cancelled() => Event::Cancel
         } {
-            Event::Accept(None) => {
-                tracing::info!("endpoint closed; service shutting down");
-                break;
-            }
+            Event::Accept(None) | Event::Cancel => break,
             Event::Accept(Some(connecting)) => {
                 let connection = (*connecting).await?;
                 let mut client_id = [0; size_of::<ClientId>()];
@@ -102,11 +101,17 @@ where
                 let (reply_sender, reply_receiver) = channel(100);
                 let client_loop =
                     client_loop::<A, _, _>(connection, submit_sender.clone(), reply_receiver);
-                client_loops.spawn(async move {
-                    client_loop.await?;
-                    anyhow::Ok(client_id)
-                });
                 client_reply_senders.insert(client_id, reply_sender);
+
+                let cancel = cancel.clone();
+                let close_sender = close_sender.clone();
+                tracker.spawn(async move {
+                    if let Err(err) = client_loop.await {
+                        tracing::error!(%err);
+                        cancel.cancel()
+                    }
+                    let _ = close_sender.send(client_id).await;
+                });
             }
             Event::Close(client_id) => {
                 client_reply_senders.remove(&client_id);
@@ -119,7 +124,7 @@ where
                 for log in replicated.logs {
                     match log {
                         BigServiceLog::StorageOrder(message) => {
-                            if storage_ordered_receive_sender.send(message).await.is_err() {
+                            if storage_ordered_message_sender.send(message).await.is_err() {
                                 tracing::error!("storage ordered receive channel closed");
                                 break;
                             }
@@ -149,30 +154,18 @@ where
                     }
                 }
             }
-            Event::StorageOrder(message) => {
-                if submit_sender
-                    .send(BigServiceLog::StorageOrder(message))
-                    .await
-                    .is_err()
-                {
-                    tracing::error!("submit channel closed");
-                    break;
-                }
-            }
         }
     }
+    tracker.close();
     drop(execute_request_sender);
-    execute.await??;
-    if !client_loops.is_empty() {
+    if !client_reply_senders.is_empty() {
         tracing::warn!(
             "service shutdown with {} active client loops",
-            client_loops.len()
+            client_reply_senders.len()
         );
-        drop(client_reply_senders);
-        while let Some(client_id) = client_loops.join_next().await {
-            client_id??;
-        }
+        drop(client_reply_senders)
     }
+    tracker.wait().await;
     Ok(())
 }
 

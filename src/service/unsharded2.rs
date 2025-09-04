@@ -26,12 +26,14 @@ where
     Reply<A::Res, RD>: Send + Encode + Clone + 'static,
     RD: Clone,
 {
+    let tracker = TaskTracker::new();
+    let cancel = CancellationToken::new();
+
     let mut client_seqs = HashMap::new();
     let mut client_reply_senders = HashMap::new();
 
     let (close_sender, mut close_receiver) = channel(100);
-    let tracker = TaskTracker::new();
-    let cancel = CancellationToken::new();
+
     loop {
         enum Event<A, C, R> {
             Accept(Option<Box<A>>),
@@ -60,6 +62,7 @@ where
                 let client_loop =
                     client_loop::<A, _>(connection, submit_sender.clone(), reply_receiver);
                 client_reply_senders.insert(client_id, reply_sender);
+
                 let cancel = cancel.clone();
                 let close_sender = close_sender.clone();
                 tracker.spawn(async move {
