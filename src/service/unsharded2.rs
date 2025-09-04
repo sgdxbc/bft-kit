@@ -5,8 +5,8 @@ use quinn::{Connection, ConnectionError, Endpoint};
 use tokio::{
     select,
     sync::mpsc::{Receiver, Sender, channel},
-    task::JoinSet,
 };
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     app::{AppProtocol, AppState},
@@ -26,28 +26,26 @@ where
     Reply<A::Res, RD>: Send + Encode + Clone + 'static,
     RD: Clone,
 {
-    enum Event<A, C, R> {
-        Accept(Option<Box<A>>),
-        Close(C),
-        Replicated(R),
-    }
-    let mut client_loops = JoinSet::new();
     let mut client_seqs = HashMap::new();
     let mut client_reply_senders = HashMap::new();
+
+    let (close_sender, mut close_receiver) = channel(100);
+    let tracker = TaskTracker::new();
+    let cancel = CancellationToken::new();
     loop {
+        enum Event<A, C, R> {
+            Accept(Option<Box<A>>),
+            Close(C),
+            Replicated(R),
+            Cancel,
+        }
         match select! {
             connecting = endpoint.accept() => Event::Accept(connecting.map(Into::into)),
             replicated = replicated_receiver.recv() => Event::Replicated(replicated),
-            // strict rule: fail to handle any client gracefully is considered as a fatal
-            // error of the whole service
-            // good for prototyping and reveal unnoticeable issues but probably not suitable
-            // for production
-            Some(client_id) = client_loops.join_next() => Event::Close(client_id??),
+            Some(client_id) = close_receiver.recv() => Event::Close(client_id),
+            () = cancel.cancelled() => Event::Cancel
         } {
-            Event::Accept(None) => {
-                tracing::info!("endpoint closed; service shutting down");
-                break;
-            }
+            Event::Accept(None) | Event::Cancel => break,
             Event::Accept(Some(connecting)) => {
                 let connection = (*connecting).await?;
                 let mut client_id = [0; size_of::<ClientId>()];
@@ -61,11 +59,16 @@ where
                 let (reply_sender, reply_receiver) = channel(100);
                 let client_loop =
                     client_loop::<A, _>(connection, submit_sender.clone(), reply_receiver);
-                client_loops.spawn(async move {
-                    client_loop.await?;
-                    anyhow::Ok(client_id)
-                });
                 client_reply_senders.insert(client_id, reply_sender);
+                let cancel = cancel.clone();
+                let close_sender = close_sender.clone();
+                tracker.spawn(async move {
+                    if let Err(err) = client_loop.await {
+                        tracing::error!(%err);
+                        cancel.cancel()
+                    }
+                    let _ = close_sender.send(client_id).await;
+                });
             }
             Event::Close(client_id) => {
                 client_reply_senders.remove(&client_id);
@@ -102,16 +105,15 @@ where
             }
         }
     }
-    if !client_loops.is_empty() {
+    tracker.close();
+    if !client_reply_senders.is_empty() {
         tracing::warn!(
             "service shutdown with {} active client loops",
-            client_loops.len()
+            client_reply_senders.len()
         );
-        drop(client_reply_senders);
-        while let Some(client_id) = client_loops.join_next().await {
-            client_id??;
-        }
+        drop(client_reply_senders)
     }
+    tracker.wait().await;
     Ok(())
 }
 
@@ -161,15 +163,19 @@ where
             Event::Accept(Err(err)) => match err {
                 ConnectionError::ApplicationClosed(_) => break,
                 ConnectionError::LocallyClosed => {
-                    // probably should not happen; not drop or close the connection anywhere
-                    // currently
                     tracing::warn!("client connection closed locally");
                     break;
                 }
                 err => anyhow::bail!(err),
             },
-            Event::Reply(None) => break,
+            Event::Reply(None) => {
+                tracing::error!("reply channel closed");
+                break;
+            }
             Event::Reply(Some(reply)) => {
+                if let Some(last_reply) = &last_reply {
+                    anyhow::ensure!(reply.client_seq > last_reply.client_seq)
+                }
                 let bytes = bincode::encode_to_vec(&reply, BINCODE_CONFIG)?;
                 connection.open_uni().await?.write_all(&bytes).await?;
                 last_reply = Some(reply.clone())
