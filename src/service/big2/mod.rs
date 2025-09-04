@@ -35,6 +35,12 @@ pub enum BigServiceLog<Op, M> {
     StorageOrder(M),
 }
 
+impl<Op, M> From<M> for BigServiceLog<Op, M> {
+    fn from(message: M) -> Self {
+        BigServiceLog::StorageOrder(message)
+    }
+}
+
 pub async fn big_loop<
     A: DataShardingApp + 'static,
     SM: Send + 'static,

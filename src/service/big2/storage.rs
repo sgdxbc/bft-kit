@@ -10,14 +10,14 @@ use quinn::Connection;
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng, seq::IteratorRandom};
 use rocksdb::{DB, WriteBatch};
 use tokio::{
-    select, spawn,
+    select,
     sync::{
         mpsc::{Receiver, Sender, channel},
         oneshot,
     },
-    task::{JoinSet, spawn_blocking},
+    task::spawn_blocking,
 };
-use tokio_util::{bytes::Bytes, task::TaskTracker};
+use tokio_util::{bytes::Bytes, sync::CancellationToken, task::TaskTracker};
 
 use crate::{service::ServiceIndex, transport::BINCODE_CONFIG};
 
@@ -160,9 +160,9 @@ impl ShardedStorageConfig {
         StdRng::from_seed(key.0).random_range(0..self.num_active_group())
     }
 
-    // fn nodes_of(&self, key: &StorageKey) -> impl Iterator<Item = NodeIndex> {
-    //     self.nodes_of_group(self.group_of(key))
-    // }
+    fn nodes_of(&self, key: &StorageKey) -> impl Iterator<Item = NodeIndex> {
+        self.nodes_of_group(self.group_of(key))
+    }
 
     // archive tier
     fn repair_threshold(&self) -> NodeIndex {
@@ -202,89 +202,8 @@ impl ShardedStorageConfig {
     }
 }
 
-struct VersionTable {
-    map: HashMap<StripeIndex, HashMap<StorageKey, Vec<StateVersion>>>,
-}
-
-impl VersionTable {
-    fn new(num_stripe: StripeIndex) -> Self {
-        Self {
-            map: (0..num_stripe)
-                .map(|index| (index, Default::default()))
-                .collect(),
-        }
-    }
-
-    fn add(&mut self, key: StorageKey, version: StateVersion, config: &ShardedStorageConfig) {
-        let versions = self
-            .map
-            .entry(config.stripe_of(&key))
-            .or_default()
-            .entry(key)
-            .or_default();
-        if let Some(&last_version) = versions.last() {
-            assert!(version > last_version)
-        }
-        versions.push(version)
-    }
-
-    fn find(
-        &self,
-        key: &StorageKey,
-        version: StateVersion,
-        config: &ShardedStorageConfig,
-    ) -> Option<StateVersion> {
-        let versions = self.map[&config.stripe_of(key)].get(key)?;
-        match versions.binary_search(&version) {
-            Err(0) => None,
-            Ok(index) => Some(versions[index]),
-            Err(index) => Some(versions[index - 1]),
-        }
-    }
-
-    fn snapshot(
-        &self,
-        stripe_index: StripeIndex,
-        version: StateVersion,
-        config: &ShardedStorageConfig,
-    ) -> impl Iterator<Item = (&StorageKey, StateVersion)> {
-        self.map[&stripe_index].keys().filter_map(move |key| {
-            self.find(key, version, config)
-                .map(|version| (key, version))
-        })
-    }
-
-    fn collect(
-        &mut self,
-        version: StateVersion,
-    ) -> impl Iterator<Item = (&StorageKey, StateVersion)> {
-        // optimized with a binary heap if iterating all keys is too slow
-        self.map.values_mut().flat_map(move |stripe| {
-            stripe.iter_mut().flat_map(move |(key, versions)| {
-                // versions[active_index] is the highest version that is <= version
-                // this is the earliest version that should _not_ be collected
-                // remarks that this version may be lower than `version`, but is not collected
-                // because it is needed to serve a later `find` call with `version` as argument
-                // (which should not return None)
-
-                // doing so implies that for each key there is a version (i.e. the `version`
-                // passed into this method) that is both archived and active
-                // this design ensures that the system _never_ need to read from archive tier
-                // as long as active tier is not compromised (by `r` random (faulty) replicas),
-                // even when the system is just started or reactivated after an idle period,
-                // during what the last version is archived
-                let active_index = match versions.binary_search(&version) {
-                    Ok(index) => index,
-                    Err(0) => 0, // version < v for all v in versions; nothing to collect
-                    Err(index) => index - 1,
-                };
-                versions
-                    .drain(..active_index)
-                    .map(move |version| (key, version))
-            })
-        })
-    }
-}
+// rocksdb key convention
+// `{stripe index:04x}.{key:x}.{version:08x}`
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum ShardedStorageMessage {
@@ -294,253 +213,208 @@ pub enum ShardedStorageMessage {
     Archived(message::Archived),
 }
 
-pub async fn sharded_loop(
+pub struct ShardedLoop<L> {
     service_index: ServiceIndex,
     node_table: Vec<ServiceIndex>, // [node index -> service index]
     connections: HashMap<ServiceIndex, Connection>,
-    db: impl Into<Arc<DB>>,
+    db: Arc<DB>,
     config: ShardedStorageConfig,
-    mut invoke_receiver: Receiver<Invoke>,
-    order_sender: Sender<message::VoteArchive>,
+    invoke_receiver: Receiver<Invoke>,
+    submit_sender: Sender<L>,
     ordered_receive_receiver: Receiver<message::VoteArchive>,
-) -> anyhow::Result<()> {
-    let db = db.into();
-    let node_indices = node_table
-        .iter()
-        .enumerate()
-        .filter_map(|(node_index, &index)| {
-            if index == service_index {
-                Some(node_index as NodeIndex)
-            } else {
-                None
+
+    group_indices: HashSet<ActiveGroupIndex>,
+    version: StateVersion,
+    fetching: Option<Fetching>,
+    bumping: Option<oneshot::Sender<()>>,
+    quorum_archived_version: StateVersion, // cached node_archived_versions[num_faulty]
+    node_archived_versions: Vec<StateVersion>,
+
+    event_sender: Sender<ShardedEvent>,
+    event_receiver: Receiver<ShardedEvent>,
+
+    tracker: TaskTracker,
+    cancel: CancellationToken,
+}
+
+enum ShardedEvent {
+    Message(ShardedStorageMessage, Bytes),
+    GetComplete(StorageKey, Option<Vec<u8>>),
+    BumpComplete,
+}
+
+struct Fetching {
+    keys: Vec<StorageKey>,
+    values: HashMap<StorageKey, Option<Vec<u8>>>,
+    res_sender: oneshot::Sender<FetchResult>,
+}
+
+impl<L> ShardedLoop<L> {
+    fn spawn(&self, fut: impl Future<Output = anyhow::Result<()>> + Send + 'static) {
+        let cancel = self.cancel.clone();
+        self.tracker.spawn(async move {
+            if let Err(err) = fut.await {
+                tracing::error!(%err);
+                cancel.cancel()
             }
-        })
-        .collect::<HashSet<_>>();
-    let groups = config
-        .groups_of_nodes(&node_indices)
-        .collect::<HashSet<_>>();
-
-    let (message_sender, mut message_receiver) = channel(100);
-    let (archive_push_sender, archive_push_receiver) = channel(100);
-
-    let mut connection_reads = JoinSet::new();
-    for connection in connections.values() {
-        let connection = connection.clone();
-        let message_sender = message_sender.clone();
-        let archive_push_sender = archive_push_sender.clone();
-        connection_reads.spawn(async move {
-            let read_tracker = TaskTracker::new();
-            loop {
-                let mut stream = match connection.accept_uni().await {
-                    Ok(stream) => stream,
-                    Err(err) => {
-                        tracing::error!("accepting stream failed: {err}");
-                        break;
-                    }
-                };
-
-                let message_sender = message_sender.clone();
-                let archive_push_sender = archive_push_sender.clone();
-                let read = async move {
-                    let bytes = Bytes::from(stream.read_to_end(64 << 20).await?);
-                    let (message, len) = bincode::decode_from_slice::<ShardedStorageMessage, _>(
-                        &bytes,
-                        BINCODE_CONFIG,
-                    )?;
-                    if let ShardedStorageMessage::ArchivePush(archive_push) = message {
-                        archive_push_sender
-                            .send((archive_push, bytes.slice(bytes.len() - len..)))
-                            .await
-                            .map_err(|_| anyhow::format_err!("archive push channel closed"))?
-                    } else {
-                        anyhow::ensure!(len == bytes.len());
-                        message_sender
-                            .send(message)
-                            .await
-                            .map_err(|_| anyhow::format_err!("message channel closed"))?
-                    }
-                    Ok(())
-                };
-                read_tracker.spawn(async move {
-                    if let Err(err) = read.await {
-                        tracing::error!(%err)
-                    }
-                });
-            }
-            read_tracker.close();
-            read_tracker.wait().await;
-            anyhow::Ok(())
         });
     }
 
-    let (get_keys_sender, get_keys_receiver) = channel(100);
-    let (archived_sender, mut archived_receiver) = channel(100);
-    let archive = spawn(archive_loop(
-        node_indices.clone(),
-        config.clone(),
-        connections.clone(),
-        db.clone(),
-        get_keys_receiver,
-        archive_push_receiver,
-        archived_sender,
-    ));
+    fn spawn_read_loops(&self) {
+        for connection in self.connections.values() {
+            let connection = connection.clone();
+            let event_sender = self.event_sender.clone();
+            let tracker = self.tracker.clone();
+            let cancel = self.cancel.clone();
+            self.spawn(async move {
+                loop {
+                    let mut stream = connection.accept_uni().await?;
 
-    let mut version = 0;
-    let mut version_table = VersionTable::new(config.num_stripe);
+                    let event_sender = event_sender.clone();
+                    let read = async move {
+                        let bytes = Bytes::from(stream.read_to_end(64 << 20).await?);
+                        let (message, len) = bincode::decode_from_slice::<ShardedStorageMessage, _>(
+                            &bytes,
+                            BINCODE_CONFIG,
+                        )?;
+                        if !matches!(message, ShardedStorageMessage::ArchivePush(_)) {
+                            anyhow::ensure!(len == bytes.len());
+                        }
+                        if event_sender
+                            .send(ShardedEvent::Message(
+                                message,
+                                bytes.slice(bytes.len() - len..),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            tracing::error!("event channel closed")
+                        }
+                        Ok(())
+                    };
 
-    let mut voted_epoch = 0;
-    let mut ready_for_archive = true;
-
-    let mut nodes_archived_versions = vec![0; config.num_node as _];
-    let mut quorum_archived_version = 0;
-
-    let tracker = TaskTracker::new();
-    let (mut fetch_queried_sender, mut fetch_queried_receiver) = channel(100);
-    let (mut fetch_skip_sender, mut fetch_skip_receiver) = channel(100);
-
-    loop {
-        enum Event<I, M, V> {
-            Invoke(I),
-            Message(M),
-            Archived(V),
+                    let cancel = cancel.clone();
+                    tracker.spawn(async move {
+                        if let Err(err) = read.await {
+                            tracing::error!(%err);
+                            cancel.cancel()
+                        }
+                    });
+                }
+                #[allow(unreachable_code)]
+                anyhow::Ok(())
+            })
         }
-        match select! {
-            invoke = invoke_receiver.recv() => Event::Invoke(invoke),
-            Some(message) = message_receiver.recv() => Event::Message(message),
-            Some(archived) = archived_receiver.recv() => Event::Archived(archived),
-        } {
-            Event::Invoke(None) => break,
-            Event::Invoke(Some(Invoke::Fetch(keys, res_sender))) => {
-                let mut get_res = HashMap::new();
-                let mut querying_keys = HashSet::new();
+    }
 
-                let mut get_keys = Vec::new();
+    fn handle_invoke(&mut self, invoke: Invoke) -> anyhow::Result<()> {
+        match invoke {
+            Invoke::Fetch(keys, res_sender) => {
+                assert!(self.fetching.is_none());
                 for &key in &keys {
-                    let group = config.group_of(&key);
-                    if groups.contains(&group) {
-                        match version_table.find(&key, version, &config) {
-                            Some(version) => get_keys.push(format!("{version}.{key:x}")),
-                            None => {
-                                get_res.insert(key, None);
+                    let group = self.config.group_of(&key);
+                    if self.group_indices.contains(&group) {
+                        let target_prefix = format!("{:04x}.{key:x}", self.config.stripe_of(&key));
+                        let seek_key = format!("{target_prefix}.{:08x}", self.version);
+                        let db = self.db.clone();
+                        let event_sender = self.event_sender.clone();
+                        self.spawn(async move {
+                            let value =
+                                spawn_blocking(move || get(target_prefix, seek_key, db)).await??;
+                            if event_sender
+                                .send(ShardedEvent::GetComplete(key, value))
+                                .await
+                                .is_err()
+                            {
+                                tracing::error!("event channel closed")
                             }
-                        }
-                        continue;
-                    }
-
-                    querying_keys.insert(key);
-                    let query = message::Query {
-                        version,
-                        key: key.0,
-                        service_index,
-                    };
-                    let query = Bytes::from(bincode::encode_to_vec(
-                        ShardedStorageMessage::Query(query),
-                        BINCODE_CONFIG,
-                    )?);
-                    for connection in config
-                        .nodes_of_group(group)
-                        .map(|node_index| &connections[&node_table[node_index as usize]])
-                    {
-                        let connection = connection.clone();
-                        let query = query.clone();
-                        let query = async move {
-                            connection.open_uni().await?.write_all(&query).await?;
                             anyhow::Ok(())
+                        })
+                    } else {
+                        let query = message::Query {
+                            version: self.version,
+                            key: key.0,
+                            service_index: self.service_index,
                         };
-                        tracker.spawn(async move {
-                            if let Err(err) = query.await {
-                                tracing::error!(%err)
-                            }
-                        });
+                        let query = Bytes::from(bincode::encode_to_vec(
+                            ShardedStorageMessage::Query(query),
+                            BINCODE_CONFIG,
+                        )?);
+                        let service_indices = self
+                            .config
+                            .nodes_of(&key)
+                            .map(|node_index| self.node_table[node_index as usize])
+                            .collect::<HashSet<_>>();
+                        for service_index in service_indices {
+                            let connection = self.connections[&service_index].clone();
+                            let query = query.clone();
+                            self.spawn(async move {
+                                connection.open_uni().await?.write_all(&query).await?;
+                                anyhow::Ok(())
+                            })
+                        }
                     }
                 }
 
-                (fetch_queried_sender, fetch_queried_receiver) = channel(100);
-                (fetch_skip_sender, fetch_skip_receiver) = channel(100);
-                let fetch = async move {
-                    let res = loop {
-                        if querying_keys.is_empty() {
-                            break FetchResult::Values(
-                                keys.into_iter()
-                                    .map(|key| get_res.remove(&key).unwrap())
-                                    .collect(),
-                            );
-                        }
-                        enum Event<F, S> {
-                            Fetched(F),
-                            Skip(S),
-                        }
-                        match select! {
-                            Some(fetched) = fetch_queried_receiver.recv() => Event::Fetched(fetched),
-                            Some(skipped) = fetch_skip_receiver.recv() => Event::Skip(skipped),
-                            else => anyhow::bail!("get channel(s) closed")
-                        } {
-                            Event::Fetched((key, value)) => {
-                                get_res.insert(key, value);
-                                querying_keys.remove(&key);
-                            }
-                            Event::Skip(entered_version) => {
-                                break FetchResult::Skip(entered_version - version);
-                            }
-                        }
-                    };
-                    res_sender
-                        .send(res)
-                        .map_err(|_| anyhow::format_err!("result channel closed"))?;
-                    anyhow::Ok(())
-                };
-                tracker.spawn(async move {
-                    if let Err(err) = fetch.await {
-                        tracing::error!(%err)
-                    }
-                });
+                self.fetching = Some(Fetching {
+                    keys,
+                    values: HashMap::new(),
+                    res_sender,
+                })
             }
-            Event::Invoke(Some(Invoke::Bump(updates, res_sender))) => {
-                version += 1;
-                for &(key, _) in &updates {
-                    version_table.add(key, version, &config);
+            Invoke::Bump(updates, res_sender) => {
+                assert!(self.bumping.is_none());
+                if let Some(_fetching) = self.fetching.take() {
+                    tracing::warn!("bump while fetching in progress");
+                    // implicitly close Fetch result channel
                 }
-                let db = db.clone();
-                let bump = async move {
-                    let mut batch = WriteBatch::new();
-                    for (key, value) in updates {
-                        batch.put(format!("{version}.{key:x}"), value)
-                    }
+
+                let mut batch = WriteBatch::new();
+                for (key, value) in updates {
+                    let db_key = format!(
+                        "{:04x}.{key:x}.{:08x}",
+                        self.config.stripe_of(&key),
+                        self.version + 1
+                    );
+                    batch.put(db_key, value)
+                }
+                let db = self.db.clone();
+                let event_sender = self.event_sender.clone();
+                self.spawn(async move {
                     spawn_blocking(move || db.write(batch)).await??;
-                    res_sender
-                        .send(())
-                        .map_err(|_| anyhow::format_err!("result channel closed"))?;
-                    anyhow::Ok(())
-                };
-                tracker.spawn(async move {
-                    if let Err(err) = bump.await {
-                        tracing::error!(%err)
+                    if event_sender.send(ShardedEvent::BumpComplete).await.is_err() {
+                        tracing::error!("event channel closed")
                     }
+                    anyhow::Ok(())
                 });
+                self.bumping = Some(res_sender)
             }
+        }
+        Ok(())
+    }
 
-            Event::Message(ShardedStorageMessage::Query(query)) => {
-                if query.version > version {
+    fn handle_message(
+        &mut self,
+        message: ShardedStorageMessage,
+        bytes: Bytes,
+    ) -> anyhow::Result<()> {
+        match message {
+            ShardedStorageMessage::Query(query) => {
+                if query.version > self.version {
                     // TODO
-                    continue;
+                    return Ok(());
                 }
-                if query.version < quorum_archived_version {
-                    continue;
+                if query.version < self.quorum_archived_version {
+                    return Ok(());
                 }
 
                 let key = StorageKey::from(query.key);
-                let versioned_key = version_table
-                    .find(&key, query.version, &config)
-                    .map(|version| format!("{version}.{key:x}"));
-                let db = db.clone();
-                let connection = connections[&query.service_index].clone();
-                let reply = async move {
-                    let value = match versioned_key {
-                        None => None,
-                        Some(versioned_key) => {
-                            spawn_blocking(move || db.get(versioned_key)).await??
-                        }
-                    };
+                let target_prefix = format!("{:04x}.{key:x}", self.config.stripe_of(&key));
+                let seek_key = format!("{target_prefix}.{:08x}", query.version);
+                let db = self.db.clone();
+                let connection = self.connections[&query.service_index].clone();
+                self.spawn(async move {
+                    let value = spawn_blocking(move || get(target_prefix, seek_key, db)).await??;
                     let query_ok = message::QueryOk {
                         version: query.version,
                         key: key.0,
@@ -549,112 +423,117 @@ pub async fn sharded_loop(
                     let bytes = bincode::encode_to_vec(&query_ok, BINCODE_CONFIG)?;
                     connection.open_uni().await?.write_all(&bytes).await?;
                     anyhow::Ok(())
-                };
-                tracker.spawn(async move {
-                    if let Err(err) = reply.await {
-                        tracing::error!(%err)
-                    }
                 });
             }
-            Event::Message(ShardedStorageMessage::QueryOk(query_ok)) => {
-                assert!(query_ok.version <= version);
-                if query_ok.version < version {
-                    continue;
+            ShardedStorageMessage::QueryOk(query_ok) => {
+                assert!(query_ok.version <= self.version);
+                if query_ok.version < self.version {
+                    return Ok(());
                 }
-                let _ = fetch_queried_sender
-                    .send((StorageKey::from(query_ok.key), query_ok.value))
-                    .await;
+                self.insert_fetched(StorageKey::from(query_ok.key), query_ok.value)
             }
-            Event::Message(ShardedStorageMessage::ArchivePush(_)) => unreachable!(),
-            Event::Message(ShardedStorageMessage::Archived(archived)) => {
+            ShardedStorageMessage::ArchivePush(_archive_push) => {
+                // TODO
+            }
+            ShardedStorageMessage::Archived(archived) => {
                 for node_index in archived.node_indices {
-                    let saved_version = &mut nodes_archived_versions[node_index as usize];
-                    *saved_version = (*saved_version).max(version)
+                    let saved_version = &mut self.node_archived_versions[node_index as usize];
+                    *saved_version = (*saved_version).max(archived.version)
                 }
-                let mut versions = nodes_archived_versions.clone();
+                let mut versions = self.node_archived_versions.clone();
                 versions.sort_unstable();
-                if versions[config.num_faulty_node as usize] > quorum_archived_version {
-                    quorum_archived_version = versions[config.num_faulty_node as usize];
+                if versions[self.config.num_faulty_node as usize] > self.quorum_archived_version {
+                    self.quorum_archived_version = versions[self.config.num_faulty_node as usize];
 
-                    if quorum_archived_version > version {
-                        version = quorum_archived_version;
-                        let _ = fetch_skip_sender.send(version).await;
+                    if self.quorum_archived_version > self.version {
+                        if let Some(fetching) = self.fetching.take() {
+                            let send_err = fetching
+                                .res_sender
+                                .send(FetchResult::Skip(
+                                    self.quorum_archived_version - self.version,
+                                ))
+                                .is_err();
+                            if send_err {
+                                tracing::error!("result channel closed");
+                            }
+                        }
+                        self.version = self.quorum_archived_version
                     }
-
-                    let collect_keys = version_table
-                        .collect(quorum_archived_version)
-                        .map(|(key, version)| format!("{version}.{key:x}"))
-                        .collect::<Vec<_>>();
-                    let db = db.clone();
-                    let collect = async move {
-                        let mut batch = WriteBatch::new();
-                        for key in collect_keys {
-                            batch.delete(key);
-                        }
-                        spawn_blocking(move || db.write(batch)).await??;
-                        anyhow::Ok(())
-                    };
-                    tracker.spawn(async move {
-                        if let Err(err) = collect.await {
-                            tracing::error!(%err)
-                        }
-                    });
                 }
             }
+        }
+        Ok(())
+    }
 
-            Event::Archived(archived_version) => {
-                // TODO send Archived
-                assert!(version >= archived_version);
-                if version > archived_version {
-                    // TODO vote next epoch
-                } else {
-                    ready_for_archive = true;
+    fn insert_fetched(&mut self, key: StorageKey, value: Option<Vec<u8>>) {
+        if let Some(fetching) = &mut self.fetching
+            && fetching.keys.contains(&key)
+        {
+            fetching.values.insert(key, value);
+            if fetching.values.len() == fetching.keys.len() {
+                let mut fetching = self.fetching.take().unwrap();
+                let values = fetching
+                    .keys
+                    .into_iter()
+                    .map(|key| fetching.values.remove(&key).unwrap())
+                    .collect();
+                if fetching
+                    .res_sender
+                    .send(FetchResult::Values(values))
+                    .is_err()
+                {
+                    tracing::error!("result channel closed")
                 }
             }
         }
     }
-    Ok(())
+
+    fn handle_get_complete(&mut self, key: StorageKey, value: Option<Vec<u8>>) {
+        self.insert_fetched(key, value)
+    }
+
+    fn handle_bump_complete(&mut self) {
+        let res_sender = self.bumping.take().unwrap();
+        if res_sender.send(()).is_err() {
+            tracing::error!("result channel closed")
+        }
+        self.version += 1
+    }
+
+    pub async fn run(mut self) -> anyhow::Result<()> {
+        self.spawn_read_loops();
+
+        loop {
+            select! {
+                _ = self.cancel.cancelled() => break,
+                Some(event) = self.event_receiver.recv() => match event {
+                    ShardedEvent::Message(message, bytes) => self.handle_message(message, bytes)?,
+                    ShardedEvent::GetComplete(key, value) => self.handle_get_complete(key, value),
+                    ShardedEvent::BumpComplete => self.handle_bump_complete(),
+                },
+                Some(invoke) = self.invoke_receiver.recv() => self.handle_invoke(invoke)?,
+            }
+        }
+
+        drop(self.invoke_receiver);
+        drop(self.event_sender);
+        drop(self.event_receiver);
+
+        self.tracker.close();
+        self.tracker.wait().await;
+        Ok(())
+    }
 }
 
-async fn archive_loop(
-    node_indices: HashSet<NodeIndex>,
-    config: ShardedStorageConfig,
-    connections: HashMap<ServiceIndex, Connection>,
-    db: Arc<DB>,
-    mut sripe_snapshots_receiver: Receiver<Vec<Vec<(StorageKey, StateVersion)>>>,
-    archive_push_receiver: Receiver<(message::ArchivePush, Bytes)>,
-    archived_sender: Sender<StateVersion>,
-) -> anyhow::Result<()> {
-    let mut epoch = 0;
-    while let Some(stripe_snapshots) = sripe_snapshots_receiver.recv().await {
-        epoch += 1;
-        for (stripe_index, snapshot) in stripe_snapshots.into_iter().enumerate() {
-            let stripe_index = stripe_index as StripeIndex;
-            let db = db.clone();
-            let mut keys = Vec::new();
-            let mut versioned_keys = Vec::new();
-            for (key, version) in snapshot {
-                keys.push(key);
-                versioned_keys.push(format!("{version}.{key:x}"));
-            }
-            let values = spawn_blocking(move || db.multi_get(versioned_keys)).await?;
-            let mut data = Vec::new();
-            for (key, value) in keys.into_iter().zip(values.into_iter()) {
-                let Some(value) = value? else {
-                    anyhow::bail!("missing key in db")
-                };
-                data.push((key.0, value))
-            }
-
-            let data_bytes = Bytes::from(bincode::encode_to_vec(&data, BINCODE_CONFIG)?);
-            let archive_push = message::ArchivePush {
-                epoch,
-                stripe_index,
-                group_index: 0, // filled later
-            };
-        }
-    }
-    Ok(())
+fn get(target_prefix: String, seek_key: String, db: Arc<DB>) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut iter = db.raw_iterator();
+    iter.seek_for_prev(seek_key);
+    iter.status()?;
+    let value = iter
+        .item()
+        .filter(|(key, _)| key.starts_with(target_prefix.as_bytes()))
+        .map(|(_, value)| value.to_vec());
+    Ok(value)
 }
 
 pub mod message {
