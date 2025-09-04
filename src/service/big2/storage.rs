@@ -10,7 +10,7 @@ use quinn::Connection;
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng, seq::IteratorRandom};
 use rocksdb::{DB, WriteBatch};
 use tokio::{
-    select,
+    select, spawn,
     sync::{
         mpsc::{Receiver, Sender, channel},
         oneshot,
@@ -373,34 +373,53 @@ pub async fn sharded_loop(
         });
     }
 
+    let (get_keys_sender, get_keys_receiver) = channel(100);
+    let (archived_sender, mut archived_receiver) = channel(100);
+    let archive = spawn(archive_loop(
+        node_indices.clone(),
+        config.clone(),
+        connections.clone(),
+        db.clone(),
+        get_keys_receiver,
+        archive_push_receiver,
+        archived_sender,
+    ));
+
     let mut version = 0;
     let mut version_table = VersionTable::new(config.num_stripe);
+
+    let mut voted_epoch = 0;
+    let mut ready_for_archive = true;
+
     let mut nodes_archived_versions = vec![0; config.num_node as _];
-    let mut archived_version = 0;
+    let mut quorum_archived_version = 0;
+
     let tracker = TaskTracker::new();
     let (mut fetch_queried_sender, mut fetch_queried_receiver) = channel(100);
     let (mut fetch_skip_sender, mut fetch_skip_receiver) = channel(100);
 
     loop {
-        enum Event<I, M> {
+        enum Event<I, M, V> {
             Invoke(I),
             Message(M),
+            Archived(V),
         }
         match select! {
             invoke = invoke_receiver.recv() => Event::Invoke(invoke),
             Some(message) = message_receiver.recv() => Event::Message(message),
+            Some(archived) = archived_receiver.recv() => Event::Archived(archived),
         } {
             Event::Invoke(None) => break,
             Event::Invoke(Some(Invoke::Fetch(keys, res_sender))) => {
                 let mut get_res = HashMap::new();
                 let mut querying_keys = HashSet::new();
 
-                let mut get_versioned_keys = Vec::new();
+                let mut get_keys = Vec::new();
                 for &key in &keys {
                     let group = config.group_of(&key);
                     if groups.contains(&group) {
                         match version_table.find(&key, version, &config) {
-                            Some(version) => get_versioned_keys.push(format!("{version}.{key:x}")),
+                            Some(version) => get_keys.push(format!("{version}.{key:x}")),
                             None => {
                                 get_res.insert(key, None);
                             }
@@ -501,6 +520,14 @@ pub async fn sharded_loop(
             }
 
             Event::Message(ShardedStorageMessage::Query(query)) => {
+                if query.version > version {
+                    // TODO
+                    continue;
+                }
+                if query.version < quorum_archived_version {
+                    continue;
+                }
+
                 let key = StorageKey::from(query.key);
                 let versioned_key = version_table
                     .find(&key, query.version, &config)
@@ -546,16 +573,85 @@ pub async fn sharded_loop(
                 }
                 let mut versions = nodes_archived_versions.clone();
                 versions.sort_unstable();
-                if versions[config.num_faulty_node as usize] > archived_version {
-                    archived_version = versions[config.num_faulty_node as usize];
-                    // TODO garbage collect
+                if versions[config.num_faulty_node as usize] > quorum_archived_version {
+                    quorum_archived_version = versions[config.num_faulty_node as usize];
 
-                    if archived_version > version {
-                        version = archived_version;
+                    if quorum_archived_version > version {
+                        version = quorum_archived_version;
                         let _ = fetch_skip_sender.send(version).await;
                     }
+
+                    let collect_keys = version_table
+                        .collect(quorum_archived_version)
+                        .map(|(key, version)| format!("{version}.{key:x}"))
+                        .collect::<Vec<_>>();
+                    let db = db.clone();
+                    let collect = async move {
+                        let mut batch = WriteBatch::new();
+                        for key in collect_keys {
+                            batch.delete(key);
+                        }
+                        spawn_blocking(move || db.write(batch)).await??;
+                        anyhow::Ok(())
+                    };
+                    tracker.spawn(async move {
+                        if let Err(err) = collect.await {
+                            tracing::error!(%err)
+                        }
+                    });
                 }
             }
+
+            Event::Archived(archived_version) => {
+                // TODO send Archived
+                assert!(version >= archived_version);
+                if version > archived_version {
+                    // TODO vote next epoch
+                } else {
+                    ready_for_archive = true;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn archive_loop(
+    node_indices: HashSet<NodeIndex>,
+    config: ShardedStorageConfig,
+    connections: HashMap<ServiceIndex, Connection>,
+    db: Arc<DB>,
+    mut sripe_snapshots_receiver: Receiver<Vec<Vec<(StorageKey, StateVersion)>>>,
+    archive_push_receiver: Receiver<(message::ArchivePush, Bytes)>,
+    archived_sender: Sender<StateVersion>,
+) -> anyhow::Result<()> {
+    let mut epoch = 0;
+    while let Some(stripe_snapshots) = sripe_snapshots_receiver.recv().await {
+        epoch += 1;
+        for (stripe_index, snapshot) in stripe_snapshots.into_iter().enumerate() {
+            let stripe_index = stripe_index as StripeIndex;
+            let db = db.clone();
+            let mut keys = Vec::new();
+            let mut versioned_keys = Vec::new();
+            for (key, version) in snapshot {
+                keys.push(key);
+                versioned_keys.push(format!("{version}.{key:x}"));
+            }
+            let values = spawn_blocking(move || db.multi_get(versioned_keys)).await?;
+            let mut data = Vec::new();
+            for (key, value) in keys.into_iter().zip(values.into_iter()) {
+                let Some(value) = value? else {
+                    anyhow::bail!("missing key in db")
+                };
+                data.push((key.0, value))
+            }
+
+            let data_bytes = Bytes::from(bincode::encode_to_vec(&data, BINCODE_CONFIG)?);
+            let archive_push = message::ArchivePush {
+                epoch,
+                stripe_index,
+                group_index: 0, // filled later
+            };
         }
     }
     Ok(())
@@ -572,7 +668,7 @@ pub mod message {
 
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct VoteArchive {
-        pub version: StateVersion,
+        pub epoch: u64,
         pub node_indices: HashSet<NodeIndex>,
     }
 
@@ -592,7 +688,7 @@ pub mod message {
 
     #[derive(Debug, Clone, Encode, Decode)]
     pub struct ArchivePush {
-        pub version: StateVersion,
+        pub epoch: u64,
         pub stripe_index: StripeIndex,
         pub group_index: ActiveGroupIndex,
     }
