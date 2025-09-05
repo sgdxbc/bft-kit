@@ -213,15 +213,12 @@ pub enum ShardedStorageMessage {
     Archived(message::Archived),
 }
 
-pub struct ShardedLoop<L> {
+pub struct ShardedLoop {
     service_index: ServiceIndex,
     node_table: Vec<ServiceIndex>, // [node index -> service index]
     connections: HashMap<ServiceIndex, Connection>,
     db: Arc<DB>,
     config: ShardedStorageConfig,
-    invoke_receiver: Receiver<Invoke>,
-    submit_sender: Sender<L>,
-    ordered_receive_receiver: Receiver<message::VoteArchive>,
 
     group_indices: HashSet<ActiveGroupIndex>,
     version: StateVersion,
@@ -230,17 +227,11 @@ pub struct ShardedLoop<L> {
     quorum_archived_version: StateVersion, // cached node_archived_versions[num_faulty]
     node_archived_versions: Vec<StateVersion>,
 
-    event_sender: Sender<ShardedEvent>,
+    pub event_sender: Sender<ShardedEvent>,
     event_receiver: Receiver<ShardedEvent>,
 
     tracker: TaskTracker,
     cancel: CancellationToken,
-}
-
-enum ShardedEvent {
-    Message(ShardedStorageMessage, Bytes),
-    GetComplete(StorageKey, Option<Vec<u8>>),
-    BumpComplete,
 }
 
 struct Fetching {
@@ -249,7 +240,15 @@ struct Fetching {
     res_sender: oneshot::Sender<FetchResult>,
 }
 
-impl<L> ShardedLoop<L> {
+pub enum ShardedEvent {
+    Invoke(Invoke),
+    Message(ShardedStorageMessage),
+    OrderedMessage(message::VoteArchive),
+    GetComplete(StorageKey, Option<Vec<u8>>),
+    BumpComplete,
+}
+
+impl ShardedLoop {
     fn spawn(&self, fut: impl Future<Output = anyhow::Result<()>> + Send + 'static) {
         let cancel = self.cancel.clone();
         self.tracker.spawn(async move {
@@ -277,14 +276,9 @@ impl<L> ShardedLoop<L> {
                             &bytes,
                             BINCODE_CONFIG,
                         )?;
-                        if !matches!(message, ShardedStorageMessage::ArchivePush(_)) {
-                            anyhow::ensure!(len == bytes.len());
-                        }
+                        anyhow::ensure!(len == bytes.len());
                         if event_sender
-                            .send(ShardedEvent::Message(
-                                message,
-                                bytes.slice(bytes.len() - len..),
-                            ))
+                            .send(ShardedEvent::Message(message))
                             .await
                             .is_err()
                         {
@@ -393,11 +387,7 @@ impl<L> ShardedLoop<L> {
         Ok(())
     }
 
-    fn handle_message(
-        &mut self,
-        message: ShardedStorageMessage,
-        bytes: Bytes,
-    ) -> anyhow::Result<()> {
+    fn handle_message(&mut self, message: ShardedStorageMessage) -> anyhow::Result<()> {
         match message {
             ShardedStorageMessage::Query(query) => {
                 if query.version > self.version {
@@ -432,7 +422,7 @@ impl<L> ShardedLoop<L> {
                 }
                 self.insert_fetched(StorageKey::from(query_ok.key), query_ok.value)
             }
-            ShardedStorageMessage::ArchivePush(_archive_push) => {
+            ShardedStorageMessage::ArchivePush(archive_push) => {
                 // TODO
             }
             ShardedStorageMessage::Archived(archived) => {
@@ -455,10 +445,40 @@ impl<L> ShardedLoop<L> {
                                 .is_err();
                             if send_err {
                                 tracing::error!("result channel closed");
+                                self.cancel.cancel()
                             }
                         }
                         self.version = self.quorum_archived_version
                     }
+
+                    let db = self.db.clone();
+                    let quorum_archived_version = self.quorum_archived_version;
+                    let collect = move || {
+                        let mut iter = db.raw_iterator();
+                        iter.seek_to_first();
+                        iter.status()?;
+                        let mut batch = WriteBatch::new();
+                        while iter.valid() {
+                            let key = iter.key().unwrap();
+                            let key_str = std::str::from_utf8(key).unwrap();
+                            let version_str = key_str.rsplit('.').next().unwrap();
+                            let version: StateVersion = version_str.parse().unwrap();
+                            if version < quorum_archived_version {
+                                batch.delete(key)
+                            }
+                            iter.next();
+                            iter.status()?
+                        }
+                        db.write(batch)?;
+                        anyhow::Ok(())
+                    };
+                    let cancel = self.cancel.clone();
+                    self.tracker.spawn_blocking(move || {
+                        if let Err(err) = collect() {
+                            tracing::error!(%err);
+                            cancel.cancel()
+                        }
+                    });
                 }
             }
         }
@@ -482,7 +502,8 @@ impl<L> ShardedLoop<L> {
                     .send(FetchResult::Values(values))
                     .is_err()
                 {
-                    tracing::error!("result channel closed")
+                    tracing::error!("result channel closed");
+                    self.cancel.cancel()
                 }
             }
         }
@@ -495,28 +516,33 @@ impl<L> ShardedLoop<L> {
     fn handle_bump_complete(&mut self) {
         let res_sender = self.bumping.take().unwrap();
         if res_sender.send(()).is_err() {
-            tracing::error!("result channel closed")
+            tracing::error!("result channel closed");
+            self.cancel.cancel()
         }
         self.version += 1
     }
 
-    pub async fn run(mut self) -> anyhow::Result<()> {
+    pub async fn run<L>(mut self, submit_sender: Sender<L>) -> anyhow::Result<()>
+    where
+        message::VoteArchive: Into<L>,
+    {
         self.spawn_read_loops();
 
-        loop {
-            select! {
-                _ = self.cancel.cancelled() => break,
-                Some(event) = self.event_receiver.recv() => match event {
-                    ShardedEvent::Message(message, bytes) => self.handle_message(message, bytes)?,
-                    ShardedEvent::GetComplete(key, value) => self.handle_get_complete(key, value),
-                    ShardedEvent::BumpComplete => self.handle_bump_complete(),
-                },
-                Some(invoke) = self.invoke_receiver.recv() => self.handle_invoke(invoke)?,
+        while let Some(event) = self
+            .cancel
+            .run_until_cancelled(self.event_receiver.recv())
+            .await
+            .flatten()
+        {
+            match event {
+                ShardedEvent::Message(message) => self.handle_message(message)?,
+                ShardedEvent::GetComplete(key, value) => self.handle_get_complete(key, value),
+                ShardedEvent::BumpComplete => self.handle_bump_complete(),
+                ShardedEvent::Invoke(invoke) => self.handle_invoke(invoke)?,
+                ShardedEvent::OrderedMessage(vote_archive) => todo!(),
             }
         }
 
-        drop(self.invoke_receiver);
-        drop(self.event_sender);
         drop(self.event_receiver);
 
         self.tracker.close();
@@ -537,7 +563,7 @@ fn get(target_prefix: String, seek_key: String, db: Arc<DB>) -> anyhow::Result<O
 }
 
 pub mod message {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use bincode::{Decode, Encode};
 
@@ -570,6 +596,7 @@ pub mod message {
         pub epoch: u64,
         pub stripe_index: StripeIndex,
         pub group_index: ActiveGroupIndex,
+        pub shard: HashMap<[u8; 32], Vec<u8>>,
     }
 
     #[derive(Debug, Clone, Encode, Decode)]

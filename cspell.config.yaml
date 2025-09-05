@@ -41,6 +41,7 @@ words:
   - rcgen
   - rngs
   - rocksdb
+  - rsplit
   - rustls
   - secp
   - Seedable
