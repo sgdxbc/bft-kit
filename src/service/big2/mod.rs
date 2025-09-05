@@ -28,7 +28,7 @@ use super::ClientSeq;
 pub mod storage;
 
 #[derive(Debug, Clone)]
-pub struct StorageHandle(pub Sender<storage::Invoke>);
+pub struct StorageHandle<E>(pub Sender<E>);
 
 pub enum BigServiceLog<Op, M> {
     Request(Request<Op>),
@@ -45,21 +45,23 @@ pub async fn big_loop<
     A: DataShardingApp + 'static,
     SM: Send + 'static,
     RD: Clone + Send + 'static,
+    E: Send + 'static,
 >(
     endpoint: Endpoint,
     app: A,
     submit_sender: Sender<BigServiceLog<A::Op, SM>>,
     mut replicated_receiver: Receiver<Replicated<BigServiceLog<A::Op, SM>, RD>>,
-    storage_handle: StorageHandle,
+    storage_handle: StorageHandle<E>,
     storage_ordered_message_sender: Sender<SM>,
 ) -> anyhow::Result<()>
 where
     Request<A::Op>: Send + Decode<()> + 'static,
     Reply<A::Res, RD>: Send + Encode + Clone + 'static,
-    A::Key: UpdateHash + Send,
+    A::Key: UpdateHash + Send, // Send because we are keeping them across yielding points in execution loop
     A::Value: Encode + Decode<()> + Send,
     A::ExecuteState: Send + 'static,
     A::Res: Send + 'static,
+    storage::Invoke: Into<E>,
 {
     let tracker = TaskTracker::new();
     let cancel = CancellationToken::new();
@@ -68,7 +70,9 @@ where
     tracker.spawn({
         let cancel = cancel.clone();
         async move {
-            if let Err(err) = execute_loop::<A, _>(execute_request_receiver, storage_handle).await {
+            if let Err(err) =
+                execute_loop::<A, _, E>(execute_request_receiver, storage_handle).await
+            {
                 tracing::error!(%err);
                 cancel.cancel()
             }
@@ -250,11 +254,18 @@ struct ExecuteRequest<A: DataShardingApp, RD> {
     reply_sender: Option<Sender<Reply<A::Res, RD>>>,
 }
 
-impl StorageHandle {
-    async fn bump(&self, updates: Vec<(StorageKey, Vec<u8>)>) -> anyhow::Result<()> {
+impl<E> StorageHandle<E>
+where
+    storage::Invoke: Into<E>,
+{
+    async fn bump(
+        &self,
+        updates: Vec<(StorageKey, Vec<u8>)>,
+        deletes: Vec<StorageKey>,
+    ) -> anyhow::Result<()> {
         let (res_sender, res_receiver) = oneshot::channel();
         self.0
-            .send(storage::Invoke::Bump(updates, res_sender))
+            .send(storage::Invoke::Bump(updates, deletes, res_sender).into())
             .await
             .map_err(|_| anyhow::format_err!("invoke channel closed"))?;
         res_receiver.await?;
@@ -264,20 +275,21 @@ impl StorageHandle {
     async fn fetch(&self, keys: Vec<StorageKey>) -> anyhow::Result<FetchResult> {
         let (res_sender, res_receiver) = oneshot::channel();
         self.0
-            .send(storage::Invoke::Fetch(keys, res_sender))
+            .send(storage::Invoke::Fetch(keys, res_sender).into())
             .await
             .map_err(|_| anyhow::format_err!("invoke channel closed"))?;
         Ok(res_receiver.await?)
     }
 }
 
-async fn execute_loop<A: DataShardingApp, RD>(
+async fn execute_loop<A: DataShardingApp, RD, E>(
     mut execute_request_receiver: Receiver<ExecuteRequest<A, RD>>,
-    storage_handle: StorageHandle,
+    storage_handle: StorageHandle<E>,
 ) -> anyhow::Result<()>
 where
     A::Key: UpdateHash,
     A::Value: Encode + Decode<()>,
+    storage::Invoke: Into<E>,
 {
     let start = Instant::now();
     let mut num_skip_version = 0;
@@ -314,26 +326,34 @@ where
                         }
                     }
                 }
-                DataShardingExecuteOutput::Complete(res, updates) => {
+                DataShardingExecuteOutput::Complete(complete) => {
                     let reply = Reply {
                         client_seq: execute_request.client_seq,
-                        res,
+                        res: complete.res,
                         metadata: execute_request.metadata,
                     };
+                    let updates = complete
+                        .updates
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                StorageKey::from(k.digest().0),
+                                bincode::encode_to_vec(v, BINCODE_CONFIG).unwrap(),
+                            )
+                        })
+                        .collect();
+                    let deletes = complete
+                        .deletes
+                        .iter()
+                        .map(|k| StorageKey::from(k.digest().0))
+                        .collect();
+                    storage_handle.bump(updates, deletes).await?;
                     if let Some(reply_sender) = execute_request.reply_sender {
                         let result = reply_sender.send(reply).await;
                         if result.is_err() {
                             tracing::warn!("reply channel closed")
                         }
                     }
-                    let updates = updates
-                        .iter()
-                        .map(|(k, v)| {
-                            let bytes = bincode::encode_to_vec(v, BINCODE_CONFIG).unwrap();
-                            (StorageKey::from(k.digest().0), bytes)
-                        })
-                        .collect();
-                    storage_handle.bump(updates).await?;
                     break;
                 }
             }

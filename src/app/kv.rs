@@ -1,5 +1,7 @@
 use bincode::{Decode, Encode};
 
+use crate::app::DataShardingExecuteComplete;
+
 use super::{AppProtocol, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState};
 
 pub struct Kv;
@@ -55,7 +57,12 @@ impl DataShardingExecuteState for KvExecute {
     fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App> {
         match self {
             Self::Complete(res, writes) => {
-                DataShardingExecuteOutput::Complete(res.clone(), writes.clone())
+                let complete = DataShardingExecuteComplete {
+                    res: res.clone(),
+                    updates: writes.clone(),
+                    deletes: Default::default(),
+                };
+                DataShardingExecuteOutput::Complete(complete)
             }
             Self::ToGet(key) => DataShardingExecuteOutput::Pending(vec![key.clone()]),
         }

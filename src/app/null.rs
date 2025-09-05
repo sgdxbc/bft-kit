@@ -1,7 +1,8 @@
 use crate::{Never, workload::WorkloadState};
 
 use super::{
-    AppProtocol, AppState, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState,
+    AppProtocol, AppState, DataShardingApp, DataShardingExecuteComplete, DataShardingExecuteOutput,
+    DataShardingExecuteState,
 };
 
 pub struct Null;
@@ -42,6 +43,10 @@ impl DataShardingExecuteState for Null {
         unreachable!()
     }
     fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App> {
-        DataShardingExecuteOutput::Complete((), Default::default())
+        DataShardingExecuteOutput::Complete(DataShardingExecuteComplete {
+            res: (),
+            updates: Default::default(),
+            deletes: Default::default(),
+        })
     }
 }

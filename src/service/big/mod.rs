@@ -260,7 +260,9 @@ where
                     }
                     return self.proceed(since_start);
                 }
-                DataShardingExecuteOutput::Complete(res, writes) => {
+                DataShardingExecuteOutput::Complete(complete) => {
+                    let res = complete.res;
+                    let writes = complete.updates;
                     self.execute_latencies += executing.start.elapsed().as_nanos() as u64;
                     let executing = self.executing.pop_front().unwrap();
 

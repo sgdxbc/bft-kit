@@ -44,7 +44,13 @@ pub trait DataShardingExecuteState {
 
 pub enum DataShardingExecuteOutput<A: DataShardingApp> {
     Pending(Vec<A::Key>),
-    Complete(A::Res, Vec<(A::Key, A::Value)>),
+    Complete(DataShardingExecuteComplete<A>),
+}
+
+pub struct DataShardingExecuteComplete<A: DataShardingApp> {
+    pub res: A::Res,
+    pub updates: Vec<(A::Key, A::Value)>,
+    pub deletes: Vec<A::Key>,
 }
 
 pub struct Batched<A>(A);
@@ -115,11 +121,14 @@ where
                         execute.install(key, value)
                     }
                 }
-                DataShardingExecuteOutput::Complete(res, writes) => {
-                    for (key, value) in writes {
+                DataShardingExecuteOutput::Complete(complete) => {
+                    for (key, value) in complete.updates {
                         self.store.insert(key, value);
                     }
-                    break res;
+                    for key in complete.deletes {
+                        self.store.remove(&key);
+                    }
+                    break complete.res;
                 }
             }
         }

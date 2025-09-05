@@ -6,7 +6,8 @@ use thiserror::Error;
 use crate::crypto::{Digest, DigestHash as _, UpdateHash, verify};
 
 use super::{
-    AppProtocol, DataShardingApp, DataShardingExecuteOutput, DataShardingExecuteState, InMemory,
+    AppProtocol, DataShardingApp, DataShardingExecuteComplete, DataShardingExecuteOutput,
+    DataShardingExecuteState, InMemory,
 };
 
 pub type TxId = Digest;
@@ -121,10 +122,11 @@ impl DataShardingExecuteState for DataShardingUtxoExecute {
             match verify(&self.op, &data.owner, &sigs[&id]) {
                 Ok(()) => self.spend_amount += data.amount,
                 Err(_) => {
-                    return DataShardingExecuteOutput::Complete(
-                        Err(UtxoError::InvalidSignature),
-                        Default::default(),
-                    );
+                    return DataShardingExecuteOutput::Complete(DataShardingExecuteComplete {
+                        res: Err(UtxoError::InvalidSignature),
+                        updates: Default::default(),
+                        deletes: Default::default(),
+                    });
                 }
             }
         }
@@ -134,19 +136,28 @@ impl DataShardingExecuteState for DataShardingUtxoExecute {
             UtxoOpInput::Spend(_) => self.spend_amount >= self.op.total_output(),
         } {
             let tx_id = self.op.tx_id();
-            let writes = self
+            let updates = self
                 .op
                 .outputs
                 .drain(..)
                 .enumerate()
                 .map(|(index, data)| (UtxoId(tx_id.clone(), index as _), data))
                 .collect();
-            DataShardingExecuteOutput::Complete(Ok(()), writes)
+            let deletes = match &self.op.input {
+                UtxoOpInput::Spend(inputs) => inputs.keys().cloned().collect(),
+                UtxoOpInput::Mint => Default::default(),
+            };
+            DataShardingExecuteOutput::Complete(DataShardingExecuteComplete {
+                res: Ok(()),
+                updates,
+                deletes,
+            })
         } else if self.pending_inputs.is_empty() {
-            DataShardingExecuteOutput::Complete(
-                Err(UtxoError::InsufficientFunds),
-                Default::default(),
-            )
+            DataShardingExecuteOutput::Complete(DataShardingExecuteComplete {
+                res: Err(UtxoError::InsufficientFunds),
+                updates: Default::default(),
+                deletes: Default::default(),
+            })
         } else {
             DataShardingExecuteOutput::Pending(self.pending_inputs.iter().cloned().collect())
         }

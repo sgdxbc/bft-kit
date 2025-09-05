@@ -10,9 +10,8 @@ use quinn::Connection;
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng, seq::IteratorRandom};
 use rocksdb::{DB, WriteBatch};
 use tokio::{
-    select,
     sync::{
-        mpsc::{Receiver, Sender, channel},
+        mpsc::{Receiver, Sender},
         oneshot,
     },
     task::spawn_blocking,
@@ -26,7 +25,11 @@ pub type StateVersion = u64;
 
 pub enum Invoke {
     Fetch(Vec<StorageKey>, oneshot::Sender<FetchResult>),
-    Bump(Vec<(StorageKey, Vec<u8>)>, oneshot::Sender<()>),
+    Bump(
+        Vec<(StorageKey, Vec<u8>)>,
+        Vec<StorageKey>,
+        oneshot::Sender<()>,
+    ),
 }
 
 pub enum FetchResult {
@@ -59,12 +62,15 @@ pub async fn full_replication_loop(
                 })
                 .await??
             }
-            Invoke::Bump(updates, res_sender) => {
+            Invoke::Bump(updates, deletes, res_sender) => {
                 let db = db.clone();
                 spawn_blocking(move || {
                     let mut batch = WriteBatch::new();
                     for (key, value) in updates {
                         batch.put(key, value)
+                    }
+                    for key in deletes {
+                        batch.delete(key)
                     }
                     db.write(batch)?;
                     if res_sender.send(()).is_err() {
@@ -215,7 +221,8 @@ pub enum ShardedStorageMessage {
 
 pub struct ShardedLoop {
     service_index: ServiceIndex,
-    node_table: Vec<ServiceIndex>, // [node index -> service index]
+    node_table: Vec<ServiceIndex>,    // [node index -> service index]
+    node_indices: HashSet<NodeIndex>, // cached {node index if node_table[node index] = service index}
     connections: HashMap<ServiceIndex, Connection>,
     db: Arc<DB>,
     config: ShardedStorageConfig,
@@ -226,6 +233,10 @@ pub struct ShardedLoop {
     bumping: Option<oneshot::Sender<()>>,
     quorum_archived_version: StateVersion, // cached node_archived_versions[num_faulty]
     node_archived_versions: Vec<StateVersion>,
+
+    epoch: u64,
+    archiving_version: StateVersion,
+    archiving_stripe_index: StripeIndex,
 
     pub event_sender: Sender<ShardedEvent>,
     event_receiver: Receiver<ShardedEvent>,
@@ -246,6 +257,18 @@ pub enum ShardedEvent {
     OrderedMessage(message::VoteArchive),
     GetComplete(StorageKey, Option<Vec<u8>>),
     BumpComplete,
+}
+
+impl From<Invoke> for ShardedEvent {
+    fn from(invoke: Invoke) -> Self {
+        ShardedEvent::Invoke(invoke)
+    }
+}
+
+impl From<message::VoteArchive> for ShardedEvent {
+    fn from(vote_archive: message::VoteArchive) -> Self {
+        ShardedEvent::OrderedMessage(vote_archive)
+    }
 }
 
 impl ShardedLoop {
@@ -356,22 +379,38 @@ impl ShardedLoop {
                     res_sender,
                 })
             }
-            Invoke::Bump(updates, res_sender) => {
+            Invoke::Bump(updates, _deletes, res_sender) => {
                 assert!(self.bumping.is_none());
                 if let Some(_fetching) = self.fetching.take() {
                     tracing::warn!("bump while fetching in progress");
                     // implicitly close Fetch result channel
                 }
 
+                // TODO should fetch for the updated "places" (and their proofs) first, refresh
+                // shard root checksums with them, then write updated values back
+
                 let mut batch = WriteBatch::new();
                 for (key, value) in updates {
-                    let db_key = format!(
-                        "{:04x}.{key:x}.{:08x}",
-                        self.config.stripe_of(&key),
-                        self.version + 1
-                    );
-                    batch.put(db_key, value)
+                    if self.group_indices.contains(&self.config.group_of(&key)) {
+                        let db_key = format!(
+                            "{:04x}.{key:x}.{:08x}",
+                            self.config.stripe_of(&key),
+                            self.version + 1
+                        );
+                        batch.put(db_key, value)
+                    } else {
+                        // fetch for current version to update checksum root
+                    }
                 }
+
+                // for the deletes, the hosting storage nodes do need to tombstone them so the
+                // deleted values are not falling through into the successive versions
+                // not yet developed though
+                // the non-hosting storage nodes need to fetch them to reconstruct the shard
+                // root checksums after deletion, similar to the updates above
+                // of current workloads, ycsb never deletes, utxo only delete what has been
+                // fetched, so we skip fetching here
+
                 let db = self.db.clone();
                 let event_sender = self.event_sender.clone();
                 self.spawn(async move {
@@ -513,13 +552,55 @@ impl ShardedLoop {
         self.insert_fetched(key, value)
     }
 
-    fn handle_bump_complete(&mut self) {
+    async fn handle_bump_complete<L>(&mut self, submit_sender: Sender<L>)
+    where
+        message::VoteArchive: Into<L>,
+    {
         let res_sender = self.bumping.take().unwrap();
         if res_sender.send(()).is_err() {
             tracing::error!("result channel closed");
             self.cancel.cancel()
         }
-        self.version += 1
+        self.version += 1;
+        self.may_vote_archive(submit_sender).await;
+    }
+
+    async fn may_vote_archive<L>(&mut self, submit_sender: Sender<L>)
+    where
+        message::VoteArchive: Into<L>,
+    {
+        if self.archiving_stripe_index != self.config.num_stripe {
+            return;
+        }
+        assert!(self.version >= self.archiving_version);
+        if !self.config.bypass_vote && self.version == self.archiving_version {
+            return;
+        }
+
+        if self.config.bypass_vote {
+            //
+            return;
+        }
+        let vote_archive = message::VoteArchive {
+            epoch: self.epoch + 1,
+            node_indices: self.node_indices.clone(),
+        };
+        if submit_sender.send(vote_archive.into()).await.is_err() {
+            tracing::error!("vote archive channel closed");
+            self.cancel.cancel()
+        }
+    }
+
+    fn enter_archive(&mut self) {
+        self.epoch += 1;
+        self.archiving_version = self.version;
+        self.archiving_stripe_index = 0;
+        self.enter_archive_stripe()
+    }
+
+    fn enter_archive_stripe(&mut self) {
+        assert!(self.archiving_stripe_index < self.config.num_stripe);
+        // let
     }
 
     pub async fn run<L>(mut self, submit_sender: Sender<L>) -> anyhow::Result<()>
@@ -537,7 +618,9 @@ impl ShardedLoop {
             match event {
                 ShardedEvent::Message(message) => self.handle_message(message)?,
                 ShardedEvent::GetComplete(key, value) => self.handle_get_complete(key, value),
-                ShardedEvent::BumpComplete => self.handle_bump_complete(),
+                ShardedEvent::BumpComplete => {
+                    self.handle_bump_complete(submit_sender.clone()).await
+                }
                 ShardedEvent::Invoke(invoke) => self.handle_invoke(invoke)?,
                 ShardedEvent::OrderedMessage(vote_archive) => todo!(),
             }
