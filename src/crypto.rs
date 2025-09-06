@@ -3,8 +3,6 @@ use std::fmt::{Debug, Display};
 use bincode::{BorrowDecode, Decode, Encode, error::DecodeError};
 use sha2::Digest as _;
 
-use crate::fmt_bytes;
-
 pub mod cert;
 pub mod threshold;
 
@@ -198,6 +196,20 @@ impl UpdateHash for String {
     fn update<D: sha2::Digest>(&self, state: &mut D) {
         state.update(self.as_bytes())
     }
+}
+
+fn fmt_bytes(bytes: &[u8], f: &mut impl std::fmt::Write) -> std::fmt::Result {
+    use std::fmt::Write as _;
+    let prefix_hex = bytes.iter().take(4).fold(String::new(), |mut s, b| {
+        write!(&mut s, "{b:02x}").unwrap();
+        s
+    });
+    write!(
+        f,
+        "[{}]({prefix_hex}{})",
+        bytes.len(),
+        if bytes.len() > 4 { "..." } else { "" }
+    )
 }
 
 impl Encode for Sig {

@@ -1,12 +1,5 @@
-pub mod app;
 pub mod crypto;
 pub mod parse;
-pub mod replication;
-pub mod service;
-pub mod state;
-pub mod transport;
-pub mod workload;
-pub mod worker2;
 
 #[derive(Debug, bincode::Encode, bincode::Decode)]
 pub enum Never {}
@@ -25,7 +18,6 @@ pub fn init_logging_file(log_file: std::fs::File) {
         .with_ansi(false)
         .with_writer(log_file)
         .finish()
-        // https://docs.rs/tracing-subscriber/latest/src/tracing_subscriber/fmt/mod.rs.html#1200
         .with(targets_layer())
         .init();
 }
@@ -85,18 +77,4 @@ pub fn set_affinity_block_on<F: Future<Output = anyhow::Result<T>>, T>(f: F) -> 
         })
         .build()?
         .block_on(f)
-}
-
-pub fn fmt_bytes(bytes: &[u8], f: &mut impl std::fmt::Write) -> std::fmt::Result {
-    use std::fmt::Write as _;
-    let prefix_hex = bytes.iter().take(4).fold(String::new(), |mut s, b| {
-        write!(&mut s, "{b:02x}").unwrap();
-        s
-    });
-    write!(
-        f,
-        "[{}]({prefix_hex}{})",
-        bytes.len(),
-        if bytes.len() > 4 { "..." } else { "" }
-    )
 }
