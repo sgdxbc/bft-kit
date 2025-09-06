@@ -2,8 +2,4 @@
     "explorer.sortOrder": "mixed",
     "rust-analyzer.completion.addSemicolonToUnit": false,
     "rust-analyzer.imports.prefix": "self",
-    "rust-analyzer.server.extraEnv": {
-        "CHALK_OVERFLOW_DEPTH": "100000000",
-        "CHALK_SOLVER_MAX_SIZE": "10000000",
-    },
 }
