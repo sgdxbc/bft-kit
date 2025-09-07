@@ -1,3 +1,8 @@
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
 use rand::{Rng, rngs::StdRng};
 use rand_distr::Alphanumeric;
 use tokio::{
@@ -12,7 +17,7 @@ use super::{KvOp, KvRes};
 
 pub struct Ycsb {
     rng: StdRng,
-    num_ops: u64,
+    latencies: Arc<Mutex<Vec<(Instant, Duration)>>>,
 
     tx_op: Sender<(KvOp, oneshot::Sender<KvRes>)>,
 }
@@ -25,12 +30,23 @@ impl Ycsb {
     ) -> JoinHandle<()> {
         let mut ycsb = Self {
             rng,
-            num_ops: 0,
+            latencies: Default::default(),
             tx_op,
         };
         spawn(async move {
             group.wrap_fallible(ycsb.run()).await;
-            println!("YCSB finished {} operations", ycsb.num_ops)
+            let latencies = ycsb.latencies.lock().unwrap();
+            let total_duration = match (latencies.first(), latencies.last()) {
+                (Some(first), Some(last)) => (last.0 + last.1).duration_since(first.0),
+                _ => Duration::ZERO,
+            };
+            let tput = latencies.len() as f64 / total_duration.as_secs_f64();
+            tracing::info!(
+                "YCSB done: {} ops in {:?} ({:.2} ops/sec)",
+                latencies.len(),
+                total_duration,
+                tput
+            );
         })
     }
 
@@ -50,10 +66,16 @@ impl Ycsb {
 
             let (tx_res, rx_res) = oneshot::channel();
             let _ = self.tx_op.send((op, tx_res)).await;
-            let Ok(_res) = rx_res.await else { break };
-            // TODO check result
-            self.num_ops += 1
+            let start = Instant::now();
+            let latencies = self.latencies.clone();
+            spawn(async move {
+                let Ok(_res) = rx_res.await else { return };
+                // TODO check result
+                latencies
+                    .lock()
+                    .unwrap()
+                    .push((Instant::now(), start.elapsed()))
+            });
         }
-        Ok(())
     }
 }

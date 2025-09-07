@@ -10,8 +10,7 @@ async fn main() -> anyhow::Result<()> {
     init_logging();
 
     let cancel = CancellationToken::new();
-    let group = TaskGroup(cancel.clone());
-    let handles = ReplayNode::spawn(group, StdRng::seed_from_u64(117418));
+    let handles = ReplayNode::spawn(TaskGroup(cancel.clone()), StdRng::seed_from_u64(117418));
     spawn({
         let cancel = cancel.clone();
         async move {
