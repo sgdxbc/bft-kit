@@ -23,9 +23,12 @@ pub enum StateOp<K, V> {
     Delete(K),
 }
 
-pub trait AppTypeConfig {
+pub trait AppProtocolTypeConfig {
     type Op;
     type Res;
+}
+
+pub trait AppTypeConfig: AppProtocolTypeConfig {
     type Key;
     type Value;
 }

@@ -9,16 +9,21 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{AppTypeConfig, StateOp};
+use crate::app::{AppProtocolTypeConfig, AppTypeConfig, StateOp};
+
+pub mod ycsb;
 
 pub struct Kv {
     rx_op: Receiver<(KvOp, oneshot::Sender<KvRes>)>,
     tx_state_op: Sender<StateOp<String, String>>,
 }
 
-impl AppTypeConfig for Kv {
+impl AppProtocolTypeConfig for Kv {
     type Op = KvOp;
     type Res = KvRes;
+}
+
+impl AppTypeConfig for Kv {
     type Key = String;
     type Value = String;
 }
