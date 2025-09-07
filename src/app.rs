@@ -1,136 +1,174 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    hash::Hash,
-    time::Duration,
+use std::{collections::HashMap, mem::take};
+
+use bincode::{Decode, Encode};
+use tokio::{
+    select, spawn,
+    sync::{
+        mpsc::{Receiver, Sender},
+        oneshot,
+    },
+    task::JoinHandle,
 };
+use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
 use crate::{
-    Never,
-    state::{Action, State},
+    crypto::{DigestHash, UpdateHash},
+    replica::{Reply, Request},
+    storage::{Bump, StorageKey, StorageOp, StorageRes},
 };
 
-pub mod b_tree;
-pub mod kv;
-pub mod null;
-pub mod rocksdb;
-pub mod utxo;
-pub mod ycsb;
+pub enum StateOp<K, V> {
+    Put(K, V),
+    Get(K, oneshot::Sender<Option<V>>),
+    Delete(K),
+}
 
-pub trait AppProtocol {
+pub trait AppTypeConfig {
     type Op;
     type Res;
-}
-
-pub trait AppState: AppProtocol {
-    fn execute(&mut self, op: Self::Op) -> Self::Res;
-}
-
-pub trait DataShardingApp: AppProtocol {
     type Key;
     type Value;
-    type ExecuteState: DataShardingExecuteState<App = Self>;
-    fn new_execute(&self, op: Self::Op) -> Self::ExecuteState;
 }
 
-pub trait DataShardingExecuteState {
-    type App: DataShardingApp;
-    fn install(
-        &mut self,
-        key: <Self::App as DataShardingApp>::Key,
-        value: Option<<Self::App as DataShardingApp>::Value>,
-    );
-    fn proceed(&mut self) -> DataShardingExecuteOutput<Self::App>;
+pub struct AppRunner<C: AppTypeConfig> {
+    forward_count: usize,
+    inserts: HashMap<StorageKey, Bytes>,
+    deletes: Vec<StorageKey>,
+
+    rx_execute_request: Receiver<(Request, oneshot::Sender<Reply>)>,
+    tx_execute_op: Sender<(C::Op, oneshot::Sender<C::Res>)>,
+    rx_state_op: Receiver<StateOp<C::Key, C::Value>>,
+    tx_storage_op: Sender<StorageOp>,
 }
 
-pub enum DataShardingExecuteOutput<A: DataShardingApp> {
-    Pending(Vec<A::Key>),
-    Complete(DataShardingExecuteComplete<A>),
-}
-
-pub struct DataShardingExecuteComplete<A: DataShardingApp> {
-    pub res: A::Res,
-    pub updates: Vec<(A::Key, A::Value)>,
-    pub deletes: Vec<A::Key>,
-}
-
-pub struct Batched<A>(A);
-
-impl<A: AppProtocol> AppProtocol for Batched<A> {
-    type Op = Vec<A::Op>;
-    type Res = Vec<A::Res>;
-}
-
-impl<A: AppState> AppState for Batched<A> {
-    fn execute(&mut self, ops: Self::Op) -> Self::Res {
-        ops.into_iter().map(|op| self.0.execute(op)).collect()
-    }
-}
-
-pub struct Buffered<A: AppState> {
-    app: A,
-    ops: VecDeque<A::Op>,
-}
-
-impl<A: AppState> From<A> for Buffered<A> {
-    fn from(app: A) -> Self {
-        Self {
-            app,
-            ops: Default::default(),
-        }
-    }
-}
-
-impl<A: AppState> State for Buffered<A> {
-    type Effect = Never;
-    type Output = A::Res;
-    fn proceed(&mut self, _since_start: Duration) -> Action<Self::Effect, Self::Output> {
-        match self.ops.pop_front() {
-            Some(op) => Action::Output(self.app.execute(op)),
-            None => Action::Pending(None),
-        }
-    }
-
-    type Message = A::Op;
-    fn receive(&mut self, op: Self::Message) {
-        self.ops.push_back(op);
-    }
-}
-
-pub struct InMemory<A: DataShardingApp> {
-    pub app: A,
-    pub store: HashMap<A::Key, A::Value>,
-}
-
-impl<A: DataShardingApp> AppProtocol for InMemory<A> {
-    type Op = A::Op;
-    type Res = A::Res;
-}
-
-impl<A: DataShardingApp> AppState for InMemory<A>
+impl<C: AppTypeConfig + 'static> AppRunner<C>
 where
-    A::Key: Hash + Eq,
-    A::Value: Clone,
+    C::Op: Send + 'static + Decode<()>,
+    C::Res: Send + 'static + Encode,
+    C::Key: Send + 'static + UpdateHash,
+    C::Value: Send + 'static + Encode + Decode<()>,
 {
-    fn execute(&mut self, op: Self::Op) -> Self::Res {
-        let mut execute = self.app.new_execute(op);
-        loop {
-            match execute.proceed() {
-                DataShardingExecuteOutput::Pending(keys) => {
-                    for key in keys {
-                        let value = self.store.get(&key).cloned();
-                        execute.install(key, value)
+    pub fn spawn(
+        cancel: CancellationToken,
+        rx_execute_request: Receiver<(Request, oneshot::Sender<Reply>)>,
+        tx_execute_op: Sender<(C::Op, oneshot::Sender<C::Res>)>,
+        rx_state_op: Receiver<StateOp<C::Key, C::Value>>,
+        tx_storage_op: Sender<StorageOp>,
+    ) -> JoinHandle<()> {
+        let mut app = Self {
+            forward_count: 0,
+            inserts: Default::default(),
+            deletes: Default::default(),
+
+            rx_execute_request,
+            tx_execute_op,
+            rx_state_op,
+            tx_storage_op,
+        };
+        spawn(async move {
+            if let Some(Err(err)) = cancel.run_until_cancelled(app.run()).await {
+                tracing::error!(%err);
+                cancel.cancel()
+            }
+        })
+    }
+
+    async fn run(&mut self) -> anyhow::Result<()> {
+        while let Some((request, tx_reply)) = self.rx_execute_request.recv().await {
+            self.handle_request(request, tx_reply).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_request(
+        &mut self,
+        request: Request,
+        tx_reply: oneshot::Sender<Reply>,
+    ) -> anyhow::Result<()> {
+        if self.forward_count > 0 {
+            self.forward_count -= 1;
+            return Ok(());
+        }
+
+        let (op, len) = bincode::decode_from_slice(&request.op, bincode::config::standard())?;
+        anyhow::ensure!(len == request.op.len(), "Invalid operation length");
+        let (tx_res, mut rx_res) = oneshot::channel();
+        let _ = self.tx_execute_op.send((op, tx_res)).await;
+
+        let res = loop {
+            enum Event<R, O> {
+                AppRes(R),
+                AppStorageOp(O),
+            }
+            match select! {
+                Ok(res) = &mut rx_res => Event::AppRes(res),
+                Some(op) = self.rx_state_op.recv() => Event::AppStorageOp(op),
+            } {
+                Event::AppRes(res) => break res,
+                Event::AppStorageOp(op) => {
+                    self.handle_state_op(op).await?;
+                    if self.forward_count > 0 {
+                        self.forward_count -= 1;
+                        return Ok(());
                     }
                 }
-                DataShardingExecuteOutput::Complete(complete) => {
-                    for (key, value) in complete.updates {
-                        self.store.insert(key, value);
+            }
+        };
+
+        let reply = Reply {
+            client_seq: request.client_seq,
+            res: bincode::encode_to_vec(res, bincode::config::standard())?,
+        };
+        let _ = tx_reply.send(reply);
+
+        let bump = Bump {
+            inserts: take(&mut self.inserts),
+            deletes: take(&mut self.deletes),
+        };
+        let (tx_ok, rx_ok) = oneshot::channel();
+        let _ = self.tx_storage_op.send(StorageOp::Bump(bump, tx_ok)).await;
+        match rx_ok.await {
+            Ok(StorageRes::Ok(())) => {}
+            Ok(StorageRes::Forward(count)) => self.forward_count = count,
+            Err(_) => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_state_op(
+        &mut self,
+        op: StateOp<C::Key, C::Value>,
+    ) -> Result<(), anyhow::Error> {
+        match op {
+            StateOp::Put(key, value) => {
+                self.inserts.insert(
+                    key.digest().0.into(),
+                    bincode::encode_to_vec(value, bincode::config::standard())?.into(),
+                );
+            }
+            StateOp::Delete(key) => self.deletes.push(key.digest().0.into()),
+            // TODO concurrent get
+            StateOp::Get(key, tx_value) => {
+                let (tx_bytes, rx_bytes) = oneshot::channel();
+                let _ = self
+                    .tx_storage_op
+                    .send(StorageOp::Fetch(key.digest().0.into(), tx_bytes))
+                    .await;
+                match rx_bytes.await {
+                    Ok(StorageRes::Ok(Some(bytes))) => {
+                        let (value, len) =
+                            bincode::decode_from_slice(&bytes, bincode::config::standard())?;
+                        anyhow::ensure!(len == bytes.len(), "Invalid value length");
+                        let _ = tx_value.send(Some(value));
                     }
-                    for key in complete.deletes {
-                        self.store.remove(&key);
+                    Ok(StorageRes::Ok(None)) => {
+                        let _ = tx_value.send(None);
                     }
-                    break complete.res;
+                    Ok(StorageRes::Forward(count)) => self.forward_count = count,
+                    Err(_) => {}
                 }
             }
         }
+        Ok(())
     }
 }
