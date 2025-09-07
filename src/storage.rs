@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use primitive_types::H256;
+use rocksdb::DB;
 use tokio::{
     spawn,
     sync::{mpsc::Receiver, oneshot},
@@ -29,12 +30,14 @@ pub struct Bump {
 }
 
 pub struct Storage {
+    db: DB,
+
     rx_op: Receiver<StorageOp>,
 }
 
 impl Storage {
-    pub fn spawn(group: TaskGroup, rx_op: Receiver<StorageOp>) -> JoinHandle<()> {
-        let mut storage = Self { rx_op };
+    pub fn spawn(group: TaskGroup, db: DB, rx_op: Receiver<StorageOp>) -> JoinHandle<()> {
+        let mut storage = Self { db, rx_op };
         spawn(async move { group.wrap_fallible(storage.run()).await })
     }
 

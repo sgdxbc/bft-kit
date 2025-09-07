@@ -36,7 +36,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
     ) -> Self {
-        let (tx_close, rx_close) = channel(100);
+        let (tx_close, rx_close) = channel(1);
         Self {
             endpoint,
             connections: HashMap::new(),

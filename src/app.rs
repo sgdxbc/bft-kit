@@ -102,6 +102,7 @@ where
             match select! {
                 Ok(res) = &mut rx_res => Event::AppRes(res),
                 Some(op) = self.rx_state_op.recv() => Event::AppStorageOp(op),
+                else => return Ok(()),
             } {
                 Event::AppRes(res) => break res,
                 Event::AppStorageOp(op) => {

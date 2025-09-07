@@ -17,7 +17,7 @@ use super::{KvOp, KvRes};
 
 pub struct Ycsb {
     rng: StdRng,
-    latencies: Arc<Mutex<Vec<(Instant, Duration)>>>,
+    latency_records: Arc<Mutex<Vec<(Instant, Duration)>>>,
 
     tx_op: Sender<(KvOp, oneshot::Sender<KvRes>)>,
 }
@@ -30,22 +30,25 @@ impl Ycsb {
     ) -> JoinHandle<()> {
         let mut ycsb = Self {
             rng,
-            latencies: Default::default(),
+            latency_records: Default::default(),
             tx_op,
         };
         spawn(async move {
             group.wrap_fallible(ycsb.run()).await;
-            let latencies = ycsb.latencies.lock().unwrap();
-            let total_duration = match (latencies.first(), latencies.last()) {
+            let latency_records = ycsb.latency_records.lock().unwrap();
+            let total_duration = match (latency_records.first(), latency_records.last()) {
                 (Some(first), Some(last)) => (last.0 + last.1).duration_since(first.0),
                 _ => Duration::ZERO,
             };
-            let tput = latencies.len() as f64 / total_duration.as_secs_f64();
+            let tput = latency_records.len() as f64 / total_duration.as_secs_f64();
+            let mean_latency = latency_records
+                .iter()
+                .map(|&(_, dur)| dur)
+                .sum::<Duration>()
+                / latency_records.len() as u32;
             tracing::info!(
-                "YCSB done: {} ops in {:?} ({:.2} ops/sec)",
-                latencies.len(),
-                total_duration,
-                tput
+                "YCSB done: {} ops in {total_duration:?} ({tput:.2} ops/sec), mean latency {mean_latency:?}",
+                latency_records.len(),
             );
         })
     }
@@ -67,14 +70,12 @@ impl Ycsb {
             let (tx_res, rx_res) = oneshot::channel();
             let _ = self.tx_op.send((op, tx_res)).await;
             let start = Instant::now();
-            let latencies = self.latencies.clone();
+            let latency_records = self.latency_records.clone();
             spawn(async move {
                 let Ok(_res) = rx_res.await else { return };
                 // TODO check result
-                latencies
-                    .lock()
-                    .unwrap()
-                    .push((Instant::now(), start.elapsed()))
+                let latency_record = (start, start.elapsed());
+                latency_records.lock().unwrap().push(latency_record)
             });
         }
     }
