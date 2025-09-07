@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use bft_kit::{init_logging, node::ReplayNode, task::TaskGroup};
+use bft_kit::{init_logging, node::ReplayNode, parse::Configs, task::TaskGroup};
 use rand::{SeedableRng, rngs::StdRng};
 use rocksdb::DB;
 use tempfile::tempdir;
@@ -10,12 +10,27 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_logging();
+    let mut configs = Configs::new();
+    configs.parse(
+        "
+big.num-node        1
+big.num-faulty-node 0
+big.num-active-copy 1
+big.num-stripe      1
+big.bypass-vote     true
+",
+    );
 
     let temp_dir = tempdir()?;
     let db = DB::open_default(temp_dir.path())?;
 
     let cancel = CancellationToken::new();
-    let handles = ReplayNode::spawn(TaskGroup(cancel.clone()), db, StdRng::seed_from_u64(117418));
+    let handles = ReplayNode::spawn(
+        TaskGroup(cancel.clone()),
+        db,
+        configs.extract()?,
+        StdRng::seed_from_u64(117418),
+    );
     spawn({
         let cancel = cancel.clone();
         async move {
