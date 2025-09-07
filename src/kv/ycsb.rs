@@ -5,7 +5,8 @@ use tokio::{
     sync::{mpsc::Sender, oneshot},
     task::JoinHandle,
 };
-use tokio_util::sync::CancellationToken;
+
+use crate::task::TaskGroup;
 
 use super::{KvOp, KvRes};
 
@@ -18,7 +19,7 @@ pub struct Ycsb {
 
 impl Ycsb {
     pub fn spawn(
-        cancel: CancellationToken,
+        group: TaskGroup,
         rng: StdRng,
         tx_op: Sender<(KvOp, oneshot::Sender<KvRes>)>,
     ) -> JoinHandle<()> {
@@ -28,12 +29,8 @@ impl Ycsb {
             tx_op,
         };
         spawn(async move {
-            if let Some(Err(err)) = cancel.run_until_cancelled(ycsb.run()).await {
-                tracing::error!(%err);
-                cancel.cancel()
-            } else {
-                println!("YCSB finished {} operations", ycsb.num_ops)
-            }
+            group.wrap_fallible(ycsb.run()).await;
+            println!("YCSB finished {} operations", ycsb.num_ops)
         })
     }
 

@@ -7,9 +7,8 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use tokio_util::sync::CancellationToken;
 
-use crate::app::AppProtocolTypeConfig;
+use crate::{app::AppProtocolTypeConfig, task::TaskGroup};
 
 use super::{Reply, Request};
 
@@ -26,7 +25,7 @@ where
     C::Res: Decode<()> + Send + 'static,
 {
     pub fn spawn(
-        cancel: CancellationToken,
+        group: TaskGroup,
         rx_workload: Receiver<(C::Op, oneshot::Sender<C::Res>)>,
         tx_request: Sender<(Request, oneshot::Sender<Reply>)>,
     ) -> JoinHandle<()> {
@@ -35,12 +34,7 @@ where
             rx_workload,
             tx_request,
         };
-        spawn(async move {
-            if let Some(Err(err)) = cancel.run_until_cancelled(replay.run()).await {
-                tracing::error!(%err);
-                cancel.cancel()
-            }
-        })
+        spawn(group.wrap_fallible(async move { replay.run().await }))
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {

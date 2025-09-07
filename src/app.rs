@@ -9,12 +9,13 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use tokio_util::{bytes::Bytes, sync::CancellationToken};
+use tokio_util::bytes::Bytes;
 
 use crate::{
     crypto::{DigestHash, UpdateHash},
     replica::{Reply, Request},
     storage::{Bump, StorageKey, StorageOp, StorageRes},
+    task::TaskGroup,
 };
 
 pub enum StateOp<K, V> {
@@ -52,7 +53,7 @@ where
     C::Value: Send + 'static + Encode + Decode<()>,
 {
     pub fn spawn(
-        cancel: CancellationToken,
+        group: TaskGroup,
         rx_execute_request: Receiver<(Request, oneshot::Sender<Reply>)>,
         tx_execute_op: Sender<(C::Op, oneshot::Sender<C::Res>)>,
         rx_state_op: Receiver<StateOp<C::Key, C::Value>>,
@@ -68,12 +69,7 @@ where
             rx_state_op,
             tx_storage_op,
         };
-        spawn(async move {
-            if let Some(Err(err)) = cancel.run_until_cancelled(app.run()).await {
-                tracing::error!(%err);
-                cancel.cancel()
-            }
-        })
+        spawn(async move { group.wrap_fallible(app.run()).await })
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {

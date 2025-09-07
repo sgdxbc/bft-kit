@@ -6,6 +6,7 @@ pub mod node;
 pub mod parse;
 pub mod replica;
 pub mod storage;
+pub mod task;
 
 // similar to tracing_subscriber::fmt::init() but reports spans
 // why init() defaults to not report spans? i don't understand

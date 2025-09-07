@@ -1,3 +1,7 @@
+use crate::{
+    app::{AppProtocolTypeConfig, AppTypeConfig, StateOp},
+    task::TaskGroup,
+};
 use bincode::{Decode, Encode};
 use tokio::{
     spawn,
@@ -7,9 +11,6 @@ use tokio::{
     },
     task::JoinHandle,
 };
-use tokio_util::sync::CancellationToken;
-
-use crate::app::{AppProtocolTypeConfig, AppTypeConfig, StateOp};
 
 pub mod ycsb;
 
@@ -30,17 +31,12 @@ impl AppTypeConfig for Kv {
 
 impl Kv {
     pub fn spawn(
-        cancel: CancellationToken,
+        group: TaskGroup,
         rx_op: Receiver<(KvOp, oneshot::Sender<KvRes>)>,
         tx_state_op: Sender<StateOp<String, String>>,
     ) -> JoinHandle<()> {
         let mut kv = Self { rx_op, tx_state_op };
-        spawn(async move {
-            if let Some(Err(err)) = cancel.run_until_cancelled(kv.run()).await {
-                tracing::error!(%err);
-                cancel.cancel()
-            }
-        })
+        spawn(group.wrap_fallible(async move { kv.run().await }))
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {

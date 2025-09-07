@@ -6,7 +6,9 @@ use tokio::{
     sync::{mpsc::Receiver, oneshot},
     task::JoinHandle,
 };
-use tokio_util::{bytes::Bytes, sync::CancellationToken};
+use tokio_util::bytes::Bytes;
+
+use crate::task::TaskGroup;
 
 pub type StorageKey = H256;
 
@@ -31,14 +33,9 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn spawn(cancel: CancellationToken, rx_op: Receiver<StorageOp>) -> JoinHandle<()> {
+    pub fn spawn(group: TaskGroup, rx_op: Receiver<StorageOp>) -> JoinHandle<()> {
         let mut storage = Self { rx_op };
-        spawn(async move {
-            if let Some(Err(err)) = cancel.run_until_cancelled(storage.run()).await {
-                tracing::error!(%err);
-                cancel.cancel()
-            }
-        })
+        spawn(async move { group.wrap_fallible(storage.run()).await })
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
