@@ -4,7 +4,7 @@ use bft_kit::{init_logging, node::ReplayNode, parse::Configs, task::TaskGroup};
 use rand::{SeedableRng, rngs::StdRng};
 use rocksdb::{DB, properties::LIVE_SST_FILES_SIZE};
 use tempfile::tempdir;
-use tokio::{spawn, time::sleep};
+use tokio::{fs::create_dir, spawn, time::sleep};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -14,40 +14,49 @@ async fn main() -> anyhow::Result<()> {
     configs.parse(
         "
 replica.addrs       127.0.0.1:5000
+replica.addrs       127.0.0.1:5001
+replica.addrs       127.0.0.1:5002
+replica.addrs       127.0.0.1:5003
 
-big.num-node        1
-big.num-faulty-node 0
+big.num-node        4
+big.num-faulty-node 1
 big.num-active-copy 1
-big.num-stripe      1
+big.num-stripe      10000
 big.bypass-vote     true
 ",
     );
-
     let temp_dir = tempdir()?;
-    let db = Arc::new(DB::open_default(temp_dir.path())?);
 
     let cancel = CancellationToken::new();
-    let handles = ReplayNode::spawn(
-        TaskGroup(cancel.clone()),
-        db.clone(),
-        configs.get_values("replica.addrs")?,
-        0,
-        (0..configs.get("big.num-node")?).collect(),
-        configs.extract()?,
-        [0].into(),
-        StdRng::seed_from_u64(117418),
-    );
+    let group = TaskGroup(cancel.clone());
+    let mut handles = vec![];
+    let mut dbs = vec![];
+    for replica_index in 0..configs.get("big.num-node")? {
+        let path = temp_dir.path().join(format!("replica-{replica_index}"));
+        create_dir(&path).await?;
+        let db = Arc::new(DB::open_default(path)?);
+        dbs.push(db.clone());
+        handles.push(ReplayNode::spawn(
+            group.clone(),
+            db.clone(),
+            configs.get_values("replica.addrs")?,
+            replica_index,
+            (0..configs.get("big.num-node")?).collect(),
+            configs.extract()?,
+            [replica_index].into(),
+            StdRng::seed_from_u64(117418 as u64),
+        ))
+    }
     spawn({
         let cancel = cancel.clone();
         async move {
-            for _ in 0..10 {
+            for _ in 0..120 {
                 sleep(Duration::from_secs(1)).await;
-                let Ok(Some(live_sst_files_size)) = db.property_int_value(LIVE_SST_FILES_SIZE)
-                else {
-                    tracing::error!("failed to get LIVE_SST_FILES_SIZE");
-                    continue;
-                };
-                tracing::info!("LIVE_SST_FILES_SIZE = {live_sst_files_size}")
+                let sizes = dbs
+                    .iter()
+                    .map(|db| db.property_int_value(LIVE_SST_FILES_SIZE))
+                    .collect::<Vec<_>>();
+                tracing::info!("LIVE_SST_FILES_SIZE = {:?}", sizes);
             }
             cancel.cancel()
         }

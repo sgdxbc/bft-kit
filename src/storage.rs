@@ -79,8 +79,8 @@ impl Storage {
         let (tx_epoch_change, rx_epoch_change) = channel(1);
         let (tx_entered, rx_entered) = oneshot::channel();
         let _ = tx_epoch_change.try_send((0, tx_entered));
-        let (tx_archived, rx_archived) = channel(1);
-        let (tx_archive_push, rx_archive_push) = channel(1);
+        let (tx_archived, rx_archived) = channel(100);
+        let (tx_archive_push, rx_archive_push) = channel(100);
 
         let mut storage = Self {
             db: db.clone(),
@@ -465,6 +465,10 @@ impl ArchiveWorker {
             snapshot_versioned(self.db.clone(), state.stripe_index, state.version).await?;
         for (key, value) in local_data {
             let group_index = self.config.group_of(&key);
+            // temporary
+            if !self.group_indices.contains(&group_index) {
+                continue;
+            }
             state
                 .stripe_data
                 .get_mut(&group_index)
@@ -480,6 +484,11 @@ impl ArchiveWorker {
                 group_index,
                 data,
             };
+            tracing::debug!(
+                "push archive stripe {} group {}",
+                state.stripe_index,
+                group_index
+            );
             self.network_dispatcher
                 .send_to_all(Message::ArchivePush(archive_push))
                 .await
@@ -498,6 +507,12 @@ impl ArchiveWorker {
     }
 
     async fn handle_archive_push(&mut self, push: message::ArchivePush) -> anyhow::Result<()> {
+        tracing::debug!(
+            "handling archive push epoch {} stripe {} group {}",
+            push.epoch,
+            push.stripe_index,
+            push.group_index
+        );
         let Some(state) = &mut self.state else {
             if push.epoch <= self.epoch {
                 tracing::warn!("ignoring stale archive push for epoch {}", push.epoch);
@@ -529,7 +544,7 @@ impl ArchiveWorker {
             return Ok(());
         }
 
-        tracing::info!(?self.node_indices, "archive stripe {}", state.stripe_index);
+        tracing::debug!(?self.node_indices, "archive stripe {}", state.stripe_index);
         let stripe_data = take(&mut state.stripe_data);
         // TODO
 
@@ -569,19 +584,22 @@ async fn snapshot_versioned(
             let Some(postfix) = key.strip_prefix(prefix.as_bytes()) else {
                 break;
             };
-            let Some(storage_key) = str::from_utf8(postfix)?.split('.').next() else {
+            let mut split = str::from_utf8(postfix)?.split('.');
+            let (Some(storage_key), Some(version)) = (split.next(), split.next()) else {
                 anyhow::bail!("invalid key format {:?}", str::from_utf8(key))
             };
-            let storage_key = storage_key.parse::<H256>()?;
-            iter.seek_for_prev(format!("{prefix}{storage_key}.{archive_version:08x}"));
-            iter.status()?;
-            let Some((found_key, value)) = iter.item() else {
-                unimplemented!()
-            };
-            if !found_key.ends_with(b"+delete") {
-                data.push((storage_key, value.to_vec()))
+            let storage_key = storage_key.to_string();
+            if StateVersion::from_str_radix(version, 16)? <= archive_version {
+                iter.seek_for_prev(format!("{prefix}{storage_key}.{archive_version:08x}"));
+                iter.status()?;
+                let Some((found_key, value)) = iter.item() else {
+                    unimplemented!()
+                };
+                if !found_key.ends_with(b"+delete") {
+                    data.push((storage_key.parse()?, value.to_vec()))
+                }
             }
-            iter.seek(format!("{prefix}{storage_key:x}.{:08x}", StateVersion::MAX))
+            iter.seek(format!("{prefix}{storage_key}.{:08x}", StateVersion::MAX))
         }
         anyhow::Ok(data)
     })

@@ -8,7 +8,7 @@ use tokio::{
     sync::mpsc::{Receiver, Sender, channel},
     task::JoinHandle,
 };
-use tokio_util::bytes::Bytes;
+use tokio_util::{bytes::Bytes, sync::CancellationToken};
 
 use crate::{
     crypto::cert::quinn::{client_config, server_config},
@@ -21,11 +21,17 @@ pub struct Network<IM, OM> {
     endpoint: Endpoint,
     connections: HashMap<u32, Connection>,
 
+    static_connections: Option<StaticConnections>,
     tx_incoming_messages: Sender<IM>,
     rx_outgoing_messages: Receiver<(Dest, OM)>,
 
     tx_close: Sender<u32>,
     rx_close: Receiver<u32>,
+}
+
+pub struct StaticConnections {
+    pub num_connection: usize,
+    pub connected: CancellationToken,
 }
 
 pub enum Dest {
@@ -39,12 +45,14 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
+        connected: CancellationToken,
     ) -> JoinHandle<()> {
         spawn(group.clone().wrap_fallible(Self::client(
             group,
             tx_incoming_messages,
             rx_outgoing_messages,
             replica_addrs,
+            connected,
         )))
     }
 
@@ -54,6 +62,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
         replica_index: ReplicaIndex,
+        connected: CancellationToken,
     ) -> JoinHandle<()> {
         spawn(group.clone().wrap_fallible(Self::replica(
             group,
@@ -61,12 +70,14 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
             rx_outgoing_messages,
             replica_addrs,
             replica_index,
+            connected,
         )))
     }
 
     fn new(
         group: TaskGroup,
         endpoint: Endpoint,
+        static_connections: Option<StaticConnections>,
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
     ) -> Self {
@@ -74,6 +85,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
         Self {
             group,
             endpoint,
+            static_connections,
             connections: HashMap::new(),
             tx_incoming_messages,
             rx_outgoing_messages,
@@ -87,10 +99,21 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
+        connected: CancellationToken,
     ) -> anyhow::Result<()> {
         let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
         endpoint.set_default_client_config(client_config());
-        let mut network = Self::new(group, endpoint, tx_incoming_messages, rx_outgoing_messages);
+        let static_connections = StaticConnections {
+            num_connection: replica_addrs.len(),
+            connected,
+        };
+        let mut network = Self::new(
+            group,
+            endpoint,
+            Some(static_connections),
+            tx_incoming_messages,
+            rx_outgoing_messages,
+        );
         let id = rng().random_range(1 << 10..u32::MAX);
         network
             .start(
@@ -110,16 +133,30 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
         replica_index: ReplicaIndex,
+        connected: CancellationToken,
     ) -> anyhow::Result<()> {
-        let endpoint = Endpoint::server(server_config(), replica_addrs[replica_index as usize])?;
-        let mut network = Self::new(group, endpoint, tx_incoming_messages, rx_outgoing_messages);
+        let mut endpoint =
+            Endpoint::server(server_config(), replica_addrs[replica_index as usize])?;
+        endpoint.set_default_client_config(client_config());
+        let static_connections = StaticConnections {
+            num_connection: replica_addrs.len() - 1,
+            connected,
+        };
+        let mut network = Self::new(
+            group,
+            endpoint,
+            Some(static_connections),
+            tx_incoming_messages,
+            rx_outgoing_messages,
+        );
         network
             .start(
                 replica_addrs
                     .into_iter()
                     .enumerate()
                     .filter(move |&(i, _)| i != replica_index as usize)
-                    .map(|(i, addr)| (addr, i as _)),
+                    .map(|(i, addr)| (addr, i as _))
+                    .take(replica_index as _),
                 replica_index as _,
             )
             .await?;
@@ -158,9 +195,15 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
                         .read_exact(&mut remote_id)
                         .await?;
                     let remote_id = u32::from_le_bytes(remote_id);
+                    tracing::debug!("accepted connection from {remote_id}");
 
                     self.spawn_read_loop(connection.clone(), remote_id, self.tx_close.clone());
                     self.connections.insert(remote_id, connection);
+                    if let Some(static_connections) = &self.static_connections {
+                        if self.connections.len() == static_connections.num_connection {
+                            static_connections.connected.cancel()
+                        }
+                    }
                 }
                 Event::Close(id) => {
                     self.connections.remove(&id);
@@ -205,6 +248,11 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
             .await?;
         self.spawn_read_loop(connection.clone(), remote_id, self.tx_close.clone());
         self.connections.insert(remote_id, connection);
+        if let Some(static_connections) = &self.static_connections {
+            if self.connections.len() == static_connections.num_connection {
+                static_connections.connected.cancel()
+            }
+        }
         Ok(())
     }
 

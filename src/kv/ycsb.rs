@@ -61,7 +61,7 @@ impl Ycsb {
             } else {
                 let v = (&mut self.rng)
                     .sample_iter(Alphanumeric)
-                    .take(1 << 10)
+                    .take(4 << 10)
                     .map(char::from)
                     .collect();
                 KvOp::Put(k, v)
