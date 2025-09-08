@@ -4,6 +4,8 @@
 
 pub mod replay;
 
+pub type ReplicaIndex = u16;
+
 pub struct Request {
     pub client_id: u32,
     pub client_seq: u64,

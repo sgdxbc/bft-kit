@@ -55,13 +55,13 @@ impl Ycsb {
 
     async fn run(&mut self) -> anyhow::Result<()> {
         loop {
-            let k = format!("key{:08}", self.rng.random_range(..1000u32));
+            let k = format!("key{:08}", self.rng.random_range(..1_000_000u32));
             let op = if self.rng.random_bool(0.5) {
                 KvOp::Get(k)
             } else {
                 let v = (&mut self.rng)
                     .sample_iter(Alphanumeric)
-                    .take(100)
+                    .take(4 << 10)
                     .map(char::from)
                     .collect();
                 KvOp::Put(k, v)

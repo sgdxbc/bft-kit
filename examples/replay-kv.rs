@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bft_kit::{init_logging, node::ReplayNode, parse::Configs, task::TaskGroup};
 use rand::{SeedableRng, rngs::StdRng};
-use rocksdb::DB;
+use rocksdb::{DB, properties::LIVE_SST_FILES_SIZE};
 use tempfile::tempdir;
 use tokio::{spawn, time::sleep};
 use tokio_util::sync::CancellationToken;
@@ -22,19 +22,28 @@ big.bypass-vote     true
     );
 
     let temp_dir = tempdir()?;
-    let db = DB::open_default(temp_dir.path())?;
+    let db = Arc::new(DB::open_default(temp_dir.path())?);
 
     let cancel = CancellationToken::new();
     let handles = ReplayNode::spawn(
         TaskGroup(cancel.clone()),
-        db,
+        db.clone(),
         configs.extract()?,
+        [0].into(),
         StdRng::seed_from_u64(117418),
     );
     spawn({
         let cancel = cancel.clone();
         async move {
-            sleep(Duration::from_secs(3)).await;
+            for _ in 0..10 {
+                sleep(Duration::from_secs(1)).await;
+                let Ok(Some(live_sst_files_size)) = db.property_int_value(LIVE_SST_FILES_SIZE)
+                else {
+                    tracing::error!("failed to get LIVE_SST_FILES_SIZE");
+                    continue;
+                };
+                tracing::info!("LIVE_SST_FILES_SIZE = {live_sst_files_size}")
+            }
             cancel.cancel()
         }
     });

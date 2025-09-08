@@ -8,8 +8,11 @@ use primitive_types::H256;
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng, seq::IteratorRandom as _};
 use rocksdb::DB;
 use tokio::{
-    spawn,
-    sync::{mpsc::Receiver, oneshot},
+    select, spawn,
+    sync::{
+        mpsc::{Receiver, Sender, channel},
+        oneshot,
+    },
     task::{JoinHandle, spawn_blocking},
 };
 use tokio_util::bytes::Bytes;
@@ -17,8 +20,8 @@ use tokio_util::bytes::Bytes;
 use crate::task::TaskGroup;
 
 pub type StorageKey = H256;
+pub type NodeIndex = u16;
 type StateVersion = u64;
-type NodeIndex = u16;
 type ActiveGroupIndex = NodeIndex;
 type StripeIndex = u16;
 type StripeShardIndex = usize;
@@ -26,6 +29,7 @@ type StripeShardIndex = usize;
 pub enum StorageOp {
     Fetch(StorageKey, oneshot::Sender<StorageRes<Option<Bytes>>>),
     Bump(Bump, oneshot::Sender<StorageRes<()>>),
+    // archive
 }
 
 #[derive(Debug)]
@@ -42,9 +46,12 @@ pub struct Bump {
 pub struct Storage {
     db: Arc<DB>,
     config: ShardedStorageConfig,
+
     version: StateVersion,
 
     rx_op: Receiver<StorageOp>,
+    tx_epoch_change: Sender<(StateVersion, oneshot::Sender<()>)>,
+    rx_entered: oneshot::Receiver<()>,
 }
 
 impl Storage {
@@ -52,56 +59,110 @@ impl Storage {
         group: TaskGroup,
         db: impl Into<Arc<DB>>,
         config: ShardedStorageConfig,
+        node_indices: HashSet<NodeIndex>,
         rx_op: Receiver<StorageOp>,
-    ) -> JoinHandle<()> {
+    ) -> Vec<JoinHandle<()>> {
+        let db = db.into();
+
+        let (tx_epoch_change, rx_epoch_change) = channel(1);
+        let (tx_entered, rx_entered) = oneshot::channel();
+        let _ = tx_epoch_change.try_send((0, tx_entered));
+        let (tx_archived, rx_archived) = channel(1);
+
         let mut storage = Self {
-            db: db.into(),
-            config,
+            db: db.clone(),
+            config: config.clone(),
             version: 0,
             rx_op,
+            tx_epoch_change,
+            rx_entered,
         };
-        spawn(async move { group.wrap_fallible(storage.run()).await })
+        let storage = spawn(
+            group
+                .clone()
+                .wrap_fallible(async move { storage.run().await }),
+        );
+
+        let archive_worker = ArchiveWorker::spawn(
+            group.clone(),
+            config.clone(),
+            node_indices,
+            rx_epoch_change,
+            tx_archived,
+        );
+        let collect_worker = CollectWorker::spawn(db, group, config, rx_archived);
+        vec![storage, archive_worker, collect_worker]
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
+        loop {
+            enum Event {
+                Op(StorageOp),
+                EnteredEpoch,
+            }
+            match select! {
+                Some(op) = self.rx_op.recv() => Event::Op(op),
+                Ok(()) = &mut self.rx_entered => Event::EnteredEpoch,
+                else => break,
+            } {
+                Event::Op(op) => self.handle_op(op).await?,
+                Event::EnteredEpoch => self.handle_entered_epoch().await?,
+            }
+        }
         while let Some(op) = self.rx_op.recv().await {
-            match op {
-                StorageOp::Fetch(key, tx_value) => {
-                    let value = get_versioned(
+            self.handle_op(op).await?
+        }
+        Ok(())
+    }
+
+    async fn handle_op(&mut self, op: StorageOp) -> anyhow::Result<()> {
+        match op {
+            StorageOp::Fetch(key, tx_value) => {
+                let value = get_versioned(
+                    self.db.clone(),
+                    &key,
+                    self.version,
+                    self.config.stripe_of(&key),
+                )
+                .await?;
+                let _ = tx_value.send(StorageRes::Ok(value));
+            }
+            StorageOp::Bump(bump, tx_ok) => {
+                self.version += 1;
+                for (key, value) in bump.inserts {
+                    put_versioned(
+                        self.db.clone(),
+                        &key,
+                        self.version,
+                        value,
+                        self.config.stripe_of(&key),
+                    )
+                    .await?
+                }
+                for key in bump.deletes {
+                    delete_versioned(
                         self.db.clone(),
                         &key,
                         self.version,
                         self.config.stripe_of(&key),
                     )
-                    .await?;
-                    let _ = tx_value.send(StorageRes::Ok(value));
+                    .await?
                 }
-                StorageOp::Bump(bump, tx_ok) => {
-                    self.version += 1;
-                    for (key, value) in bump.inserts {
-                        put_versioned(
-                            self.db.clone(),
-                            &key,
-                            self.version,
-                            value,
-                            self.config.stripe_of(&key),
-                        )
-                        .await?
-                    }
-                    for key in bump.deletes {
-                        delete_versioned(
-                            self.db.clone(),
-                            &key,
-                            self.version,
-                            self.config.stripe_of(&key),
-                        )
-                        .await?
-                    }
-                    let _ = tx_ok.send(StorageRes::Ok(()));
-                }
+                let _ = tx_ok.send(StorageRes::Ok(()));
             }
         }
         Ok(())
+    }
+
+    async fn handle_entered_epoch(&mut self) -> anyhow::Result<()> {
+        if self.config.bypass_vote {
+            let (tx_entered, rx_entered) = oneshot::channel();
+            let _ = self.tx_epoch_change.send((self.version, tx_entered)).await;
+            self.rx_entered = rx_entered;
+            return Ok(());
+        }
+
+        todo!()
     }
 }
 
@@ -252,6 +313,146 @@ async fn delete_versioned(
     let key = format!("{stripe_index:04x}.{key:x}.{version:08x}.delete");
     spawn_blocking(move || db.put(key, b"")).await??;
     Ok(())
+}
+
+struct ArchiveWorker {
+    config: ShardedStorageConfig,
+    node_indices: HashSet<NodeIndex>,
+    epoch: u64,
+
+    rx_epoch_change: Receiver<(StateVersion, oneshot::Sender<()>)>,
+    tx_archived: Sender<message::Archived>,
+}
+
+impl ArchiveWorker {
+    fn spawn(
+        group: TaskGroup,
+        config: ShardedStorageConfig,
+        node_indices: HashSet<NodeIndex>,
+        rx_epoch_change: Receiver<(StateVersion, oneshot::Sender<()>)>,
+        tx_archived: Sender<message::Archived>,
+    ) -> JoinHandle<()> {
+        let mut worker = Self {
+            config,
+            node_indices,
+            epoch: 0,
+            rx_epoch_change,
+            tx_archived,
+        };
+        spawn(group.wrap_fallible(async move { worker.run().await }))
+    }
+
+    async fn run(&mut self) -> anyhow::Result<()> {
+        while let Some((state_version, tx_entered)) = self.rx_epoch_change.recv().await {
+            self.epoch += 1;
+            tracing::info!(
+                "entered epoch {} at state version {state_version}",
+                self.epoch
+            );
+            // TODO
+            let _ = tx_entered.send(());
+
+            let archived = message::Archived {
+                version: state_version,
+                node_indices: self.node_indices.clone(),
+            };
+            // TODO send to network
+            let _ = self.tx_archived.send(archived).await;
+        }
+        Ok(())
+    }
+}
+
+struct CollectWorker {
+    db: Arc<DB>,
+    config: ShardedStorageConfig,
+    node_archived_versions: Vec<StateVersion>, // [node index -> version]
+    quorum_archived_version: StateVersion,
+
+    rx_archived: Receiver<message::Archived>,
+}
+
+impl CollectWorker {
+    fn spawn(
+        db: Arc<DB>,
+        group: TaskGroup,
+        config: ShardedStorageConfig,
+        rx_archived: Receiver<message::Archived>,
+    ) -> JoinHandle<()> {
+        let mut worker = Self {
+            db,
+            node_archived_versions: vec![0; config.num_node as usize],
+            config,
+            quorum_archived_version: 0,
+            rx_archived,
+        };
+        spawn(group.wrap_fallible(async move { worker.run().await }))
+    }
+
+    async fn run(&mut self) -> anyhow::Result<()> {
+        while let Some(archived) = self.rx_archived.recv().await {
+            for node_index in archived.node_indices {
+                self.node_archived_versions[node_index as usize] =
+                    self.node_archived_versions[node_index as usize].max(archived.version)
+            }
+            let mut versions = self.node_archived_versions.clone();
+            versions.sort_unstable();
+            let quorum_archived_version = versions[self.config.num_faulty_node as usize];
+            if quorum_archived_version > self.quorum_archived_version {
+                self.quorum_archived_version = quorum_archived_version;
+
+                tracing::info!(
+                    "garbage collect up to version {}",
+                    self.quorum_archived_version
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+pub mod message {
+    use std::collections::{HashMap, HashSet};
+
+    use bincode::{Decode, Encode};
+
+    use crate::replica::ReplicaIndex;
+
+    use super::{ActiveGroupIndex, NodeIndex, StateVersion, StripeIndex};
+
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct VoteArchive {
+        pub epoch: u64,
+        pub node_indices: HashSet<NodeIndex>,
+    }
+
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct Query {
+        pub version: StateVersion,
+        pub key: [u8; 32], // `StorageKey` does not support Encode/Decode
+        pub replica_index: ReplicaIndex,
+    }
+
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct QueryOk {
+        pub version: StateVersion,
+        pub key: [u8; 32],
+        pub value: Option<Vec<u8>>, // `Bytes` does not support Encode/Decode
+    }
+
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct ArchivePush {
+        pub epoch: u64,
+        pub stripe_index: StripeIndex,
+        pub group_index: ActiveGroupIndex,
+        pub shard: HashMap<[u8; 32], Vec<u8>>,
+    }
+
+    #[derive(Debug, Clone, Encode, Decode)]
+    pub struct Archived {
+        pub version: StateVersion,
+        pub node_indices: HashSet<NodeIndex>,
+    }
 }
 
 mod parse {
