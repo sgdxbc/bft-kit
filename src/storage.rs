@@ -401,14 +401,68 @@ impl CollectWorker {
             if quorum_archived_version > self.quorum_archived_version {
                 self.quorum_archived_version = quorum_archived_version;
 
-                tracing::info!(
+                tracing::debug!(
                     "garbage collect up to version {}",
                     self.quorum_archived_version
                 );
+                collect_versioned(
+                    self.db.clone(),
+                    self.quorum_archived_version,
+                    self.config.num_stripe,
+                )
+                .await?
             }
         }
         Ok(())
     }
+}
+
+async fn collect_versioned(
+    db: Arc<DB>,
+    archived_version: StateVersion,
+    num_stripe: StripeIndex,
+) -> anyhow::Result<()> {
+    spawn_blocking(move || {
+        let mut batch = rocksdb::WriteBatch::default();
+        for stripe_index in 0..num_stripe {
+            let prefix = format!("{stripe_index:04x}.");
+            let mut iter = db.raw_iterator();
+            iter.seek(&prefix);
+            iter.status()?;
+
+            let mut prev = None;
+            while let Some((key, _value)) = iter.item() {
+                let Some(postfix) = key.strip_prefix(prefix.as_bytes()) else {
+                    break;
+                };
+                let mut split = str::from_utf8(postfix)?.split('.');
+                let (Some(storage_key), Some(version)) = (split.next(), split.next()) else {
+                    anyhow::bail!("invalid key format {:?}", str::from_utf8(key))
+                };
+                let version = StateVersion::from_str_radix(version, 16)?;
+                if let Some((prev_key, prev_storage_key)) = prev.take()
+                    && prev_storage_key == storage_key
+                    && version <= archived_version
+                {
+                    batch.delete(prev_key)
+                }
+                if version < archived_version {
+                    prev = Some((key.to_vec(), storage_key.to_string()));
+                    iter.next()
+                } else {
+                    iter.seek(format!("{prefix}{storage_key}.{:08x}", StateVersion::MAX))
+                }
+                iter.status()?
+            }
+        }
+        tracing::debug!("deleting {} entries", batch.len());
+        db.write(batch)?;
+
+        //
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
 }
 
 pub mod message {
