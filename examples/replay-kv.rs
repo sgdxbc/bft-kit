@@ -13,6 +13,8 @@ async fn main() -> anyhow::Result<()> {
     let mut configs = Configs::new();
     configs.parse(
         "
+replica.addrs       127.0.0.1:5000
+
 big.num-node        1
 big.num-faulty-node 0
 big.num-active-copy 1
@@ -28,6 +30,9 @@ big.bypass-vote     true
     let handles = ReplayNode::spawn(
         TaskGroup(cancel.clone()),
         db.clone(),
+        configs.get_values("replica.addrs")?,
+        0,
+        (0..configs.get("big.num-node")?).collect(),
         configs.extract()?,
         [0].into(),
         StdRng::seed_from_u64(117418),

@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use bincode::{Decode, Encode};
 use primitive_types::H256;
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng, seq::IteratorRandom as _};
 use rocksdb::DB;
@@ -17,7 +18,7 @@ use tokio::{
 };
 use tokio_util::bytes::Bytes;
 
-use crate::task::TaskGroup;
+use crate::{network::Dest, replica::ReplicaIndex, task::TaskGroup};
 
 pub type StorageKey = H256;
 pub type NodeIndex = u16;
@@ -50,6 +51,7 @@ pub struct Storage {
     version: StateVersion,
 
     rx_op: Receiver<StorageOp>,
+    rx_message: Receiver<Message>,
     tx_epoch_change: Sender<(StateVersion, oneshot::Sender<()>)>,
     rx_entered: oneshot::Receiver<()>,
 }
@@ -60,9 +62,16 @@ impl Storage {
         db: impl Into<Arc<DB>>,
         config: ShardedStorageConfig,
         node_indices: HashSet<NodeIndex>,
+        node_table: Vec<ReplicaIndex>,
         rx_op: Receiver<StorageOp>,
+        tx_message: Sender<(Dest, Message)>,
+        rx_message: Receiver<Message>,
     ) -> Vec<JoinHandle<()>> {
         let db = db.into();
+        let network_dispatcher = NetworkDispatcher {
+            tx_message,
+            node_table,
+        };
 
         let (tx_epoch_change, rx_epoch_change) = channel(1);
         let (tx_entered, rx_entered) = oneshot::channel();
@@ -76,6 +85,7 @@ impl Storage {
             rx_op,
             tx_epoch_change,
             rx_entered,
+            rx_message,
         };
         let storage = spawn(
             group
@@ -85,6 +95,8 @@ impl Storage {
 
         let archive_worker = ArchiveWorker::spawn(
             group.clone(),
+            db.clone(),
+            network_dispatcher,
             config.clone(),
             node_indices,
             rx_epoch_change,
@@ -316,7 +328,10 @@ async fn delete_versioned(
 }
 
 struct ArchiveWorker {
+    db: Arc<DB>,
+    network_dispatcher: NetworkDispatcher,
     config: ShardedStorageConfig,
+
     node_indices: HashSet<NodeIndex>,
     epoch: u64,
 
@@ -327,6 +342,8 @@ struct ArchiveWorker {
 impl ArchiveWorker {
     fn spawn(
         group: TaskGroup,
+        db: Arc<DB>,
+        network_dispatcher: NetworkDispatcher,
         config: ShardedStorageConfig,
         node_indices: HashSet<NodeIndex>,
         rx_epoch_change: Receiver<(StateVersion, oneshot::Sender<()>)>,
@@ -334,6 +351,8 @@ impl ArchiveWorker {
     ) -> JoinHandle<()> {
         let mut worker = Self {
             config,
+            db,
+            network_dispatcher,
             node_indices,
             epoch: 0,
             rx_epoch_change,
@@ -349,7 +368,9 @@ impl ArchiveWorker {
                 "entered epoch {} at state version {state_version}",
                 self.epoch
             );
-            // TODO
+            if self.config.num_node > 1 {
+                // TODO
+            }
             let _ = tx_entered.send(());
 
             let archived = message::Archived {
@@ -401,7 +422,7 @@ impl CollectWorker {
             if quorum_archived_version > self.quorum_archived_version {
                 self.quorum_archived_version = quorum_archived_version;
 
-                tracing::debug!(
+                tracing::info!(
                     "garbage collect up to version {}",
                     self.quorum_archived_version
                 );
@@ -465,6 +486,23 @@ async fn collect_versioned(
     Ok(())
 }
 
+#[derive(Debug, Clone, Encode, Decode)]
+pub enum Message {
+    ArchivePush(message::ArchivePush),
+}
+
+#[derive(Debug, Clone)]
+struct NetworkDispatcher {
+    tx_message: Sender<(Dest, Message)>,
+    node_table: Vec<ReplicaIndex>,
+}
+
+impl NetworkDispatcher {
+    async fn send_to_all(&self, message: Message) {
+        let _ = self.tx_message.send((Dest::All, message)).await;
+    }
+}
+
 pub mod message {
     use std::collections::{HashMap, HashSet};
 
@@ -499,7 +537,7 @@ pub mod message {
         pub epoch: u64,
         pub stripe_index: StripeIndex,
         pub group_index: ActiveGroupIndex,
-        pub shard: HashMap<[u8; 32], Vec<u8>>,
+        pub data: HashMap<[u8; 32], Vec<u8>>,
     }
 
     #[derive(Debug, Clone, Encode, Decode)]
