@@ -1,12 +1,12 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     iter::once,
+    mem::take,
     sync::Arc,
 };
 
 use bincode::{Decode, Encode};
 use primitive_types::H256;
-use quinn::rustls::crypto::hash::Hash;
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng, seq::IteratorRandom as _};
 use rocksdb::DB;
 use tokio::{
@@ -53,6 +53,8 @@ pub struct Storage {
 
     rx_op: Receiver<StorageOp>,
     rx_message: Receiver<Message>,
+    tx_archive_push: Sender<message::ArchivePush>,
+    tx_archived: Sender<message::Archived>,
     tx_epoch_change: Sender<(StateVersion, oneshot::Sender<()>)>,
     rx_entered: oneshot::Receiver<()>,
 }
@@ -78,6 +80,7 @@ impl Storage {
         let (tx_entered, rx_entered) = oneshot::channel();
         let _ = tx_epoch_change.try_send((0, tx_entered));
         let (tx_archived, rx_archived) = channel(1);
+        let (tx_archive_push, rx_archive_push) = channel(1);
 
         let mut storage = Self {
             db: db.clone(),
@@ -87,6 +90,8 @@ impl Storage {
             tx_epoch_change,
             rx_entered,
             rx_message,
+            tx_archive_push,
+            tx_archived: tx_archived.clone(),
         };
         let storage = spawn(
             group
@@ -101,6 +106,7 @@ impl Storage {
             config.clone(),
             node_indices,
             rx_epoch_change,
+            rx_archive_push,
             tx_archived,
         );
         let collect_worker = CollectWorker::spawn(db, group, config, rx_archived);
@@ -111,14 +117,17 @@ impl Storage {
         loop {
             enum Event {
                 Op(StorageOp),
+                Message(Message),
                 EnteredEpoch,
             }
             match select! {
                 Some(op) = self.rx_op.recv() => Event::Op(op),
+                Some(msg) = self.rx_message.recv() => Event::Message(msg),
                 Ok(()) = &mut self.rx_entered => Event::EnteredEpoch,
                 else => break,
             } {
                 Event::Op(op) => self.handle_op(op).await?,
+                Event::Message(message) => self.handle_message(message).await?,
                 Event::EnteredEpoch => self.handle_entered_epoch().await?,
             }
         }
@@ -162,6 +171,18 @@ impl Storage {
                     .await?
                 }
                 let _ = tx_ok.send(StorageRes::Ok(()));
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_message(&mut self, message: Message) -> anyhow::Result<()> {
+        match message {
+            Message::ArchivePush(push) => {
+                let _ = self.tx_archive_push.send(push).await;
+            }
+            Message::Archived(archived) => {
+                let _ = self.tx_archived.send(archived).await;
             }
         }
         Ok(())
@@ -337,8 +358,10 @@ struct ArchiveWorker {
 
     epoch: u64,
     state: Option<ArchivingState>,
+    reorder_archive_pushes: HashMap<(u64, StripeIndex), Vec<message::ArchivePush>>,
 
     rx_epoch_change: Receiver<(StateVersion, oneshot::Sender<()>)>,
+    rx_archive_push: Receiver<message::ArchivePush>,
     tx_archived: Sender<message::Archived>,
 }
 
@@ -357,6 +380,7 @@ impl ArchiveWorker {
         config: ShardedStorageConfig,
         node_indices: HashSet<NodeIndex>,
         rx_epoch_change: Receiver<(StateVersion, oneshot::Sender<()>)>,
+        rx_archive_push: Receiver<message::ArchivePush>,
         tx_archived: Sender<message::Archived>,
     ) -> JoinHandle<()> {
         let mut worker = Self {
@@ -366,14 +390,32 @@ impl ArchiveWorker {
             node_indices,
             epoch: 0,
             state: None,
+            reorder_archive_pushes: Default::default(),
             config,
             rx_epoch_change,
+            rx_archive_push,
             tx_archived,
         };
         spawn(group.wrap_fallible(async move { worker.run().await }))
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
+        loop {
+            enum Event {
+                EpochChange((StateVersion, oneshot::Sender<()>)),
+                ArchivePush(message::ArchivePush),
+            }
+            match select! {
+                Some(epoch_change) = self.rx_epoch_change.recv() => Event::EpochChange(epoch_change),
+                Some(archive_push) = self.rx_archive_push.recv() => Event::ArchivePush(archive_push),
+                else => break,
+            } {
+                Event::EpochChange((version, tx_entered)) => {
+                    self.handle_epoch_change(version, tx_entered).await?
+                }
+                Event::ArchivePush(push) => self.handle_archive_push(push).await?,
+            }
+        }
         while let Some((version, tx_entered)) = self.rx_epoch_change.recv().await {
             self.handle_epoch_change(version, tx_entered).await?
         }
@@ -387,10 +429,6 @@ impl ArchiveWorker {
     ) -> anyhow::Result<()> {
         self.epoch += 1;
         tracing::info!("entering epoch {} at version {version}", self.epoch);
-        if self.config.num_node == 1 {
-            self.archive_complete().await;
-            return Ok(());
-        }
 
         let state = ArchivingState {
             version,
@@ -402,16 +440,21 @@ impl ArchiveWorker {
         if replaced.is_some() {
             tracing::warn!("previous archiving state was not completed")
         }
-        self.start_stripe_index().await
+        if self.config.num_node == 1 {
+            self.complete_archive().await;
+            Ok(())
+        } else {
+            self.start_stripe().await
+        }
     }
 
-    async fn start_stripe_index(&mut self) -> anyhow::Result<()> {
+    async fn start_stripe(&mut self) -> anyhow::Result<()> {
         let Some(state) = &mut self.state else {
             unimplemented!()
         };
         assert!(state.stripe_data.is_empty());
         if state.stripe_index == self.config.num_stripe {
-            self.archive_complete().await;
+            self.complete_archive().await;
             return Ok(());
         }
 
@@ -442,10 +485,59 @@ impl ArchiveWorker {
                 .await
         }
 
-        Ok(())
+        if let Some(archive_pushes) = self
+            .reorder_archive_pushes
+            .remove(&(self.epoch, state.stripe_index))
+        {
+            for push in archive_pushes {
+                self.handle_archive_push(push).await?
+            }
+        }
+
+        self.may_archive_stripe().await
     }
 
-    async fn archive_complete(&mut self) {
+    async fn handle_archive_push(&mut self, push: message::ArchivePush) -> anyhow::Result<()> {
+        let Some(state) = &mut self.state else {
+            if push.epoch <= self.epoch {
+                tracing::warn!("ignoring stale archive push for epoch {}", push.epoch);
+            } else {
+                self.reorder_archive_pushes
+                    .entry((push.epoch, push.stripe_index))
+                    .or_default()
+                    .push(push)
+            }
+            return Ok(());
+        };
+        if self.epoch < push.epoch || state.stripe_index < push.stripe_index {
+            self.reorder_archive_pushes
+                .entry((push.epoch, push.stripe_index))
+                .or_default()
+                .push(push);
+            return Ok(());
+        }
+
+        state.stripe_data.insert(push.group_index, push.data);
+        self.may_archive_stripe().await
+    }
+
+    async fn may_archive_stripe(&mut self) -> anyhow::Result<()> {
+        let Some(state) = &mut self.state else {
+            unimplemented!()
+        };
+        if (state.stripe_data.len() as StripeIndex) < self.config.num_active_group() {
+            return Ok(());
+        }
+
+        tracing::info!(?self.node_indices, "archive stripe {}", state.stripe_index);
+        let stripe_data = take(&mut state.stripe_data);
+        // TODO
+
+        state.stripe_index += 1;
+        Box::pin(self.start_stripe()).await
+    }
+
+    async fn complete_archive(&mut self) {
         let Some(state) = self.state.take() else {
             unimplemented!()
         };
