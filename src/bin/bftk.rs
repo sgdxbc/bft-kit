@@ -8,7 +8,7 @@ use bft_kit::{
 };
 use rand::{SeedableRng, rngs::StdRng};
 use rocksdb::{DB, properties::LIVE_SST_FILES_SIZE};
-use tempfile::{TempDir, tempdir};
+use tempfile::TempDir;
 use tokio::{fs, spawn, time::sleep};
 
 #[tokio::main]

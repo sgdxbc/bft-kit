@@ -13,9 +13,10 @@ use tokio::{
     select, spawn,
     sync::{
         mpsc::{Receiver, Sender, channel},
-        oneshot,
+        oneshot, watch,
     },
     task::{JoinHandle, spawn_blocking},
+    try_join,
 };
 use tokio_util::bytes::Bytes;
 
@@ -45,183 +46,6 @@ pub enum StorageRes<T> {
 pub struct Bump {
     pub inserts: HashMap<StorageKey, Bytes>,
     pub deletes: Vec<StorageKey>,
-}
-
-pub struct Storage {
-    db: Arc<DB>,
-    config: ShardedStorageConfig,
-
-    version: StateVersion,
-
-    rx_op: Receiver<StorageOp>,
-    rx_message: Receiver<Message>,
-    tx_archive_push: Sender<message::ArchivePush>,
-    tx_archived: Sender<message::Archived>,
-    tx_epoch_change: Sender<(StateVersion, oneshot::Sender<()>)>,
-    rx_entered: oneshot::Receiver<()>,
-}
-
-impl Storage {
-    pub fn spawn(
-        task_handle: SegmentedTaskHandle,
-        db: impl Into<Arc<DB>> + Send + 'static,
-        config: ShardedStorageConfig,
-        node_indices: HashSet<NodeIndex>,
-        node_table: Vec<ReplicaIndex>,
-        rx_op: Receiver<StorageOp>,
-        tx_message: Sender<(Dest, Message)>,
-        rx_message: Receiver<Message>,
-    ) -> JoinHandle<()> {
-        spawn(task_handle.clone().wrap(Self::start(
-            task_handle,
-            db,
-            config,
-            node_indices,
-            node_table,
-            rx_op,
-            tx_message,
-            rx_message,
-        )))
-    }
-
-    async fn start(
-        task_handle: SegmentedTaskHandle,
-        db: impl Into<Arc<DB>>,
-        config: ShardedStorageConfig,
-        node_indices: HashSet<NodeIndex>,
-        node_table: Vec<ReplicaIndex>,
-        rx_op: Receiver<StorageOp>,
-        tx_message: Sender<(Dest, Message)>,
-        rx_message: Receiver<Message>,
-    ) -> anyhow::Result<()> {
-        let db = db.into();
-        let network_dispatcher = NetworkDispatcher {
-            tx_message,
-            node_table,
-        };
-
-        let (tx_epoch_change, rx_epoch_change) = channel(1);
-        let (tx_entered, rx_entered) = oneshot::channel();
-        let _ = tx_epoch_change.try_send((0, tx_entered));
-        let (tx_archived, rx_archived) = channel(100);
-        let (tx_archive_push, rx_archive_push) = channel(100);
-
-        let mut storage = Self {
-            db: db.clone(),
-            config: config.clone(),
-            version: 0,
-            rx_op,
-            tx_epoch_change,
-            rx_entered,
-            rx_message,
-            tx_archive_push,
-            tx_archived: tx_archived.clone(),
-        };
-        let storage = spawn(task_handle.clone().wrap(async move { storage.run().await }));
-
-        let archive_worker = ArchiveWorker::spawn(
-            task_handle.clone(),
-            db.clone(),
-            network_dispatcher,
-            config.clone(),
-            node_indices,
-            rx_epoch_change,
-            rx_archive_push,
-            tx_archived,
-        );
-        let collect_worker = CollectWorker::spawn(db, task_handle, config, rx_archived);
-
-        storage.await?;
-        archive_worker.await?;
-        collect_worker.await?;
-        Ok(())
-    }
-
-    async fn run(&mut self) -> anyhow::Result<()> {
-        loop {
-            enum Event {
-                Op(StorageOp),
-                Message(Message),
-                EnteredEpoch,
-            }
-            match select! {
-                Some(op) = self.rx_op.recv() => Event::Op(op),
-                Some(msg) = self.rx_message.recv() => Event::Message(msg),
-                Ok(()) = &mut self.rx_entered, if !self.rx_entered.is_terminated() => Event::EnteredEpoch,
-                else => break,
-            } {
-                Event::Op(op) => self.handle_op(op).await?,
-                Event::Message(message) => self.handle_message(message).await?,
-                Event::EnteredEpoch => self.handle_entered_epoch().await?,
-            }
-        }
-        while let Some(op) = self.rx_op.recv().await {
-            self.handle_op(op).await?
-        }
-        Ok(())
-    }
-
-    async fn handle_op(&mut self, op: StorageOp) -> anyhow::Result<()> {
-        match op {
-            StorageOp::Fetch(key, tx_value) => {
-                let value = get_versioned(
-                    self.db.clone(),
-                    &key,
-                    self.version,
-                    self.config.stripe_of(&key),
-                )
-                .await?;
-                let _ = tx_value.send(StorageRes::Ok(value));
-            }
-            StorageOp::Bump(bump, tx_ok) => {
-                self.version += 1;
-                for (key, value) in bump.inserts {
-                    put_versioned(
-                        self.db.clone(),
-                        &key,
-                        self.version,
-                        value,
-                        self.config.stripe_of(&key),
-                    )
-                    .await?
-                }
-                for key in bump.deletes {
-                    delete_versioned(
-                        self.db.clone(),
-                        &key,
-                        self.version,
-                        self.config.stripe_of(&key),
-                    )
-                    .await?
-                }
-                let _ = tx_ok.send(StorageRes::Ok(()));
-            }
-        }
-        Ok(())
-    }
-
-    async fn handle_message(&mut self, message: Message) -> anyhow::Result<()> {
-        match message {
-            Message::ArchivePush(push) => {
-                let _ = self.tx_archive_push.send(push).await;
-            }
-            Message::Archived(archived) => {
-                let _ = self.tx_archived.send(archived).await;
-            }
-        }
-        Ok(())
-    }
-
-    async fn handle_entered_epoch(&mut self) -> anyhow::Result<()> {
-        if self.config.bypass_vote {
-            let (tx_entered, rx_entered) = oneshot::channel();
-            let _ = self.tx_epoch_change.send((self.version, tx_entered)).await;
-            self.rx_entered = rx_entered;
-            return Ok(());
-        }
-
-        todo!()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -317,6 +141,202 @@ impl ShardedStorageConfig {
                     }
                 })
         })
+    }
+}
+
+pub struct Storage {
+    db: Arc<DB>,
+    config: ShardedStorageConfig,
+
+    version: StateVersion,
+    node_archived_versions: Vec<StateVersion>, // indexed by node index
+    quorum_archived_version: StateVersion,
+
+    rx_op: Receiver<StorageOp>,
+    rx_message: Receiver<Message>,
+    rx_loopback_archived: Receiver<message::Archived>,
+    tx_archive_push: Sender<message::ArchivePush>,
+    tx_epoch_change: Sender<(StateVersion, oneshot::Sender<()>)>,
+    rx_entered: oneshot::Receiver<()>,
+    tx_collect: watch::Sender<StateVersion>,
+}
+
+impl Storage {
+    pub fn spawn(
+        task_handle: SegmentedTaskHandle,
+        db: impl Into<Arc<DB>> + Send + 'static,
+        config: ShardedStorageConfig,
+        node_indices: HashSet<NodeIndex>,
+        node_table: Vec<ReplicaIndex>,
+        rx_op: Receiver<StorageOp>,
+        tx_message: Sender<(Dest, Message)>,
+        rx_message: Receiver<Message>,
+    ) -> JoinHandle<()> {
+        spawn(task_handle.clone().wrap(Self::start(
+            task_handle,
+            db,
+            config,
+            node_indices,
+            node_table,
+            rx_op,
+            tx_message,
+            rx_message,
+        )))
+    }
+
+    async fn start(
+        task_handle: SegmentedTaskHandle,
+        db: impl Into<Arc<DB>>,
+        config: ShardedStorageConfig,
+        node_indices: HashSet<NodeIndex>,
+        node_table: Vec<ReplicaIndex>,
+        rx_op: Receiver<StorageOp>,
+        tx_message: Sender<(Dest, Message)>,
+        rx_message: Receiver<Message>,
+    ) -> anyhow::Result<()> {
+        let db = db.into();
+        let network_dispatcher = NetworkDispatcher {
+            tx_message,
+            node_table,
+        };
+
+        let (tx_epoch_change, rx_epoch_change) = channel(1);
+        let (tx_entered, rx_entered) = oneshot::channel();
+        let _ = tx_epoch_change.try_send((0, tx_entered));
+        let (tx_archived, rx_archived) = channel(1);
+        let (tx_archive_push, rx_archive_push) = channel(100);
+        let (tx_collect, rx_collect) = watch::channel(0);
+
+        let mut storage = Self {
+            db: db.clone(),
+            config: config.clone(),
+            version: 0,
+            node_archived_versions: vec![0; config.num_node as usize],
+            quorum_archived_version: 0,
+            rx_op,
+            tx_epoch_change,
+            rx_entered,
+            rx_message,
+            tx_archive_push,
+            rx_loopback_archived: rx_archived,
+            tx_collect,
+        };
+        let storage = spawn(task_handle.clone().wrap(async move { storage.run().await }));
+
+        let archive_worker = ArchiveWorker::spawn(
+            task_handle.clone(),
+            db.clone(),
+            network_dispatcher,
+            config.clone(),
+            node_indices,
+            rx_epoch_change,
+            rx_archive_push,
+            tx_archived,
+        );
+        let collect_worker = CollectWorker::spawn(task_handle, db, config.num_stripe, rx_collect);
+
+        try_join!(storage, archive_worker, collect_worker)?;
+        Ok(())
+    }
+
+    async fn run(&mut self) -> anyhow::Result<()> {
+        loop {
+            enum Event {
+                Op(StorageOp),
+                Message(Message),
+                EnteredEpoch,
+            }
+            match select! {
+                Some(op) = self.rx_op.recv() => Event::Op(op),
+                Some(msg) = self.rx_message.recv() => Event::Message(msg),
+                Some(archived) = self.rx_loopback_archived.recv() => Event::Message(Message::Archived(archived)),
+                Ok(()) = &mut self.rx_entered, if !self.rx_entered.is_terminated() => Event::EnteredEpoch,
+                else => break,
+            } {
+                Event::Op(op) => self.handle_op(op).await?,
+                Event::Message(message) => self.handle_message(message).await?,
+                Event::EnteredEpoch => self.handle_entered_epoch().await?,
+            }
+        }
+        while let Some(op) = self.rx_op.recv().await {
+            self.handle_op(op).await?
+        }
+        Ok(())
+    }
+
+    async fn handle_op(&mut self, op: StorageOp) -> anyhow::Result<()> {
+        match op {
+            StorageOp::Fetch(key, tx_value) => {
+                let value = get_versioned(
+                    self.db.clone(),
+                    &key,
+                    self.version,
+                    self.config.stripe_of(&key),
+                )
+                .await?;
+                let _ = tx_value.send(StorageRes::Ok(value));
+            }
+            StorageOp::Bump(bump, tx_ok) => {
+                self.version += 1;
+                for (key, value) in bump.inserts {
+                    put_versioned(
+                        self.db.clone(),
+                        &key,
+                        self.version,
+                        value,
+                        self.config.stripe_of(&key),
+                    )
+                    .await?
+                }
+                for key in bump.deletes {
+                    delete_versioned(
+                        self.db.clone(),
+                        &key,
+                        self.version,
+                        self.config.stripe_of(&key),
+                    )
+                    .await?
+                }
+                let _ = tx_ok.send(StorageRes::Ok(()));
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_message(&mut self, message: Message) -> anyhow::Result<()> {
+        match message {
+            Message::ArchivePush(push) => {
+                let _ = self.tx_archive_push.send(push).await;
+            }
+            Message::Archived(archived) => self.handle_archived(archived).await?,
+        }
+        Ok(())
+    }
+
+    async fn handle_entered_epoch(&mut self) -> anyhow::Result<()> {
+        if self.config.bypass_vote {
+            let (tx_entered, rx_entered) = oneshot::channel();
+            let _ = self.tx_epoch_change.send((self.version, tx_entered)).await;
+            self.rx_entered = rx_entered;
+            return Ok(());
+        }
+
+        todo!()
+    }
+
+    async fn handle_archived(&mut self, archived: message::Archived) -> anyhow::Result<()> {
+        for node_index in archived.node_indices {
+            self.node_archived_versions[node_index as usize] =
+                self.node_archived_versions[node_index as usize].max(archived.version)
+        }
+        let mut versions = self.node_archived_versions.clone();
+        versions.sort_unstable();
+        let quorum_archived_version = versions[self.config.num_faulty_node as usize];
+        if self.quorum_archived_version < quorum_archived_version {
+            self.quorum_archived_version = quorum_archived_version;
+            let _ = self.tx_collect.send(self.quorum_archived_version);
+        }
+        Ok(())
     }
 }
 
@@ -633,53 +653,31 @@ async fn snapshot_versioned(
 
 struct CollectWorker {
     db: Arc<DB>,
-    config: ShardedStorageConfig,
-    node_archived_versions: Vec<StateVersion>, // [node index -> version]
-    quorum_archived_version: StateVersion,
+    num_stripe: StripeIndex,
 
-    rx_archived: Receiver<message::Archived>,
+    rx_collect: watch::Receiver<StateVersion>,
 }
 
 impl CollectWorker {
     fn spawn(
-        db: Arc<DB>,
         task: SegmentedTaskHandle,
-        config: ShardedStorageConfig,
-        rx_archived: Receiver<message::Archived>,
+        db: Arc<DB>,
+        num_stripe: StripeIndex,
+        rx_collect: watch::Receiver<StateVersion>,
     ) -> JoinHandle<()> {
         let mut worker = Self {
             db,
-            node_archived_versions: vec![0; config.num_node as usize],
-            config,
-            quorum_archived_version: 0,
-            rx_archived,
+            num_stripe,
+            rx_collect,
         };
         spawn(task.wrap(async move { worker.run().await }))
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
-        while let Some(archived) = self.rx_archived.recv().await {
-            for node_index in archived.node_indices {
-                self.node_archived_versions[node_index as usize] =
-                    self.node_archived_versions[node_index as usize].max(archived.version)
-            }
-            let mut versions = self.node_archived_versions.clone();
-            versions.sort_unstable();
-            let quorum_archived_version = versions[self.config.num_faulty_node as usize];
-            if quorum_archived_version > self.quorum_archived_version {
-                self.quorum_archived_version = quorum_archived_version;
-
-                tracing::info!(
-                    "garbage collect up to version {}",
-                    self.quorum_archived_version
-                );
-                collect_versioned(
-                    self.db.clone(),
-                    self.quorum_archived_version,
-                    self.config.num_stripe,
-                )
-                .await?
-            }
+        while let Ok(()) = self.rx_collect.changed().await {
+            let version = *self.rx_collect.borrow_and_update();
+            tracing::info!("garbage collect up to version {version}",);
+            collect_versioned(self.db.clone(), version, self.num_stripe).await?
         }
         Ok(())
     }
@@ -691,8 +689,8 @@ async fn collect_versioned(
     num_stripe: StripeIndex,
 ) -> anyhow::Result<()> {
     spawn_blocking(move || {
-        let mut batch = rocksdb::WriteBatch::default();
         for stripe_index in 0..num_stripe {
+            let mut batch = rocksdb::WriteBatch::default();
             let prefix = format!("{stripe_index:04x}/");
             let mut iter = db.raw_iterator();
             iter.seek(&prefix);
@@ -722,9 +720,9 @@ async fn collect_versioned(
                 }
                 iter.status()?
             }
+            tracing::debug!("deleting {} entries", batch.len());
+            db.write(batch)?;
         }
-        tracing::debug!("deleting {} entries", batch.len());
-        db.write(batch)?;
 
         //
         anyhow::Ok(())

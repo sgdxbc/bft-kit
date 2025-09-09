@@ -46,7 +46,7 @@ ycsb.value-size     1000
             (0..configs.get("big.num-node")?).collect(),
             configs.extract()?,
             [replica_index].into(),
-            StdRng::seed_from_u64(117418 as u64),
+            StdRng::seed_from_u64(117418),
         );
     }
     let handle = task.handle();

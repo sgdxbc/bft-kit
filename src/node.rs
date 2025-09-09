@@ -2,7 +2,7 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use rand::rngs::StdRng;
 use rocksdb::DB;
-use tokio::{spawn, sync::mpsc::channel, task::JoinHandle};
+use tokio::{spawn, sync::mpsc::channel, task::JoinHandle, try_join};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -58,11 +58,7 @@ impl ReplayFullNode {
 
         let storage = FullStorage::spawn(task_handle, db, rx_storage_op);
 
-        workload.await?;
-        replay.await?;
-        app_runner.await?;
-        app.await?;
-        storage.await?;
+        try_join!(workload, replay, app_runner, app, storage)?;
         Ok(())
     }
 }
@@ -147,12 +143,7 @@ impl ReplayNode {
             rx_incoming_messages,
         );
 
-        network.await?;
-        workload.await?;
-        replay.await?;
-        app_runner.await?;
-        app.await?;
-        storage.await?;
+        try_join!(network, workload, replay, app_runner, app, storage)?;
         Ok(())
     }
 }
