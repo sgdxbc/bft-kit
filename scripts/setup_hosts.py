@@ -25,7 +25,7 @@ Host *.compute.amazonaws.com
 
 def task(hosts):
     addr_conf = "\n".join(
-        f"addr {item['ip']}:{service_port}" for item in clusters.service
+        f"addrs {item['ip']}:{service_port}" for item in clusters.service
     )
 
     for host in hosts:

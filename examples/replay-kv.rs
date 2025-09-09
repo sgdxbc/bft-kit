@@ -12,10 +12,10 @@ async fn main() -> anyhow::Result<()> {
     let mut configs = Configs::new();
     configs.parse(
         "
-replica.addrs       127.0.0.1:5000
-replica.addrs       127.0.0.1:5001
-replica.addrs       127.0.0.1:5002
-replica.addrs       127.0.0.1:5003
+addrs   127.0.0.1:5000
+addrs   127.0.0.1:5001
+addrs   127.0.0.1:5002
+addrs   127.0.0.1:5003
 
 big.num-node        4
 big.num-faulty-node 1
@@ -40,7 +40,7 @@ ycsb.value-size     1000
         ReplayNode::spawn(
             task.handle(),
             db.clone(),
-            configs.get_values("replica.addrs")?,
+            configs.get_values("addrs")?,
             replica_index,
             configs.extract()?,
             (0..configs.get("big.num-node")?).collect(),
