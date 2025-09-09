@@ -20,7 +20,7 @@ addrs   127.0.0.1:5003
 big.num-node        4
 big.num-faulty-node 1
 big.num-active-copy 1
-big.num-stripe      10000
+big.num-stripe      1000
 big.bypass-vote     true
 
 ycsb.get-ratio      0.5

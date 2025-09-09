@@ -21,6 +21,8 @@ use tokio_util::bytes::Bytes;
 
 use crate::{network::Dest, replica::ReplicaIndex, task::SegmentedTaskHandle};
 
+pub mod full;
+
 pub type StorageKey = H256;
 pub type NodeIndex = u16;
 type StateVersion = u64;
@@ -145,7 +147,7 @@ impl Storage {
             match select! {
                 Some(op) = self.rx_op.recv() => Event::Op(op),
                 Some(msg) = self.rx_message.recv() => Event::Message(msg),
-                Ok(()) = &mut self.rx_entered => Event::EnteredEpoch,
+                Ok(()) = &mut self.rx_entered, if !self.rx_entered.is_terminated() => Event::EnteredEpoch,
                 else => break,
             } {
                 Event::Op(op) => self.handle_op(op).await?,

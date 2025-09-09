@@ -154,6 +154,11 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
+        if let Some(static_connections) = &self.static_connections
+            && self.connections.len() == static_connections.num_connection
+        {
+            static_connections.connected.cancel()
+        }
         loop {
             enum Event<A, O> {
                 Accept(A),
@@ -178,10 +183,10 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
 
                     self.spawn_read_loop(connection.clone(), remote_id, self.tx_close.clone());
                     self.connections.insert(remote_id, connection);
-                    if let Some(static_connections) = &self.static_connections {
-                        if self.connections.len() == static_connections.num_connection {
-                            static_connections.connected.cancel()
-                        }
+                    if let Some(static_connections) = &self.static_connections
+                        && self.connections.len() == static_connections.num_connection
+                    {
+                        static_connections.connected.cancel()
                     }
                 }
                 Event::Close(id) => {
@@ -227,11 +232,6 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
             .await?;
         self.spawn_read_loop(connection.clone(), remote_id, self.tx_close.clone());
         self.connections.insert(remote_id, connection);
-        if let Some(static_connections) = &self.static_connections {
-            if self.connections.len() == static_connections.num_connection {
-                static_connections.connected.cancel()
-            }
-        }
         Ok(())
     }
 

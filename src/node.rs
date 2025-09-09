@@ -13,9 +13,59 @@ use crate::{
     },
     network::Network,
     replica::{ReplicaIndex, replay::Replay},
-    storage::{NodeIndex, ShardedStorageConfig, Storage},
+    storage::{NodeIndex, ShardedStorageConfig, Storage, full::FullStorage},
     task::SegmentedTaskHandle,
 };
+
+pub struct ReplayFullNode;
+
+impl ReplayFullNode {
+    pub fn spawn(
+        task_handle: SegmentedTaskHandle,
+        db: impl Into<Arc<DB>> + Send + 'static,
+        ycsb_config: YcsbConfig,
+        rng: StdRng,
+    ) -> JoinHandle<()> {
+        spawn(
+            task_handle
+                .clone()
+                .wrap(Self::start(task_handle, db, ycsb_config, rng)),
+        )
+    }
+
+    async fn start(
+        task_handle: SegmentedTaskHandle,
+        db: impl Into<Arc<DB>> + Send + 'static,
+        ycsb_config: YcsbConfig,
+        rng: StdRng,
+    ) -> anyhow::Result<()> {
+        let (tx_workload, rx_workload) = channel(1);
+        let (tx_request, rx_request) = channel(1);
+        let (tx_op, rx_op) = channel(1);
+        let (tx_state_op, rx_state_op) = channel(1);
+        let (tx_storage_op, rx_storage_op) = channel(1);
+
+        let workload = Ycsb::spawn(task_handle.clone(), ycsb_config, rng, tx_workload);
+        let replay = Replay::<Kv>::spawn(task_handle.clone(), rx_workload, tx_request);
+        let app_runner = AppRunner::<Kv>::spawn(
+            task_handle.clone(),
+            rx_request,
+            tx_op,
+            rx_state_op,
+            tx_storage_op,
+        );
+        let app = Kv::spawn(task_handle.clone(), rx_op, tx_state_op);
+
+        let storage = FullStorage::spawn(task_handle, db, rx_storage_op);
+
+        workload.await?;
+        replay.await?;
+        app_runner.await?;
+        app.await?;
+        storage.await?;
+        Ok(())
+    }
+}
 
 pub struct ReplayNode;
 
@@ -72,8 +122,8 @@ impl ReplayNode {
             replica_index,
             connected.clone(),
         );
-
         connected.cancelled().await;
+        tracing::info!("network connected");
 
         let workload = Ycsb::spawn(task_handle.clone(), ycsb_config, rng, tx_workload);
         let replay = Replay::<Kv>::spawn(task_handle.clone(), rx_workload, tx_request);
