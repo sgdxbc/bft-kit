@@ -2,10 +2,14 @@ from common import *
 
 
 def task(hosts):
+    processes = []
     for host in hosts:
-        local(f"rsync -a configs/*.conf {host}:{deploy_dir}/bftk-configs/")
+        processes.append(local(f"rsync -a configs/*.conf {host}:{deploy_dir}/bftk-configs/", detach=True))
         if nfs:
             break
+    for proc in processes:
+        if proc.wait() != 0:
+            raise RuntimeError("rsync failed")
 
 
 if __name__ == "__main__":

@@ -27,8 +27,8 @@ pub struct Ycsb {
 
 pub struct YcsbConfig {
     get_ratio: f64,
-    num_key: u32,
-    value_size: usize,
+    pub num_key: u32,
+    pub value_size: usize,
 }
 
 impl Ycsb {

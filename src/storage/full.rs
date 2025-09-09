@@ -1,13 +1,17 @@
 use std::sync::Arc;
 
-use rocksdb::DB;
+use rand::{Rng, rngs::StdRng};
+use rand_distr::Alphanumeric;
+use rocksdb::{DB, WriteBatch};
 use tokio::{
     spawn,
     sync::mpsc::Receiver,
     task::{JoinHandle, spawn_blocking},
 };
 
-use crate::task::SegmentedTaskHandle;
+use crate::{
+    crypto::DigestHash, kv::ycsb::YcsbConfig, storage::StorageKey, task::SegmentedTaskHandle,
+};
 
 use super::{StorageOp, StorageRes};
 
@@ -53,4 +57,28 @@ impl FullStorage {
         }
         Ok(())
     }
+}
+
+pub fn preload_ycsb(db: &DB, config: YcsbConfig, mut rng: StdRng) -> anyhow::Result<()> {
+    let mut batch = WriteBatch::new();
+    for i in 0..config.num_key {
+        if i % 10_000 == 0 {
+            db.write(batch)?;
+            batch = WriteBatch::new();
+            tracing::info!("Preloaded {i} keys")
+        }
+
+        let key = format!("key{:08}", i);
+        let value = (&mut rng)
+            .sample_iter(Alphanumeric)
+            .take(config.value_size)
+            .map(char::from)
+            .collect::<String>();
+
+        let storage_key = StorageKey::from(key.digest().0);
+        let value = bincode::encode_to_vec(&value, bincode::config::standard())?;
+        batch.put(storage_key, value);
+    }
+    db.write(batch)?;
+    Ok(())
 }

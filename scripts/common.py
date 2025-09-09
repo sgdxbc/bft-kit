@@ -9,9 +9,11 @@ terraform = False
 login_key = None
 
 
-def local(cmd):
+def local(cmd, detach=False):
     print(f"[local] {cmd}")
     process = Popen(cmd, shell=True)
+    if detach:
+        return process
     if process.wait() != 0:
         raise RuntimeError()
 

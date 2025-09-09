@@ -1,15 +1,16 @@
-use std::{env::args, sync::Arc, time::Duration};
+use std::{env::args, path::Path, sync::Arc, time::Duration};
 
 use bft_kit::{
     init_logging_file,
     node::{ReplayFullNode, ReplayNode},
     parse::Configs,
+    storage::full,
     task::SegmentedTask,
 };
 use rand::{SeedableRng, rngs::StdRng};
 use rocksdb::{DB, properties::LIVE_SST_FILES_SIZE};
 use tempfile::TempDir;
-use tokio::{fs, spawn, time::sleep};
+use tokio::{fs, process::Command, spawn, time::sleep};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,11 +29,14 @@ async fn main() -> anyhow::Result<()> {
 
     match (role.as_deref(), index) {
         (Some("replica"), Some(index)) => start_replica(index?, configs).await?,
+        (Some("preload"), Some(index)) => preload(index?, configs).await?,
         (role, index) => anyhow::bail!("unknown role: {role:?} index: {index:?}"),
     }
 
     Ok(())
 }
+
+const PRELOAD_DIR: &str = "bftk-preload-db";
 
 async fn start_replica(index: u16, configs: Configs) -> anyhow::Result<()> {
     if index >= configs.get("big.num-node")? {
@@ -41,6 +45,16 @@ async fn start_replica(index: u16, configs: Configs) -> anyhow::Result<()> {
 
     let task = SegmentedTask::new();
     let temp_dir = TempDir::with_prefix("big-storage")?;
+    if Path::new(PRELOAD_DIR).exists() {
+        tracing::info!("Using preloaded DB");
+        let status = Command::new("cp")
+            .arg("-rT")
+            .arg(PRELOAD_DIR)
+            .arg(temp_dir.path())
+            .status()
+            .await?;
+        anyhow::ensure!(status.success())
+    }
     let db = Arc::new(DB::open_default(temp_dir.path())?);
 
     if configs.get("big.full-storage")? {
@@ -80,4 +94,16 @@ async fn start_replica(index: u16, configs: Configs) -> anyhow::Result<()> {
     task.stopped().await;
     temp_dir.close()?;
     Ok(())
+}
+
+async fn preload(index: u16, configs: Configs) -> anyhow::Result<()> {
+    let _ = fs::remove_dir_all(PRELOAD_DIR).await;
+    fs::create_dir(PRELOAD_DIR).await?;
+    let db = DB::open_default(PRELOAD_DIR)?;
+    let rng = StdRng::seed_from_u64(117418);
+    if configs.get("big.full-storage")? {
+        full::preload_ycsb(&db, configs.extract()?, rng)
+    } else {
+        todo!()
+    }
 }

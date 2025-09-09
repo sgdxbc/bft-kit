@@ -100,7 +100,7 @@ where
                 AppStorageOp(O),
             }
             match select! {
-                Ok(res) = &mut rx_res => Event::AppRes(res),
+                Ok(res) = &mut rx_res, if !rx_res.is_terminated() => Event::AppRes(res),
                 Some(op) = self.rx_state_op.recv() => Event::AppStorageOp(op),
                 else => return Ok(()),
             } {
