@@ -13,11 +13,11 @@ use tokio_util::{bytes::Bytes, sync::CancellationToken};
 use crate::{
     crypto::cert::quinn::{client_config, server_config},
     replica::ReplicaIndex,
-    task::SegmentedTask,
+    task::SegmentedTaskHandle,
 };
 
 pub struct Network<IM, OM> {
-    task: SegmentedTask,
+    task_handle: SegmentedTaskHandle,
     endpoint: Endpoint,
     connections: HashMap<u32, Connection>,
 
@@ -41,14 +41,14 @@ pub enum Dest {
 
 impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, OM> {
     pub fn spawn_client(
-        task: SegmentedTask,
+        task_handle: SegmentedTaskHandle,
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
         connected: CancellationToken,
     ) -> JoinHandle<()> {
-        spawn(task.clone().wrap_fallible(Self::start_client(
-            task,
+        spawn(task_handle.clone().wrap(Self::start_client(
+            task_handle,
             tx_incoming_messages,
             rx_outgoing_messages,
             replica_addrs,
@@ -57,15 +57,15 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     }
 
     pub fn spawn_replica(
-        task: SegmentedTask,
+        task_handle: SegmentedTaskHandle,
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
         replica_index: ReplicaIndex,
         connected: CancellationToken,
     ) -> JoinHandle<()> {
-        spawn(task.clone().wrap_fallible(Self::start_replica(
-            task,
+        spawn(task_handle.clone().wrap(Self::start_replica(
+            task_handle,
             tx_incoming_messages,
             rx_outgoing_messages,
             replica_addrs,
@@ -75,7 +75,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     }
 
     fn new(
-        group: SegmentedTask,
+        task_handle: SegmentedTaskHandle,
         endpoint: Endpoint,
         static_connections: Option<StaticConnections>,
         tx_incoming_messages: Sender<IM>,
@@ -83,7 +83,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     ) -> Self {
         let (tx_close, rx_close) = channel(1);
         Self {
-            task: group,
+            task_handle,
             endpoint,
             static_connections,
             connections: HashMap::new(),
@@ -95,7 +95,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     }
 
     async fn start_client(
-        task: SegmentedTask,
+        task_handle: SegmentedTaskHandle,
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
@@ -108,7 +108,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
             connected,
         };
         let mut network = Self::new(
-            task,
+            task_handle,
             endpoint,
             Some(static_connections),
             tx_incoming_messages,
@@ -122,7 +122,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     }
 
     async fn start_replica(
-        task: SegmentedTask,
+        task_handle: SegmentedTaskHandle,
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
@@ -137,7 +137,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
             connected,
         };
         let mut network = Self::new(
-            task,
+            task_handle,
             endpoint,
             Some(static_connections),
             tx_incoming_messages,
@@ -241,10 +241,10 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
         remote_id: u32,
         tx_close: Sender<u32>,
     ) -> JoinHandle<()> {
-        let read_loop = self.task.clone().wrap_fallible(Self::read_loop(
+        let read_loop = self.task_handle.clone().wrap(Self::read_loop(
             connection,
             self.tx_incoming_messages.clone(),
-            self.task.clone(),
+            self.task_handle.clone(),
         ));
         spawn(async move {
             read_loop.await;
@@ -255,7 +255,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     async fn read_loop(
         connection: Connection,
         tx_incoming_messages: Sender<IM>,
-        group: SegmentedTask,
+        group: SegmentedTaskHandle,
     ) -> anyhow::Result<()> {
         loop {
             let mut stream = match connection.accept_uni().await {
@@ -267,7 +267,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
             };
 
             let tx_incoming_messages = tx_incoming_messages.clone();
-            spawn(group.clone().wrap_fallible(async move {
+            spawn(group.clone().wrap(async move {
                 let bytes = stream.read_to_end(64 << 20).await?;
                 let (message, len) =
                     bincode::decode_from_slice(&bytes, bincode::config::standard())?;
@@ -286,9 +286,9 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
 
     fn spawn_write_bytes(&self, connection: Connection, bytes: Bytes) -> JoinHandle<()> {
         spawn(
-            self.task
+            self.task_handle
                 .clone()
-                .wrap_fallible(Self::write_bytes(connection, bytes)),
+                .wrap(Self::write_bytes(connection, bytes)),
         )
     }
 }

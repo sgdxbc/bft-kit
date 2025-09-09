@@ -11,7 +11,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::task::SegmentedTask;
+use crate::task::SegmentedTaskHandle;
 
 use super::{KvOp, KvRes};
 
@@ -21,6 +21,7 @@ pub struct Ycsb {
     rng: StdRng,
     latency_records: Arc<Mutex<Vec<(Instant, Duration)>>>,
 
+    task_handle: SegmentedTaskHandle,
     tx_op: Sender<(KvOp, oneshot::Sender<KvRes>)>,
 }
 
@@ -32,7 +33,7 @@ pub struct YcsbConfig {
 
 impl Ycsb {
     pub fn spawn(
-        group: SegmentedTask,
+        task_handle: SegmentedTaskHandle,
         config: YcsbConfig,
         rng: StdRng,
         tx_op: Sender<(KvOp, oneshot::Sender<KvRes>)>,
@@ -41,10 +42,11 @@ impl Ycsb {
             config,
             rng,
             latency_records: Default::default(),
+            task_handle: task_handle.clone(),
             tx_op,
         };
         spawn(async move {
-            group.wrap_fallible(ycsb.run()).await;
+            task_handle.wrap(ycsb.run()).await;
             let latency_records = ycsb.latency_records.lock().unwrap();
             let total_duration = match (latency_records.first(), latency_records.last()) {
                 (Some(first), Some(last)) => (last.0 + last.1).duration_since(first.0),
@@ -81,12 +83,15 @@ impl Ycsb {
             let _ = self.tx_op.send((op, tx_res)).await;
             let start = Instant::now();
             let latency_records = self.latency_records.clone();
-            spawn(async move {
-                let Ok(_res) = rx_res.await else { return };
+            spawn(self.task_handle.clone().wrap(async move {
+                let Ok(_res) = rx_res.await else {
+                    return Ok(());
+                };
                 // TODO check result
                 let latency_record = (start, start.elapsed());
-                latency_records.lock().unwrap().push(latency_record)
-            });
+                latency_records.lock().unwrap().push(latency_record);
+                Ok(())
+            }));
         }
     }
 }

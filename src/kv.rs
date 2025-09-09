@@ -1,6 +1,6 @@
 use crate::{
     app::{AppProtocolTypeConfig, AppTypeConfig, StateOp},
-    task::SegmentedTask,
+    task::SegmentedTaskHandle,
 };
 use bincode::{Decode, Encode};
 use tokio::{
@@ -31,12 +31,12 @@ impl AppTypeConfig for Kv {
 
 impl Kv {
     pub fn spawn(
-        group: SegmentedTask,
+        task_handle: SegmentedTaskHandle,
         rx_op: Receiver<(KvOp, oneshot::Sender<KvRes>)>,
         tx_state_op: Sender<StateOp<String, String>>,
     ) -> JoinHandle<()> {
         let mut kv = Self { rx_op, tx_state_op };
-        spawn(group.wrap_fallible(async move { kv.run().await }))
+        spawn(async move { task_handle.wrap(kv.run()).await })
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {

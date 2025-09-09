@@ -15,7 +15,7 @@ use crate::{
     crypto::{DigestHash, UpdateHash},
     replica::{Reply, Request},
     storage::{Bump, StorageKey, StorageOp, StorageRes},
-    task::SegmentedTask,
+    task::SegmentedTaskHandle,
 };
 
 pub enum StateOp<K, V> {
@@ -53,7 +53,7 @@ where
     C::Value: Send + 'static + Encode + Decode<()>,
 {
     pub fn spawn(
-        group: SegmentedTask,
+        task_handle: SegmentedTaskHandle,
         rx_execute_request: Receiver<(Request, oneshot::Sender<Reply>)>,
         tx_execute_op: Sender<(C::Op, oneshot::Sender<C::Res>)>,
         rx_state_op: Receiver<StateOp<C::Key, C::Value>>,
@@ -69,7 +69,7 @@ where
             rx_state_op,
             tx_storage_op,
         };
-        spawn(async move { group.wrap_fallible(app.run()).await })
+        spawn(async move { task_handle.wrap(app.run()).await })
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {

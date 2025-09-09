@@ -5,7 +5,6 @@ use rand::{SeedableRng, rngs::StdRng};
 use rocksdb::{DB, properties::LIVE_SST_FILES_SIZE};
 use tempfile::tempdir;
 use tokio::{fs::create_dir, spawn, time::sleep};
-use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,17 +30,15 @@ ycsb.value-size     1000
     );
     let temp_dir = tempdir()?;
 
-    let cancel = CancellationToken::new();
-    let task = SegmentedTask(cancel.clone());
-    let mut handles = vec![];
+    let task = SegmentedTask::new();
     let mut dbs = vec![];
     for replica_index in 0..configs.get("big.num-node")? {
         let path = temp_dir.path().join(format!("replica-{replica_index}"));
         create_dir(&path).await?;
         let db = Arc::new(DB::open_default(path)?);
         dbs.push(db.clone());
-        handles.push(ReplayNode::spawn(
-            task.clone(),
+        ReplayNode::spawn(
+            task.handle(),
             db.clone(),
             configs.get_values("replica.addrs")?,
             replica_index,
@@ -50,27 +47,23 @@ ycsb.value-size     1000
             configs.extract()?,
             [replica_index].into(),
             StdRng::seed_from_u64(117418 as u64),
-        ))
+        );
     }
-    spawn({
-        let cancel = cancel.clone();
-        async move {
-            for _ in 0..10 {
-                sleep(Duration::from_secs(1)).await;
-                let sizes = dbs
-                    .iter()
-                    .map(|db| db.property_int_value(LIVE_SST_FILES_SIZE))
-                    .collect::<Vec<_>>();
-                tracing::info!("LIVE_SST_FILES_SIZE {sizes:?}")
-            }
-            cancel.cancel()
+    let handle = task.handle();
+    spawn(handle.clone().wrap(async move {
+        for _ in 0..10 {
+            sleep(Duration::from_secs(1)).await;
+            let sizes = dbs
+                .iter()
+                .map(|db| db.property_int_value(LIVE_SST_FILES_SIZE))
+                .collect::<Vec<_>>();
+            tracing::info!("LIVE_SST_FILES_SIZE {sizes:?}")
         }
-    });
+        handle.cancel();
+        Ok(())
+    }));
 
-    cancel.cancelled().await;
-    for handle in handles {
-        handle.await?
-    }
+    task.stopped().await;
     temp_dir.close()?;
     Ok(())
 }
