@@ -50,13 +50,13 @@ big.bypass-vote     true
     spawn({
         let cancel = cancel.clone();
         async move {
-            for _ in 0..120 {
+            for _ in 0..10 {
                 sleep(Duration::from_secs(1)).await;
                 let sizes = dbs
                     .iter()
                     .map(|db| db.property_int_value(LIVE_SST_FILES_SIZE))
                     .collect::<Vec<_>>();
-                tracing::info!("LIVE_SST_FILES_SIZE = {:?}", sizes);
+                tracing::info!("LIVE_SST_FILES_SIZE {sizes:?}")
             }
             cancel.cancel()
         }

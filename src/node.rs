@@ -41,7 +41,7 @@ impl ReplayNode {
 
     async fn start(
         group: TaskGroup,
-        db: impl Into<Arc<DB>>,
+        db: impl Into<Arc<DB>> + Send + 'static,
         replica_addrs: Vec<SocketAddr>,
         replica_index: ReplicaIndex,
         node_table: Vec<ReplicaIndex>,
@@ -57,7 +57,6 @@ impl ReplayNode {
         let (tx_incoming_messages, rx_incoming_messages) = channel(1);
         let (tx_outgoing_messages, rx_outgoing_messages) = channel(1);
 
-        let mut handles = Vec::new();
         let connected = CancellationToken::new();
         let network = Network::spawn_replica(
             group.clone(),
@@ -67,7 +66,6 @@ impl ReplayNode {
             replica_index,
             connected.clone(),
         );
-        handles.push(network);
 
         connected.cancelled().await;
 
@@ -76,9 +74,8 @@ impl ReplayNode {
         let app_runner =
             AppRunner::<Kv>::spawn(group.clone(), rx_request, tx_op, rx_state_op, tx_storage_op);
         let app = Kv::spawn(group.clone(), rx_op, tx_state_op);
-        handles.extend([workload, replay, app_runner, app]);
 
-        let storage_handles = Storage::spawn(
+        let storage = Storage::spawn(
             group,
             db,
             storage_config,
@@ -88,11 +85,13 @@ impl ReplayNode {
             tx_outgoing_messages,
             rx_incoming_messages,
         );
-        handles.extend(storage_handles);
 
-        for handle in handles {
-            handle.await?
-        }
+        network.await?;
+        workload.await?;
+        replay.await?;
+        app_runner.await?;
+        app.await?;
+        storage.await?;
         Ok(())
     }
 }

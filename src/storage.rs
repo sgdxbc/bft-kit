@@ -62,6 +62,28 @@ pub struct Storage {
 impl Storage {
     pub fn spawn(
         group: TaskGroup,
+        db: impl Into<Arc<DB>> + Send + 'static,
+        config: ShardedStorageConfig,
+        node_indices: HashSet<NodeIndex>,
+        node_table: Vec<ReplicaIndex>,
+        rx_op: Receiver<StorageOp>,
+        tx_message: Sender<(Dest, Message)>,
+        rx_message: Receiver<Message>,
+    ) -> JoinHandle<()> {
+        spawn(group.clone().wrap_fallible(Self::start(
+            group,
+            db,
+            config,
+            node_indices,
+            node_table,
+            rx_op,
+            tx_message,
+            rx_message,
+        )))
+    }
+
+    async fn start(
+        group: TaskGroup,
         db: impl Into<Arc<DB>>,
         config: ShardedStorageConfig,
         node_indices: HashSet<NodeIndex>,
@@ -69,7 +91,7 @@ impl Storage {
         rx_op: Receiver<StorageOp>,
         tx_message: Sender<(Dest, Message)>,
         rx_message: Receiver<Message>,
-    ) -> Vec<JoinHandle<()>> {
+    ) -> anyhow::Result<()> {
         let db = db.into();
         let network_dispatcher = NetworkDispatcher {
             tx_message,
@@ -110,7 +132,11 @@ impl Storage {
             tx_archived,
         );
         let collect_worker = CollectWorker::spawn(db, group, config, rx_archived);
-        vec![storage, archive_worker, collect_worker]
+
+        storage.await?;
+        archive_worker.await?;
+        collect_worker.await?;
+        Ok(())
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
