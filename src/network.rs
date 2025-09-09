@@ -13,11 +13,11 @@ use tokio_util::{bytes::Bytes, sync::CancellationToken};
 use crate::{
     crypto::cert::quinn::{client_config, server_config},
     replica::ReplicaIndex,
-    task::TaskGroup,
+    task::SegmentedTask,
 };
 
 pub struct Network<IM, OM> {
-    group: TaskGroup,
+    task: SegmentedTask,
     endpoint: Endpoint,
     connections: HashMap<u32, Connection>,
 
@@ -41,14 +41,14 @@ pub enum Dest {
 
 impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, OM> {
     pub fn spawn_client(
-        group: TaskGroup,
+        task: SegmentedTask,
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
         connected: CancellationToken,
     ) -> JoinHandle<()> {
-        spawn(group.clone().wrap_fallible(Self::client(
-            group,
+        spawn(task.clone().wrap_fallible(Self::start_client(
+            task,
             tx_incoming_messages,
             rx_outgoing_messages,
             replica_addrs,
@@ -57,15 +57,15 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     }
 
     pub fn spawn_replica(
-        group: TaskGroup,
+        task: SegmentedTask,
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
         replica_index: ReplicaIndex,
         connected: CancellationToken,
     ) -> JoinHandle<()> {
-        spawn(group.clone().wrap_fallible(Self::replica(
-            group,
+        spawn(task.clone().wrap_fallible(Self::start_replica(
+            task,
             tx_incoming_messages,
             rx_outgoing_messages,
             replica_addrs,
@@ -75,7 +75,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     }
 
     fn new(
-        group: TaskGroup,
+        group: SegmentedTask,
         endpoint: Endpoint,
         static_connections: Option<StaticConnections>,
         tx_incoming_messages: Sender<IM>,
@@ -83,7 +83,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     ) -> Self {
         let (tx_close, rx_close) = channel(1);
         Self {
-            group,
+            task: group,
             endpoint,
             static_connections,
             connections: HashMap::new(),
@@ -94,8 +94,8 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
         }
     }
 
-    async fn client(
-        group: TaskGroup,
+    async fn start_client(
+        task: SegmentedTask,
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
@@ -108,27 +108,21 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
             connected,
         };
         let mut network = Self::new(
-            group,
+            task,
             endpoint,
             Some(static_connections),
             tx_incoming_messages,
             rx_outgoing_messages,
         );
         let id = rng().random_range(1 << 10..u32::MAX);
-        network
-            .start(
-                replica_addrs
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, addr)| (addr, i as _)),
-                id,
-            )
-            .await?;
+        for (i, addr) in replica_addrs.into_iter().enumerate() {
+            network.connect(addr, i as _, id).await?
+        }
         network.run().await
     }
 
-    async fn replica(
-        group: TaskGroup,
+    async fn start_replica(
+        task: SegmentedTask,
         tx_incoming_messages: Sender<IM>,
         rx_outgoing_messages: Receiver<(Dest, OM)>,
         replica_addrs: Vec<SocketAddr>,
@@ -143,35 +137,20 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
             connected,
         };
         let mut network = Self::new(
-            group,
+            task,
             endpoint,
             Some(static_connections),
             tx_incoming_messages,
             rx_outgoing_messages,
         );
-        network
-            .start(
-                replica_addrs
-                    .into_iter()
-                    .enumerate()
-                    .filter(move |&(i, _)| i != replica_index as usize)
-                    .map(|(i, addr)| (addr, i as _))
-                    .take(replica_index as _),
-                replica_index as _,
-            )
-            .await?;
-        network.run().await
-    }
-
-    async fn start(
-        &mut self,
-        replicas: impl Iterator<Item = (SocketAddr, u32)> + Send + 'static,
-        id: u32,
-    ) -> anyhow::Result<()> {
-        for (addr, remote_id) in replicas {
-            self.connect(addr, remote_id, id).await?;
+        for (i, addr) in replica_addrs
+            .into_iter()
+            .enumerate()
+            .take(replica_index as _)
+        {
+            network.connect(addr, i as _, replica_index as _).await?
         }
-        Ok(())
+        network.run().await
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
@@ -262,10 +241,10 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
         remote_id: u32,
         tx_close: Sender<u32>,
     ) -> JoinHandle<()> {
-        let read_loop = self.group.clone().wrap_fallible(Self::read_loop(
+        let read_loop = self.task.clone().wrap_fallible(Self::read_loop(
             connection,
             self.tx_incoming_messages.clone(),
-            self.group.clone(),
+            self.task.clone(),
         ));
         spawn(async move {
             read_loop.await;
@@ -276,7 +255,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
     async fn read_loop(
         connection: Connection,
         tx_incoming_messages: Sender<IM>,
-        group: TaskGroup,
+        group: SegmentedTask,
     ) -> anyhow::Result<()> {
         loop {
             let mut stream = match connection.accept_uni().await {
@@ -307,7 +286,7 @@ impl<IM: Decode<()> + Send + 'static, OM: Encode + Send + 'static> Network<IM, O
 
     fn spawn_write_bytes(&self, connection: Connection, bytes: Bytes) -> JoinHandle<()> {
         spawn(
-            self.group
+            self.task
                 .clone()
                 .wrap_fallible(Self::write_bytes(connection, bytes)),
         )

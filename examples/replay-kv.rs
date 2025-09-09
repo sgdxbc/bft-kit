@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use bft_kit::{init_logging, node::ReplayNode, parse::Configs, task::TaskGroup};
+use bft_kit::{init_logging, node::ReplayNode, parse::Configs, task::SegmentedTask};
 use rand::{SeedableRng, rngs::StdRng};
 use rocksdb::{DB, properties::LIVE_SST_FILES_SIZE};
 use tempfile::tempdir;
@@ -28,7 +28,7 @@ big.bypass-vote     true
     let temp_dir = tempdir()?;
 
     let cancel = CancellationToken::new();
-    let group = TaskGroup(cancel.clone());
+    let task = SegmentedTask(cancel.clone());
     let mut handles = vec![];
     let mut dbs = vec![];
     for replica_index in 0..configs.get("big.num-node")? {
@@ -37,7 +37,7 @@ big.bypass-vote     true
         let db = Arc::new(DB::open_default(path)?);
         dbs.push(db.clone());
         handles.push(ReplayNode::spawn(
-            group.clone(),
+            task.clone(),
             db.clone(),
             configs.get_values("replica.addrs")?,
             replica_index,

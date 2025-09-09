@@ -1,6 +1,6 @@
 use crate::{
     app::{AppProtocolTypeConfig, AppTypeConfig, StateOp},
-    task::TaskGroup,
+    task::SegmentedTask,
 };
 use bincode::{Decode, Encode};
 use tokio::{
@@ -31,7 +31,7 @@ impl AppTypeConfig for Kv {
 
 impl Kv {
     pub fn spawn(
-        group: TaskGroup,
+        group: SegmentedTask,
         rx_op: Receiver<(KvOp, oneshot::Sender<KvRes>)>,
         tx_state_op: Sender<StateOp<String, String>>,
     ) -> JoinHandle<()> {

@@ -11,7 +11,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::task::TaskGroup;
+use crate::task::SegmentedTask;
 
 use super::{KvOp, KvRes};
 
@@ -24,7 +24,7 @@ pub struct Ycsb {
 
 impl Ycsb {
     pub fn spawn(
-        group: TaskGroup,
+        group: SegmentedTask,
         rng: StdRng,
         tx_op: Sender<(KvOp, oneshot::Sender<KvRes>)>,
     ) -> JoinHandle<()> {
@@ -47,7 +47,7 @@ impl Ycsb {
                 .sum::<Duration>()
                 / latency_records.len() as u32;
             tracing::info!(
-                "YCSB done: {} ops in {total_duration:?} ({tput:.2} ops/sec), mean latency {mean_latency:?}",
+                "YCSB done: {} ops in {total_duration:.1?} ({tput:.2} ops/sec), mean latency {mean_latency:?}",
                 latency_records.len(),
             );
         })
@@ -61,7 +61,7 @@ impl Ycsb {
             } else {
                 let v = (&mut self.rng)
                     .sample_iter(Alphanumeric)
-                    .take(4 << 10)
+                    .take(1 << 10)
                     .map(char::from)
                     .collect();
                 KvOp::Put(k, v)

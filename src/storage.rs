@@ -19,7 +19,7 @@ use tokio::{
 };
 use tokio_util::bytes::Bytes;
 
-use crate::{network::Dest, replica::ReplicaIndex, task::TaskGroup};
+use crate::{network::Dest, replica::ReplicaIndex, task::SegmentedTask};
 
 pub type StorageKey = H256;
 pub type NodeIndex = u16;
@@ -61,7 +61,7 @@ pub struct Storage {
 
 impl Storage {
     pub fn spawn(
-        group: TaskGroup,
+        task: SegmentedTask,
         db: impl Into<Arc<DB>> + Send + 'static,
         config: ShardedStorageConfig,
         node_indices: HashSet<NodeIndex>,
@@ -70,8 +70,8 @@ impl Storage {
         tx_message: Sender<(Dest, Message)>,
         rx_message: Receiver<Message>,
     ) -> JoinHandle<()> {
-        spawn(group.clone().wrap_fallible(Self::start(
-            group,
+        spawn(task.clone().wrap_fallible(Self::start(
+            task,
             db,
             config,
             node_indices,
@@ -83,7 +83,7 @@ impl Storage {
     }
 
     async fn start(
-        group: TaskGroup,
+        task: SegmentedTask,
         db: impl Into<Arc<DB>>,
         config: ShardedStorageConfig,
         node_indices: HashSet<NodeIndex>,
@@ -116,13 +116,12 @@ impl Storage {
             tx_archived: tx_archived.clone(),
         };
         let storage = spawn(
-            group
-                .clone()
+            task.clone()
                 .wrap_fallible(async move { storage.run().await }),
         );
 
         let archive_worker = ArchiveWorker::spawn(
-            group.clone(),
+            task.clone(),
             db.clone(),
             network_dispatcher,
             config.clone(),
@@ -131,7 +130,7 @@ impl Storage {
             rx_archive_push,
             tx_archived,
         );
-        let collect_worker = CollectWorker::spawn(db, group, config, rx_archived);
+        let collect_worker = CollectWorker::spawn(db, task, config, rx_archived);
 
         storage.await?;
         archive_worker.await?;
@@ -400,7 +399,7 @@ struct ArchivingState {
 
 impl ArchiveWorker {
     fn spawn(
-        group: TaskGroup,
+        task: SegmentedTask,
         db: Arc<DB>,
         network_dispatcher: NetworkDispatcher,
         config: ShardedStorageConfig,
@@ -422,7 +421,7 @@ impl ArchiveWorker {
             rx_archive_push,
             tx_archived,
         };
-        spawn(group.wrap_fallible(async move { worker.run().await }))
+        spawn(task.wrap_fallible(async move { worker.run().await }))
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
@@ -645,7 +644,7 @@ struct CollectWorker {
 impl CollectWorker {
     fn spawn(
         db: Arc<DB>,
-        group: TaskGroup,
+        task: SegmentedTask,
         config: ShardedStorageConfig,
         rx_archived: Receiver<message::Archived>,
     ) -> JoinHandle<()> {
@@ -656,7 +655,7 @@ impl CollectWorker {
             quorum_archived_version: 0,
             rx_archived,
         };
-        spawn(group.wrap_fallible(async move { worker.run().await }))
+        spawn(task.wrap_fallible(async move { worker.run().await }))
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {

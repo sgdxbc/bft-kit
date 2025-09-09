@@ -8,7 +8,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{app::AppProtocolTypeConfig, task::TaskGroup};
+use crate::{app::AppProtocolTypeConfig, task::SegmentedTask};
 
 use super::{Reply, Request};
 
@@ -25,7 +25,7 @@ where
     C::Res: Decode<()> + Send + 'static,
 {
     pub fn spawn(
-        group: TaskGroup,
+        group: SegmentedTask,
         rx_workload: Receiver<(C::Op, oneshot::Sender<C::Res>)>,
         tx_request: Sender<(Request, oneshot::Sender<Reply>)>,
     ) -> JoinHandle<()> {
