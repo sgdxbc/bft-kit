@@ -7,7 +7,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::AppRunner,
-    kv::{Kv, ycsb::Ycsb},
+    kv::{
+        Kv,
+        ycsb::{Ycsb, YcsbConfig},
+    },
     network::Network,
     replica::{ReplicaIndex, replay::Replay},
     storage::{NodeIndex, ShardedStorageConfig, Storage},
@@ -22,6 +25,7 @@ impl ReplayNode {
         db: impl Into<Arc<DB>> + Send + 'static,
         replica_addrs: Vec<SocketAddr>,
         replica_index: ReplicaIndex,
+        ycsb_config: YcsbConfig,
         node_table: Vec<ReplicaIndex>,
         storage_config: ShardedStorageConfig,
         storage_node_indices: HashSet<NodeIndex>,
@@ -32,6 +36,7 @@ impl ReplayNode {
             db,
             replica_addrs,
             replica_index,
+            ycsb_config,
             node_table,
             storage_config,
             storage_node_indices,
@@ -44,6 +49,7 @@ impl ReplayNode {
         db: impl Into<Arc<DB>> + Send + 'static,
         replica_addrs: Vec<SocketAddr>,
         replica_index: ReplicaIndex,
+        ycsb_config: YcsbConfig,
         node_table: Vec<ReplicaIndex>,
         storage_config: ShardedStorageConfig,
         storage_node_indices: HashSet<NodeIndex>,
@@ -69,7 +75,7 @@ impl ReplayNode {
 
         connected.cancelled().await;
 
-        let workload = Ycsb::spawn(task.clone(), rng, tx_workload);
+        let workload = Ycsb::spawn(task.clone(), ycsb_config, rng, tx_workload);
         let replay = Replay::<Kv>::spawn(task.clone(), rx_workload, tx_request);
         let app_runner =
             AppRunner::<Kv>::spawn(task.clone(), rx_request, tx_op, rx_state_op, tx_storage_op);

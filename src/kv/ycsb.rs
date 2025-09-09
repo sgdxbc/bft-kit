@@ -16,19 +16,29 @@ use crate::task::SegmentedTask;
 use super::{KvOp, KvRes};
 
 pub struct Ycsb {
+    config: YcsbConfig,
+
     rng: StdRng,
     latency_records: Arc<Mutex<Vec<(Instant, Duration)>>>,
 
     tx_op: Sender<(KvOp, oneshot::Sender<KvRes>)>,
 }
 
+pub struct YcsbConfig {
+    get_ratio: f64,
+    num_key: u32,
+    value_size: usize,
+}
+
 impl Ycsb {
     pub fn spawn(
         group: SegmentedTask,
+        config: YcsbConfig,
         rng: StdRng,
         tx_op: Sender<(KvOp, oneshot::Sender<KvRes>)>,
     ) -> JoinHandle<()> {
         let mut ycsb = Self {
+            config,
             rng,
             latency_records: Default::default(),
             tx_op,
@@ -55,13 +65,13 @@ impl Ycsb {
 
     async fn run(&mut self) -> anyhow::Result<()> {
         loop {
-            let k = format!("key{:08}", self.rng.random_range(..100_000u32));
-            let op = if self.rng.random_bool(0.5) {
+            let k = format!("key{:08}", self.rng.random_range(..self.config.num_key));
+            let op = if self.rng.random_bool(self.config.get_ratio) {
                 KvOp::Get(k)
             } else {
                 let v = (&mut self.rng)
                     .sample_iter(Alphanumeric)
-                    .take(1 << 10)
+                    .take(self.config.value_size)
                     .map(char::from)
                     .collect();
                 KvOp::Put(k, v)
@@ -77,6 +87,22 @@ impl Ycsb {
                 let latency_record = (start, start.elapsed());
                 latency_records.lock().unwrap().push(latency_record)
             });
+        }
+    }
+}
+
+mod parse {
+    use crate::parse::{Configs, Extract};
+
+    use super::YcsbConfig;
+
+    impl Extract for YcsbConfig {
+        fn extract(configs: &Configs) -> anyhow::Result<Self> {
+            Ok(Self {
+                get_ratio: configs.get("ycsb.get-ratio")?,
+                num_key: configs.get("ycsb.num-key")?,
+                value_size: configs.get("ycsb.value-size")?,
+            })
         }
     }
 }

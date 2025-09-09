@@ -23,6 +23,10 @@ big.num-faulty-node 1
 big.num-active-copy 1
 big.num-stripe      10000
 big.bypass-vote     true
+
+ycsb.get-ratio      0.5
+ycsb.num-key        100000
+ycsb.value-size     1000
 ",
     );
     let temp_dir = tempdir()?;
@@ -41,6 +45,7 @@ big.bypass-vote     true
             db.clone(),
             configs.get_values("replica.addrs")?,
             replica_index,
+            configs.extract()?,
             (0..configs.get("big.num-node")?).collect(),
             configs.extract()?,
             [replica_index].into(),
