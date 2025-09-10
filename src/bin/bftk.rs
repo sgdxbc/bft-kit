@@ -1,10 +1,12 @@
 use std::{env::args, path::Path, sync::Arc, time::Duration};
 
 use bft_kit::{
+    app::storage_item,
     init_logging_file,
+    kv::ycsb::preload_iter,
     node::{ReplayFullNode, ReplayNode},
     parse::Configs,
-    storage::full,
+    storage::{full, preload},
     task::SegmentedTask,
 };
 use rand::{SeedableRng, rngs::StdRng};
@@ -29,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
 
     match (role.as_deref(), index) {
         (Some("replica"), Some(index)) => start_replica(index?, configs).await?,
-        (Some("preload"), Some(index)) => preload(index?, configs).await?,
+        (Some("preload"), Some(index)) => start_preload(index?, configs).await?,
         (role, index) => anyhow::bail!("unknown role: {role:?} index: {index:?}"),
     }
 
@@ -96,14 +98,15 @@ async fn start_replica(index: u16, configs: Configs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn preload(index: u16, configs: Configs) -> anyhow::Result<()> {
+async fn start_preload(index: u16, configs: Configs) -> anyhow::Result<()> {
     let _ = fs::remove_dir_all(PRELOAD_DIR).await;
     fs::create_dir(PRELOAD_DIR).await?;
     let db = DB::open_default(PRELOAD_DIR)?;
-    let rng = StdRng::seed_from_u64(117418);
+    let items = preload_iter(configs.extract()?, StdRng::seed_from_u64(117418))
+        .map(|(key, value)| storage_item(key, value));
     if configs.get("big.full-storage")? {
-        full::preload_ycsb(&db, configs.extract()?, rng)
+        full::preload(&db, items)
     } else {
-        todo!()
+        preload(&db, items, configs.extract()?, [index].into())
     }
 }

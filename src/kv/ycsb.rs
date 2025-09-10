@@ -96,6 +96,18 @@ impl Ycsb {
     }
 }
 
+pub fn preload_iter(config: YcsbConfig, mut rng: StdRng) -> impl Iterator<Item = (String, String)> {
+    (0..config.num_key).map(move |i| {
+        let k = format!("key{:08}", i);
+        let v = (&mut rng)
+            .sample_iter(Alphanumeric)
+            .take(config.value_size)
+            .map(char::from)
+            .collect();
+        (k, v)
+    })
+}
+
 mod parse {
     use crate::parse::{Configs, Extract};
 

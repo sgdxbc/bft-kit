@@ -1,17 +1,14 @@
 use std::sync::Arc;
 
-use rand::{Rng, rngs::StdRng};
-use rand_distr::Alphanumeric;
 use rocksdb::{DB, WriteBatch};
 use tokio::{
     spawn,
     sync::mpsc::Receiver,
     task::{JoinHandle, spawn_blocking},
 };
+use tokio_util::bytes::Bytes;
 
-use crate::{
-    crypto::DigestHash, kv::ycsb::YcsbConfig, storage::StorageKey, task::SegmentedTaskHandle,
-};
+use crate::{storage::StorageKey, task::SegmentedTaskHandle};
 
 use super::{StorageOp, StorageRes};
 
@@ -59,26 +56,20 @@ impl FullStorage {
     }
 }
 
-pub fn preload_ycsb(db: &DB, config: YcsbConfig, mut rng: StdRng) -> anyhow::Result<()> {
-    let mut batch = WriteBatch::new();
-    for i in 0..config.num_key {
-        if i % 10_000 == 0 {
-            db.write(batch)?;
-            batch = WriteBatch::new();
-            tracing::info!("Preloaded {i} keys")
+pub fn preload(
+    db: &DB,
+    mut items: impl Iterator<Item = anyhow::Result<(StorageKey, Bytes)>>,
+) -> anyhow::Result<()> {
+    loop {
+        let mut batch = WriteBatch::new();
+        for item in items.by_ref().take(10_000) {
+            let (key, value) = item?;
+            batch.put(key, value)
         }
-
-        let key = format!("key{:08}", i);
-        let value = (&mut rng)
-            .sample_iter(Alphanumeric)
-            .take(config.value_size)
-            .map(char::from)
-            .collect::<String>();
-
-        let storage_key = StorageKey::from(key.digest().0);
-        let value = bincode::encode_to_vec(&value, bincode::config::standard())?;
-        batch.put(storage_key, value);
+        if batch.is_empty() {
+            break;
+        }
+        db.write(batch)?
     }
-    db.write(batch)?;
     Ok(())
 }

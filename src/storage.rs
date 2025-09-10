@@ -8,7 +8,7 @@ use std::{
 use bincode::{Decode, Encode};
 use primitive_types::H256;
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng, seq::IteratorRandom as _};
-use rocksdb::DB;
+use rocksdb::{DB, WriteBatch};
 use tokio::{
     select, spawn,
     sync::{
@@ -58,6 +58,7 @@ pub struct ShardedStorageConfig {
     bypass_vote: bool,
 }
 
+#[allow(unused)]
 impl ShardedStorageConfig {
     // active tier
     fn num_active_group(&self) -> ActiveGroupIndex {
@@ -382,6 +383,32 @@ async fn put_versioned(
     Ok(())
 }
 
+pub fn preload(
+    db: &DB,
+    mut items: impl Iterator<Item = anyhow::Result<(StorageKey, Bytes)>>,
+    storage_config: ShardedStorageConfig,
+    node_indices: HashSet<NodeIndex>,
+) -> anyhow::Result<()> {
+    let _group_indices = storage_config
+        .groups_of_nodes(&node_indices)
+        .collect::<HashSet<_>>();
+    loop {
+        let mut batch = WriteBatch::new();
+        for item in items.by_ref().take(10_000) {
+            let (key, value) = item?;
+            batch.put(
+                format!("{:04x}/{key:x}.{:08x}", storage_config.stripe_of(&key), 0),
+                value,
+            )
+        }
+        if batch.is_empty() {
+            break;
+        }
+        db.write(batch)?
+    }
+    Ok(())
+}
+
 async fn delete_versioned(
     db: Arc<DB>,
     key: &StorageKey,
@@ -588,7 +615,7 @@ impl ArchiveWorker {
             return Ok(());
         }
 
-        tracing::debug!(?self.node_indices, "archive stripe {}", state.stripe_index);
+        tracing::info!(?self.node_indices, "archive stripe {}", state.stripe_index);
         let stripe_data = take(&mut state.stripe_data);
         // TODO
 

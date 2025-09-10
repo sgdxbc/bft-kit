@@ -6,7 +6,7 @@ use tokio::{spawn, sync::mpsc::channel, task::JoinHandle, try_join};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    app::AppRunner,
+    app::AppWorker,
     kv::{
         Kv,
         ycsb::{Ycsb, YcsbConfig},
@@ -47,7 +47,7 @@ impl ReplayFullNode {
 
         let workload = Ycsb::spawn(task_handle.clone(), ycsb_config, rng, tx_workload);
         let replay = Replay::<Kv>::spawn(task_handle.clone(), rx_workload, tx_request);
-        let app_runner = AppRunner::<Kv>::spawn(
+        let app_runner = AppWorker::<Kv>::spawn(
             task_handle.clone(),
             rx_request,
             tx_op,
@@ -123,7 +123,7 @@ impl ReplayNode {
 
         let workload = Ycsb::spawn(task_handle.clone(), ycsb_config, rng, tx_workload);
         let replay = Replay::<Kv>::spawn(task_handle.clone(), rx_workload, tx_request);
-        let app_runner = AppRunner::<Kv>::spawn(
+        let app_runner = AppWorker::<Kv>::spawn(
             task_handle.clone(),
             rx_request,
             tx_op,

@@ -34,7 +34,7 @@ pub trait AppTypeConfig: AppProtocolTypeConfig {
     type Value;
 }
 
-pub struct AppRunner<C: AppTypeConfig> {
+pub struct AppWorker<C: AppTypeConfig> {
     forward_count: usize,
     inserts: HashMap<StorageKey, Bytes>,
     deletes: Vec<StorageKey>,
@@ -45,7 +45,7 @@ pub struct AppRunner<C: AppTypeConfig> {
     tx_storage_op: Sender<StorageOp>,
 }
 
-impl<C: AppTypeConfig + 'static> AppRunner<C>
+impl<C: AppTypeConfig + 'static> AppWorker<C>
 where
     C::Op: Send + 'static + Decode<()>,
     C::Res: Send + 'static + Encode,
@@ -171,4 +171,14 @@ where
         }
         Ok(())
     }
+}
+
+pub fn storage_item(
+    key: impl DigestHash,
+    value: impl Encode,
+) -> anyhow::Result<(StorageKey, Bytes)> {
+    Ok((
+        key.digest().0.into(),
+        bincode::encode_to_vec(value, bincode::config::standard())?.into(),
+    ))
 }
