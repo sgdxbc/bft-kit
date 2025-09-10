@@ -5,7 +5,6 @@ use std::{
 };
 
 use bincode::{Decode, Encode};
-use primitive_types::H256;
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng, seq::IteratorRandom as _};
 use rocksdb::{DB, WriteBatch};
 use tokio::{
@@ -18,11 +17,12 @@ use tokio::{
 };
 use tokio_util::bytes::Bytes;
 
-use crate::{network::Dest, replica::ReplicaIndex, task::SegmentedTaskHandle};
+use crate::{crypto::Digest, network::Dest, replica::ReplicaIndex, task::SegmentedTaskHandle};
 
 pub mod full;
+pub mod trie;
 
-pub type StorageKey = H256;
+pub type StorageKey = Digest;
 pub type NodeIndex = u16;
 type StateVersion = u64;
 type ActiveGroupIndex = NodeIndex;
@@ -116,7 +116,9 @@ impl ShardedStorageConfig {
 
     fn stripe_of(&self, key: &StorageKey) -> StripeIndex {
         // assuming the keys are uniformly distributed, by hashing
-        (key.to_low_u64_le() % self.num_stripe as u64) as _
+        (u64::from_le_bytes([
+            key.0[0], key.0[1], key.0[2], key.0[3], key.0[4], key.0[5], key.0[6], key.0[7],
+        ]) % self.num_stripe as u64) as _
     }
 
     fn archive_nodes_of_stripe(&self, index: StripeIndex) -> impl Iterator<Item = NodeIndex> {
@@ -277,9 +279,10 @@ async fn db_get(
     config: &ShardedStorageConfig,
 ) -> anyhow::Result<Option<Bytes>> {
     let db_key = format!(
-        "/{:04x}/{:04x}/{key:x}",
+        "/{:04x}/{:04x}/{}",
         config.group_of(key),
-        config.stripe_of(key)
+        config.stripe_of(key),
+        key.to_hex()
     );
     let value = spawn_blocking(move || db.get(db_key)).await??;
     Ok(value.map(Into::into))
@@ -292,9 +295,10 @@ async fn db_put(
     config: &ShardedStorageConfig,
 ) -> anyhow::Result<()> {
     let db_key = format!(
-        "/{:04x}/{:04x}/{key:x}",
+        "/{:04x}/{:04x}/{}",
         config.group_of(key),
-        config.stripe_of(key)
+        config.stripe_of(key),
+        key.to_hex()
     );
     spawn_blocking(move || db.put(db_key, value)).await??;
     Ok(())
@@ -306,9 +310,10 @@ async fn db_delete(
     config: &ShardedStorageConfig,
 ) -> anyhow::Result<()> {
     let db_key = format!(
-        "/{:04x}/{:04x}/{key:x}",
+        "/{:04x}/{:04x}/{}",
         config.group_of(key),
-        config.stripe_of(key)
+        config.stripe_of(key),
+        key.to_hex()
     );
     spawn_blocking(move || db.delete(db_key)).await??;
     Ok(())
@@ -407,7 +412,12 @@ pub fn preload(
         for item in items.by_ref().take(10_000) {
             let (key, value) = item?;
             batch.put(
-                format!("{:04x}/{key:x}.{:08x}", storage_config.stripe_of(&key), 0),
+                format!(
+                    "{:04x}/{:04x}/{}",
+                    storage_config.stripe_of(&key),
+                    0,
+                    key.to_hex()
+                ),
                 value,
             )
         }

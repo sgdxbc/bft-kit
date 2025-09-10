@@ -142,17 +142,17 @@ where
         match op {
             StateOp::Put(key, value) => {
                 self.inserts.insert(
-                    key.digest().0.into(),
+                    key.digest(),
                     bincode::encode_to_vec(value, bincode::config::standard())?.into(),
                 );
             }
-            StateOp::Delete(key) => self.deletes.push(key.digest().0.into()),
+            StateOp::Delete(key) => self.deletes.push(key.digest()),
             // TODO concurrent get
             StateOp::Get(key, tx_value) => {
                 let (tx_bytes, rx_bytes) = oneshot::channel();
                 let _ = self
                     .tx_storage_op
-                    .send(StorageOp::Fetch(key.digest().0.into(), tx_bytes))
+                    .send(StorageOp::Fetch(key.digest(), tx_bytes))
                     .await;
                 match rx_bytes.await {
                     Ok(StorageRes::Ok(Some(bytes))) => {
@@ -178,7 +178,7 @@ pub fn storage_item(
     value: impl Encode,
 ) -> anyhow::Result<(StorageKey, Bytes)> {
     Ok((
-        key.digest().0.into(),
+        key.digest(),
         bincode::encode_to_vec(value, bincode::config::standard())?.into(),
     ))
 }

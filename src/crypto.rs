@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Display};
 
 use bincode::{BorrowDecode, Decode, Encode, error::DecodeError};
+use primitive_types::H256;
 use sha2::Digest as _;
 
 pub mod cert;
@@ -19,6 +20,16 @@ impl Display for Digest {
 impl Debug for Digest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self}")
+    }
+}
+
+impl Digest {
+    pub fn to_hex(&self) -> String {
+        H256::from(self.0).to_string()
+    }
+
+    pub fn from_hex(s: &str) -> anyhow::Result<Self> {
+        Ok(Digest(s.parse::<H256>()?.0))
     }
 }
 
