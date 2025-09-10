@@ -1,7 +1,6 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     iter::once,
-    mem::take,
     sync::Arc,
 };
 
@@ -12,11 +11,10 @@ use rocksdb::{DB, WriteBatch};
 use tokio::{
     select, spawn,
     sync::{
-        mpsc::{Receiver, Sender, channel},
-        oneshot, watch,
+        mpsc::{Receiver, Sender},
+        oneshot,
     },
     task::{JoinHandle, spawn_blocking},
-    try_join,
 };
 use tokio_util::bytes::Bytes;
 
@@ -147,19 +145,21 @@ impl ShardedStorageConfig {
 
 pub struct Storage {
     db: Arc<DB>,
+    network_dispatcher: NetworkDispatcher,
     config: ShardedStorageConfig,
 
     version: StateVersion,
-    node_archived_versions: Vec<StateVersion>, // indexed by node index
-    quorum_archived_version: StateVersion,
+    active_state: HashMap<StorageKey, Active>,
+    node_versions: Vec<StateVersion>,
+    quorum_bumped_version: StateVersion,
 
     rx_op: Receiver<StorageOp>,
     rx_message: Receiver<Message>,
-    rx_loopback_archived: Receiver<message::Archived>,
-    tx_archive_push: Sender<message::ArchivePush>,
-    tx_epoch_change: Sender<(StateVersion, oneshot::Sender<()>)>,
-    rx_entered: oneshot::Receiver<()>,
-    tx_collect: watch::Sender<StateVersion>,
+}
+
+struct Active {
+    version: StateVersion,
+    value: Option<Bytes>,
 }
 
 impl Storage {
@@ -201,42 +201,22 @@ impl Storage {
             node_table,
         };
 
-        let (tx_epoch_change, rx_epoch_change) = channel(1);
-        let (tx_entered, rx_entered) = oneshot::channel();
-        let _ = tx_epoch_change.try_send((0, tx_entered));
-        let (tx_archived, rx_archived) = channel(1);
-        let (tx_archive_push, rx_archive_push) = channel(100);
-        let (tx_collect, rx_collect) = watch::channel(0);
-
         let mut storage = Self {
             db: db.clone(),
+            network_dispatcher,
             config: config.clone(),
+
             version: 0,
-            node_archived_versions: vec![0; config.num_node as usize],
-            quorum_archived_version: 0,
+            active_state: Default::default(),
+            node_versions: vec![0; config.num_node as usize],
+            quorum_bumped_version: 0,
+
             rx_op,
-            tx_epoch_change,
-            rx_entered,
             rx_message,
-            tx_archive_push,
-            rx_loopback_archived: rx_archived,
-            tx_collect,
         };
         let storage = spawn(task_handle.clone().wrap(async move { storage.run().await }));
 
-        let archive_worker = ArchiveWorker::spawn(
-            task_handle.clone(),
-            db.clone(),
-            network_dispatcher,
-            config.clone(),
-            node_indices,
-            rx_epoch_change,
-            rx_archive_push,
-            tx_archived,
-        );
-        let collect_worker = CollectWorker::spawn(task_handle, db, config.num_stripe, rx_collect);
-
-        try_join!(storage, archive_worker, collect_worker)?;
+        storage.await?;
         Ok(())
     }
 
@@ -245,18 +225,14 @@ impl Storage {
             enum Event {
                 Op(StorageOp),
                 Message(Message),
-                EnteredEpoch,
             }
             match select! {
                 Some(op) = self.rx_op.recv() => Event::Op(op),
                 Some(msg) = self.rx_message.recv() => Event::Message(msg),
-                Some(archived) = self.rx_loopback_archived.recv() => Event::Message(Message::Archived(archived)),
-                Ok(()) = &mut self.rx_entered, if !self.rx_entered.is_terminated() => Event::EnteredEpoch,
                 else => break,
             } {
                 Event::Op(op) => self.handle_op(op).await?,
                 Event::Message(message) => self.handle_message(message).await?,
-                Event::EnteredEpoch => self.handle_entered_epoch().await?,
             }
         }
         while let Some(op) = self.rx_op.recv().await {
@@ -305,38 +281,7 @@ impl Storage {
     }
 
     async fn handle_message(&mut self, message: Message) -> anyhow::Result<()> {
-        match message {
-            Message::ArchivePush(push) => {
-                let _ = self.tx_archive_push.send(push).await;
-            }
-            Message::Archived(archived) => self.handle_archived(archived).await?,
-        }
-        Ok(())
-    }
-
-    async fn handle_entered_epoch(&mut self) -> anyhow::Result<()> {
-        if self.config.bypass_vote {
-            let (tx_entered, rx_entered) = oneshot::channel();
-            let _ = self.tx_epoch_change.send((self.version, tx_entered)).await;
-            self.rx_entered = rx_entered;
-            return Ok(());
-        }
-
-        todo!()
-    }
-
-    async fn handle_archived(&mut self, archived: message::Archived) -> anyhow::Result<()> {
-        for node_index in archived.node_indices {
-            self.node_archived_versions[node_index as usize] =
-                self.node_archived_versions[node_index as usize].max(archived.version)
-        }
-        let mut versions = self.node_archived_versions.clone();
-        versions.sort_unstable();
-        let quorum_archived_version = versions[self.config.num_faulty_node as usize];
-        if self.quorum_archived_version < quorum_archived_version {
-            self.quorum_archived_version = quorum_archived_version;
-            let _ = self.tx_collect.send(self.quorum_archived_version);
-        }
+        //
         Ok(())
     }
 }
@@ -383,32 +328,6 @@ async fn put_versioned(
     Ok(())
 }
 
-pub fn preload(
-    db: &DB,
-    mut items: impl Iterator<Item = anyhow::Result<(StorageKey, Bytes)>>,
-    storage_config: ShardedStorageConfig,
-    node_indices: HashSet<NodeIndex>,
-) -> anyhow::Result<()> {
-    let _group_indices = storage_config
-        .groups_of_nodes(&node_indices)
-        .collect::<HashSet<_>>();
-    loop {
-        let mut batch = WriteBatch::new();
-        for item in items.by_ref().take(10_000) {
-            let (key, value) = item?;
-            batch.put(
-                format!("{:04x}/{key:x}.{:08x}", storage_config.stripe_of(&key), 0),
-                value,
-            )
-        }
-        if batch.is_empty() {
-            break;
-        }
-        db.write(batch)?
-    }
-    Ok(())
-}
-
 async fn delete_versioned(
     db: Arc<DB>,
     key: &StorageKey,
@@ -420,348 +339,9 @@ async fn delete_versioned(
     Ok(())
 }
 
-struct ArchiveWorker {
-    db: Arc<DB>,
-    network_dispatcher: NetworkDispatcher,
-    config: ShardedStorageConfig,
-    node_indices: HashSet<NodeIndex>,
-    group_indices: HashSet<ActiveGroupIndex>,
-
-    epoch: u64,
-    state: Option<ArchivingState>,
-    reorder_archive_pushes: HashMap<(u64, StripeIndex), Vec<message::ArchivePush>>,
-
-    rx_epoch_change: Receiver<(StateVersion, oneshot::Sender<()>)>,
-    rx_archive_push: Receiver<message::ArchivePush>,
-    tx_archived: Sender<message::Archived>,
-}
-
-struct ArchivingState {
-    version: StateVersion,
-    stripe_index: StripeIndex,
-    stripe_data: HashMap<ActiveGroupIndex, BTreeMap<[u8; 32], Vec<u8>>>,
-    tx_entered: oneshot::Sender<()>,
-}
-
-impl ArchiveWorker {
-    fn spawn(
-        task: SegmentedTaskHandle,
-        db: Arc<DB>,
-        network_dispatcher: NetworkDispatcher,
-        config: ShardedStorageConfig,
-        node_indices: HashSet<NodeIndex>,
-        rx_epoch_change: Receiver<(StateVersion, oneshot::Sender<()>)>,
-        rx_archive_push: Receiver<message::ArchivePush>,
-        tx_archived: Sender<message::Archived>,
-    ) -> JoinHandle<()> {
-        let mut worker = Self {
-            db,
-            network_dispatcher,
-            group_indices: config.groups_of_nodes(&node_indices).collect(),
-            node_indices,
-            epoch: 0,
-            state: None,
-            reorder_archive_pushes: Default::default(),
-            config,
-            rx_epoch_change,
-            rx_archive_push,
-            tx_archived,
-        };
-        spawn(task.wrap(async move { worker.run().await }))
-    }
-
-    async fn run(&mut self) -> anyhow::Result<()> {
-        loop {
-            enum Event {
-                EpochChange((StateVersion, oneshot::Sender<()>)),
-                ArchivePush(message::ArchivePush),
-            }
-            match select! {
-                Some(epoch_change) = self.rx_epoch_change.recv() => Event::EpochChange(epoch_change),
-                Some(archive_push) = self.rx_archive_push.recv() => Event::ArchivePush(archive_push),
-                else => break,
-            } {
-                Event::EpochChange((version, tx_entered)) => {
-                    self.handle_epoch_change(version, tx_entered).await?
-                }
-                Event::ArchivePush(push) => self.handle_archive_push(push).await?,
-            }
-        }
-        while let Some((version, tx_entered)) = self.rx_epoch_change.recv().await {
-            self.handle_epoch_change(version, tx_entered).await?
-        }
-        Ok(())
-    }
-
-    async fn handle_epoch_change(
-        &mut self,
-        version: StateVersion,
-        tx_entered: oneshot::Sender<()>,
-    ) -> anyhow::Result<()> {
-        self.epoch += 1;
-        tracing::info!("entering epoch {} at version {version}", self.epoch);
-
-        let state = ArchivingState {
-            version,
-            stripe_index: 0,
-            stripe_data: Default::default(),
-            tx_entered,
-        };
-        let replaced = self.state.replace(state);
-        if replaced.is_some() {
-            tracing::warn!("previous archiving state was not completed")
-        }
-        if self.config.num_node == 1 {
-            self.complete_archive().await;
-            Ok(())
-        } else {
-            self.start_stripe().await
-        }
-    }
-
-    async fn start_stripe(&mut self) -> anyhow::Result<()> {
-        let Some(state) = &mut self.state else {
-            unimplemented!()
-        };
-        assert!(state.stripe_data.is_empty());
-        if state.stripe_index == self.config.num_stripe {
-            self.complete_archive().await;
-            return Ok(());
-        }
-
-        for &group_index in &self.group_indices {
-            state.stripe_data.insert(group_index, Default::default());
-        }
-        let local_data =
-            snapshot_versioned(self.db.clone(), state.stripe_index, state.version).await?;
-        for (key, value) in local_data {
-            let group_index = self.config.group_of(&key);
-            // temporary
-            if !self.group_indices.contains(&group_index) {
-                continue;
-            }
-            state
-                .stripe_data
-                .get_mut(&group_index)
-                .unwrap()
-                .insert(key.0, value);
-        }
-
-        for group_index in self.config.as_primary_in_groups(&self.node_indices) {
-            let data = state.stripe_data[&group_index].clone();
-            let archive_push = message::ArchivePush {
-                epoch: self.epoch,
-                stripe_index: state.stripe_index,
-                group_index,
-                data,
-            };
-            tracing::debug!(
-                "push archive stripe {} group {}",
-                state.stripe_index,
-                group_index
-            );
-            self.network_dispatcher
-                .send_to_all(Message::ArchivePush(archive_push))
-                .await
-        }
-
-        if let Some(archive_pushes) = self
-            .reorder_archive_pushes
-            .remove(&(self.epoch, state.stripe_index))
-        {
-            for push in archive_pushes {
-                self.handle_archive_push(push).await?
-            }
-        }
-
-        self.may_archive_stripe().await
-    }
-
-    async fn handle_archive_push(&mut self, push: message::ArchivePush) -> anyhow::Result<()> {
-        tracing::debug!(
-            "handling archive push epoch {} stripe {} group {}",
-            push.epoch,
-            push.stripe_index,
-            push.group_index
-        );
-        let Some(state) = &mut self.state else {
-            if push.epoch <= self.epoch {
-                tracing::warn!("ignoring stale archive push for epoch {}", push.epoch);
-            } else {
-                self.reorder_archive_pushes
-                    .entry((push.epoch, push.stripe_index))
-                    .or_default()
-                    .push(push)
-            }
-            return Ok(());
-        };
-        if self.epoch < push.epoch || state.stripe_index < push.stripe_index {
-            self.reorder_archive_pushes
-                .entry((push.epoch, push.stripe_index))
-                .or_default()
-                .push(push);
-            return Ok(());
-        }
-
-        state.stripe_data.insert(push.group_index, push.data);
-        self.may_archive_stripe().await
-    }
-
-    async fn may_archive_stripe(&mut self) -> anyhow::Result<()> {
-        let Some(state) = &mut self.state else {
-            unimplemented!()
-        };
-        if (state.stripe_data.len() as StripeIndex) < self.config.num_active_group() {
-            return Ok(());
-        }
-
-        tracing::info!(?self.node_indices, "archive stripe {}", state.stripe_index);
-        let stripe_data = take(&mut state.stripe_data);
-        // TODO
-
-        state.stripe_index += 1;
-        Box::pin(self.start_stripe()).await
-    }
-
-    async fn complete_archive(&mut self) {
-        let Some(state) = self.state.take() else {
-            unimplemented!()
-        };
-        let _ = state.tx_entered.send(());
-
-        let archived = message::Archived {
-            version: state.version,
-            node_indices: self.node_indices.clone(),
-        };
-        self.network_dispatcher
-            .send_to_all(Message::Archived(archived.clone()))
-            .await;
-        let _ = self.tx_archived.send(archived).await;
-    }
-}
-
-async fn snapshot_versioned(
-    db: Arc<DB>,
-    stripe_index: StripeIndex,
-    archive_version: StateVersion,
-) -> anyhow::Result<Vec<(H256, Vec<u8>)>> {
-    let prefix = format!("{stripe_index:04x}/");
-    let data = spawn_blocking(move || {
-        let mut data = Vec::new();
-        let mut iter = db.raw_iterator();
-        iter.seek(&prefix);
-        iter.status()?;
-        while let Some(key) = iter.key() {
-            let Some(postfix) = key.strip_prefix(prefix.as_bytes()) else {
-                break;
-            };
-            let mut split = str::from_utf8(postfix)?.split('.');
-            let (Some(storage_key), Some(version)) = (split.next(), split.next()) else {
-                anyhow::bail!("invalid key format {:?}", str::from_utf8(key))
-            };
-            let storage_key = storage_key.to_string();
-            if StateVersion::from_str_radix(version, 16)? <= archive_version {
-                iter.seek_for_prev(format!("{prefix}{storage_key}.{archive_version:08x}"));
-                iter.status()?;
-                let Some((found_key, value)) = iter.item() else {
-                    unimplemented!()
-                };
-                if !found_key.ends_with(b"+delete") {
-                    data.push((storage_key.parse()?, value.to_vec()))
-                }
-            }
-            iter.seek(format!("{prefix}{storage_key}.{:08x}", StateVersion::MAX))
-        }
-        anyhow::Ok(data)
-    })
-    .await??;
-    Ok(data)
-}
-
-struct CollectWorker {
-    db: Arc<DB>,
-    num_stripe: StripeIndex,
-
-    rx_collect: watch::Receiver<StateVersion>,
-}
-
-impl CollectWorker {
-    fn spawn(
-        task: SegmentedTaskHandle,
-        db: Arc<DB>,
-        num_stripe: StripeIndex,
-        rx_collect: watch::Receiver<StateVersion>,
-    ) -> JoinHandle<()> {
-        let mut worker = Self {
-            db,
-            num_stripe,
-            rx_collect,
-        };
-        spawn(task.wrap(async move { worker.run().await }))
-    }
-
-    async fn run(&mut self) -> anyhow::Result<()> {
-        while let Ok(()) = self.rx_collect.changed().await {
-            let version = *self.rx_collect.borrow_and_update();
-            tracing::info!("garbage collect up to version {version}",);
-            collect_versioned(self.db.clone(), version, self.num_stripe).await?
-        }
-        Ok(())
-    }
-}
-
-async fn collect_versioned(
-    db: Arc<DB>,
-    archived_version: StateVersion,
-    num_stripe: StripeIndex,
-) -> anyhow::Result<()> {
-    spawn_blocking(move || {
-        for stripe_index in 0..num_stripe {
-            let mut batch = rocksdb::WriteBatch::default();
-            let prefix = format!("{stripe_index:04x}/");
-            let mut iter = db.raw_iterator();
-            iter.seek(&prefix);
-            iter.status()?;
-
-            let mut prev = None;
-            while let Some((key, _value)) = iter.item() {
-                let Some(postfix) = key.strip_prefix(prefix.as_bytes()) else {
-                    break;
-                };
-                let mut split = str::from_utf8(postfix)?.split('.');
-                let (Some(storage_key), Some(version)) = (split.next(), split.next()) else {
-                    anyhow::bail!("invalid key format {:?}", str::from_utf8(key))
-                };
-                let version = StateVersion::from_str_radix(version, 16)?;
-                if let Some((prev_key, prev_storage_key)) = prev.take()
-                    && prev_storage_key == storage_key
-                    && version <= archived_version
-                {
-                    batch.delete(prev_key)
-                }
-                if version < archived_version {
-                    prev = Some((key.to_vec(), storage_key.to_string()));
-                    iter.next()
-                } else {
-                    iter.seek(format!("{prefix}{storage_key}.{:08x}", StateVersion::MAX))
-                }
-                iter.status()?
-            }
-            tracing::debug!("deleting {} entries", batch.len());
-            db.write(batch)?;
-        }
-
-        //
-        anyhow::Ok(())
-    })
-    .await??;
-    Ok(())
-}
-
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum Message {
     ArchivePush(message::ArchivePush),
-    Archived(message::Archived),
 }
 
 #[derive(Debug, Clone)]
@@ -836,4 +416,30 @@ mod parse {
             })
         }
     }
+}
+
+pub fn preload(
+    db: &DB,
+    mut items: impl Iterator<Item = anyhow::Result<(StorageKey, Bytes)>>,
+    storage_config: ShardedStorageConfig,
+    node_indices: HashSet<NodeIndex>,
+) -> anyhow::Result<()> {
+    let _group_indices = storage_config
+        .groups_of_nodes(&node_indices)
+        .collect::<HashSet<_>>();
+    loop {
+        let mut batch = WriteBatch::new();
+        for item in items.by_ref().take(10_000) {
+            let (key, value) = item?;
+            batch.put(
+                format!("{:04x}/{key:x}.{:08x}", storage_config.stripe_of(&key), 0),
+                value,
+            )
+        }
+        if batch.is_empty() {
+            break;
+        }
+        db.write(batch)?
+    }
+    Ok(())
 }
