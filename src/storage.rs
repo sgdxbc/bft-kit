@@ -244,35 +244,16 @@ impl Storage {
     async fn handle_op(&mut self, op: StorageOp) -> anyhow::Result<()> {
         match op {
             StorageOp::Fetch(key, tx_value) => {
-                let value = get_versioned(
-                    self.db.clone(),
-                    &key,
-                    self.version,
-                    self.config.stripe_of(&key),
-                )
-                .await?;
+                let value = db_get(self.db.clone(), &key, &self.config).await?;
                 let _ = tx_value.send(StorageRes::Ok(value));
             }
             StorageOp::Bump(bump, tx_ok) => {
                 self.version += 1;
                 for (key, value) in bump.inserts {
-                    put_versioned(
-                        self.db.clone(),
-                        &key,
-                        self.version,
-                        value,
-                        self.config.stripe_of(&key),
-                    )
-                    .await?
+                    db_put(self.db.clone(), &key, value, &self.config).await?
                 }
                 for key in bump.deletes {
-                    delete_versioned(
-                        self.db.clone(),
-                        &key,
-                        self.version,
-                        self.config.stripe_of(&key),
-                    )
-                    .await?
+                    db_delete(self.db.clone(), &key, &self.config).await?
                 }
                 let _ = tx_ok.send(StorageRes::Ok(()));
             }
@@ -290,52 +271,46 @@ impl Storage {
 // {stripe index:04x}/{key:x}.{version:08x}(+delete)
 // {stripe index:04x}:{version:08x}-{shard index:08x}
 
-async fn get_versioned(
+async fn db_get(
     db: Arc<DB>,
     key: &StorageKey,
-    version: StateVersion,
-    stripe_index: StripeIndex,
+    config: &ShardedStorageConfig,
 ) -> anyhow::Result<Option<Bytes>> {
-    let prefix = format!("{stripe_index:04x}/{key:x}");
-    let seek_key = format!("{prefix}.{version:08x}");
-    let value = spawn_blocking(move || {
-        let mut iter = db.raw_iterator();
-        iter.seek_for_prev(seek_key);
-        iter.status()?;
-        let value = if let Some((found_key, value)) = iter.item()
-            && let Some(postfix) = found_key.strip_prefix(prefix.as_bytes())
-            && !postfix.ends_with(b".delete")
-        {
-            Some(Bytes::copy_from_slice(value))
-        } else {
-            None
-        };
-        anyhow::Ok(value)
-    })
-    .await??;
-    Ok(value)
+    let db_key = format!(
+        "/{:04x}/{:04x}/{key:x}",
+        config.group_of(key),
+        config.stripe_of(key)
+    );
+    let value = spawn_blocking(move || db.get(db_key)).await??;
+    Ok(value.map(Into::into))
 }
 
-async fn put_versioned(
+async fn db_put(
     db: Arc<DB>,
     key: &StorageKey,
-    version: StateVersion,
     value: Bytes,
-    stripe_index: StripeIndex,
+    config: &ShardedStorageConfig,
 ) -> anyhow::Result<()> {
-    let key = format!("{stripe_index:04x}/{key:x}.{version:08x}");
-    spawn_blocking(move || db.put(key, value)).await??;
+    let db_key = format!(
+        "/{:04x}/{:04x}/{key:x}",
+        config.group_of(key),
+        config.stripe_of(key)
+    );
+    spawn_blocking(move || db.put(db_key, value)).await??;
     Ok(())
 }
 
-async fn delete_versioned(
+async fn db_delete(
     db: Arc<DB>,
     key: &StorageKey,
-    version: StateVersion,
-    stripe_index: StripeIndex,
+    config: &ShardedStorageConfig,
 ) -> anyhow::Result<()> {
-    let key = format!("{stripe_index:04x}/{key:x}.{version:08x}+delete");
-    spawn_blocking(move || db.put(key, b"")).await??;
+    let db_key = format!(
+        "/{:04x}/{:04x}/{key:x}",
+        config.group_of(key),
+        config.stripe_of(key)
+    );
+    spawn_blocking(move || db.delete(db_key)).await??;
     Ok(())
 }
 
