@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rocksdb::{DB, WriteBatch};
+use rocksdb::{DB, Options, WriteBatch};
 use tokio_util::bytes::Bytes;
 
 use crate::crypto::{Digest, DigestHash, UpdateHash};
@@ -147,6 +147,27 @@ pub enum Get {
 }
 
 impl StatefulTrie {
+    pub fn new(db: Arc<DB>, cf_name: impl ToString) -> Self {
+        Self {
+            db,
+            cf_name: cf_name.to_string(),
+        }
+    }
+
+    pub fn init(db: &mut DB, cf_name: impl ToString) -> anyhow::Result<()> {
+        db.create_cf(&cf_name.to_string(), &Options::default())?;
+        let Some(cf) = db.cf_handle(&cf_name.to_string()) else {
+            anyhow::bail!("column family {} not found", cf_name.to_string())
+        };
+        let node = ProofNode {
+            prefix: b"".to_vec(),
+            branch_digests: [(); 16].map(|()| None),
+        };
+        let data = bincode::encode_to_vec(node.branch_digests, bincode::config::standard())?;
+        db.put_cf(cf, node.prefix, data)?;
+        Ok(())
+    }
+
     pub fn get(&self, key: &StorageKey) -> anyhow::Result<Get> {
         let Some(cf) = self.db.cf_handle(&self.cf_name) else {
             anyhow::bail!("column family {} not found", self.cf_name)

@@ -25,7 +25,7 @@ impl Debug for Digest {
 
 impl Digest {
     pub fn to_hex(&self) -> String {
-        H256::from(self.0).to_string()
+        format!("{:x}", H256::from(self.0))
     }
 
     pub fn from_hex(s: &str) -> anyhow::Result<Self> {
